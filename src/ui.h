@@ -134,7 +134,7 @@ void page_item_create(Page *p);
 void page_query_create(Page *p);
 void page_grant_create(Page *p);
 void page_grant_setid(u32 id);          // 取码结果回填编号
-void page_grant_autoadd(const GrabHit *h);  // 连取命中：整行入队，同编号跳过
+void page_grant_autoadd(const GrabHit *h);  // 取码命中：整行入队，同编号跳过（手动/连取共用）
 void page_grant_syncauto(void);         // 复选框同步到 g.cfg.grab_auto（热键改开关后用）
 int  page_grant_built(void);            // 发放页是否已建：连取要有列表才收得下东西
 void page_mail_create(Page *p);

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """连取回归：开关链路 / 写盘 / 自动建发放页 / 无命中不入队 / 错误不刷屏 / 热键来回切，
-外加手动「取码」按钮：点了以后等悬停回来（5 秒窗口），不回退扫堆。
+外加手动「取码」按钮：点了以后等悬停回来（5 秒窗口），不回退扫堆，**采到即整行入队**。
 
 实机部分分两种跑法：
   1. 连取：脚本造不出「鼠标悬停在物品上」，要人在游戏里确认——
@@ -9,7 +9,8 @@
   2. 手动「取码」：把光标先放到游戏里某个物品上，记下屏幕坐标，然后
          python v_grabauto.py --hover 597,1074
      脚本会：把光标移回工具 → 点「取码」→ 半秒后把光标放回那个物品 →
-     断言等待窗口内采到（builtin）、编号框回填成刚采到的编号。
+     断言等待窗口内采到（builtin）、编号框回填、队列 +1 且日志有「入队 #id」；
+     再点一次同一件 → 采集仍成功但队列不增（去重）。
      不给 --hover 时只跑「没悬停」用例：点了 5 秒采不到、且不许扫堆填错编号。
 """
 import ctypes
@@ -152,6 +153,33 @@ def clear_hover(tag):
     return False
 
 
+def probe_slot():
+    """跑一次 --grab-probe 看悬停槽里现在有没有物品，返回 id（0 = 空槽）。
+    为什么要它：测试期间人可能就在游戏里操作，任何"这 5 秒一定没有悬停"的
+    假设都不成立；先探一下，有物品就把"无悬停"用例跳过，别把人的操作记成缺陷。"""
+    exe = os.path.join(BUILD, "DNF_GM.exe")
+    try:
+        subprocess.run([exe, "--grab-probe"], cwd=BUILD, timeout=60,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(os.path.join(BUILD, "config", "grab-probe.txt"),
+                  encoding="utf-8", errors="replace") as f:
+            m = re.search(r"命中: id=(\d+)", f.read())
+        return int(m.group(1)) if m else 0
+    except (OSError, subprocess.SubprocessError):
+        return None                                            # 探针不可用：不做判断
+
+
+def wait_box(h, expected, timeout=1.5):
+    """等编号框回填到 expected。取码结果先落到 g.grab，再由 tick 写进编辑框，
+    比日志晚一两个 tick；读早了会拿到上一件的编号。"""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if edit_text(h) == expected:
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def vk_of(name):
     if not name:
         return None
@@ -175,6 +203,48 @@ def tap(vk):
     time.sleep(0.1)
 
 
+k32 = ctypes.windll.kernel32
+u.GetForegroundWindow.restype = wt.HWND
+u.SetForegroundWindow.argtypes = [wt.HWND]
+u.GetShellWindow.restype = wt.HWND
+
+
+def _tid(h):
+    return u.GetWindowThreadProcessId(h, None)
+
+
+def force_foreground(h):
+    """把前台切到 h。最小化**不会**改变前台窗口——被最小化的窗口仍然可以是
+    前台窗口，这时程序按设计"自己在前面就不认这个键"，热键用例就会假失败。
+    SetForegroundWindow 受前台锁限制，先把输入挂到当前前台线程上再调。"""
+    fid = _tid(u.GetForegroundWindow())
+    sid = k32.GetCurrentThreadId()
+    try:
+        u.AttachThreadInput(sid, fid, True)
+    except Exception:
+        pass
+    try:
+        u.SetForegroundWindow(h)
+    finally:
+        u.AttachThreadInput(sid, fid, False)
+
+
+def hotkey_tap(main, vk, tag=""):
+    """最小化本窗口 → 把前台让给桌面 → 按热键 → 恢复。返回前台切换是否成功。"""
+    u.ShowWindow(main, 6)
+    time.sleep(0.5)
+    force_foreground(u.GetShellWindow())                       # 桌面：前台不是本工具，且按键无副作用
+    time.sleep(0.3)
+    ok = u.GetForegroundWindow() != main
+    tap(vk)
+    time.sleep(1.5)
+    u.ShowWindow(main, 9)
+    time.sleep(1.2)          # 恢复是异步的：不等等再取控件，句柄和矩形都不可靠
+    if not ok:
+        print("   !! 最小化后前台仍是本工具（%s），这次按键会被程序按设计忽略" % tag)
+    return ok
+
+
 AUTO0 = ini_get("auto") or "0"
 HOTKEY = ini_get("hotkey", "ui") or "Tab"
 print("初始：settings.ini [grab] auto=%s · 热键=%s" % (AUTO0, HOTKEY))
@@ -192,15 +262,11 @@ try:
     # 关键场景：发放页从未打开过。人在别的页按热键开连取，工具得自己把发放页建出来
     switch(main, 3)                                            # 先切到邮件页
     time.sleep(1.2)
-    u.ShowWindow(main, 6)                                      # 最小化：热键要求前台不是本工具
     vk = vk_of(HOTKEY)
     if not vk:
         print("!! 热键 %r 无法映射成虚拟键，跳过热键用例" % HOTKEY)
         sys.exit(1)
-    tap(vk)
-    time.sleep(1.5)
-    u.ShowWindow(main, 9)                                      # 恢复
-    time.sleep(1.2)          # 恢复是异步的：不等等再取控件，句柄和矩形都不可靠
+    hotkey_tap(main, vk, "用例 1")
 
     ga = ctl(main, G_GAUTO)
     g_grab = ctl(main, G_GRAB)
@@ -259,25 +325,36 @@ try:
     #    （老行为会在这里填个"全堆最高分"的错编号，比如悬停着银魂却填复活币）
     #    编号框可能早就被连取的头一回采集填过了，所以断言"没变化"而不是"为空"
     #    日志是 1 秒级的缓冲落盘，断言只认「取码」相关行，免得被别行的落盘时机绊倒
-    id_before = edit_text(g_id)
-    l0 = log_lines()
-    click(g_grab)
-    time.sleep(6.5)                                            # 等过 5s 等待窗口
-    n1 = u.SendMessageW(g_list, 0x1004, 0, 0)
-    new_lines = log_text().splitlines()[l0:]
-    grab_lines = [x for x in new_lines if "取码 #" in x or "scan" in x]
-    id_txt = edit_text(g_id)
-    ok_wait = (n1 == n0) and not grab_lines and id_txt == id_before
-    print("7) 无悬停点「取码」：等 5s · 队列 %d→%d · 新日志 %d 行 · 编号框 %r→%r" %
-          (n0, n1, len(new_lines), id_before, id_txt))
-    print("   OK: 没乱填新编号=%s 不扫堆=%s 队列不动=%s" % (
-        "OK" if id_txt == id_before else "FAIL",
-        "OK" if not grab_lines else "FAIL",
-        "OK" if n1 == n0 else "FAIL"))
+    slot = probe_slot()
+    if slot:
+        # 探到槽里有物品：人正在游戏里操作。这条用例的前提不成立，跳过而不是判错
+        print("7) 无悬停用例：跳过（悬停槽里有 id=%d，游戏正在被人操作）" % slot)
+        ok_wait = None
+    else:
+        id_before = edit_text(g_id)
+        l0 = log_lines()
+        click(g_grab)
+        time.sleep(6.5)                                        # 等过 5s 等待窗口
+        n1 = u.SendMessageW(g_list, 0x1004, 0, 0)
+        new_lines = log_text().splitlines()[l0:]
+        grab_lines = [x for x in new_lines if "取码 #" in x or "scan" in x]
+        id_txt = edit_text(g_id)
+        ok_wait = (n1 == n0) and not grab_lines and id_txt == id_before
+        print("7) 无悬停点「取码」：等 5s · 队列 %d→%d · 新日志 %d 行 · 编号框 %r→%r" %
+              (n0, n1, len(new_lines), id_before, id_txt))
+        print("   OK: 没乱填新编号=%s 不扫堆=%s 队列不动=%s" % (
+            "OK" if id_txt == id_before else "FAIL",
+            "OK" if not grab_lines else "FAIL",
+            "OK" if n1 == n0 else "FAIL"))
 
     # 8) 实机悬停（--hover X,Y）：点「取码」→ 把鼠标放回游戏物品 → 等待窗口内采到
+    #    采到就该整行入队（不是只填编号）
     ok_live = None
+    ok_add = None
+    ok_dup = None
     if HOVER:
+        nb = u.SendMessageW(g_list, 0x1004, 0, 0)              # 入队前队列长度
+        l1 = log_lines()
         click(g_grab)
         time.sleep(0.7)                                        # 等待窗口进行中
         u.SetCursorPos(HOVER[0], HOVER[1])                     # 鼠标放回游戏物品上
@@ -285,18 +362,63 @@ try:
         hit = []
         for _ in range(50):                                    # 最多再等 5s
             time.sleep(0.1)
-            new_lines = log_text().splitlines()[l0:]
+            new_lines = log_text().splitlines()[l1:]
             hit = [x for x in new_lines if "取码 #" in x]
             if hit:
                 m = re.search(r"取码 #(\d+) .*?· (builtin|scan) ·", hit[-1])
                 break
+        filled = bool(m) and wait_box(g_id, m.group(1))        # 编号框晚一两个 tick，等它
         txt = edit_text(g_id)
-        ok_live = bool(m) and m.group(2) == "builtin" and txt == m.group(1)
+        ok_live = bool(m) and m.group(2) == "builtin" and filled
         print("8) 实机悬停 %s：日志 %s · 编号框 %r" % (
             HOVER, hit[-1] if hit else "（无命中）", txt))
         print("   OK: 等待窗口内采到=%s 回填编号=%s" % (
             "OK" if (m and m.group(2) == "builtin") else "FAIL",
             "OK" if (m and txt == m.group(1)) else "FAIL"))
+
+        # 入队：跨进程读列表文字要往目标堆里写，危险（SB_GETTEXTW 那次教训），
+        # 所以只用行数 + 日志断言：日志里的「入队 #id」就是那一行的内容
+        time.sleep(0.6)                                        # 等 tick 把结果落进队列
+        na = u.SendMessageW(g_list, 0x1004, 0, 0)
+        all_lines = log_text().splitlines()
+        add_lines = [x for x in all_lines[l1:] if "入队 #" in x]
+        tag = "入队 #" + (m.group(1) + " " if m else "")
+        added_now = any(tag in x for x in add_lines)
+        # 这件可能在本会话早先就入过队（比如连取开着的时候被悬停采到）：
+        # 那种情况这次"跳过"才是对的，不能按"队列没加"判失败
+        already = any(tag in x for x in all_lines[:l1])
+        ok_add = bool(m) and ((na == nb + 1 and added_now) or
+                              (na == nb and not added_now and already))
+        print("9) 采到即入队：队列 %d→%d · 新增入队行 %d · 早先已有=%s" %
+              (nb, na, len(add_lines), already))
+        print("   OK: 入队=%s（%s）" % (
+            "OK" if ok_add else "FAIL",
+            "本次新增一行" if added_now else ("本来就已入队，跳过正确" if already else "既没入队也没记录")))
+
+        # 10) 同一件再采一次：必须跳过（队列不增），但采集本身仍要成功
+        l2 = log_lines()
+        click(g_grab)
+        time.sleep(0.7)
+        u.SetCursorPos(HOVER[0], HOVER[1])
+        again = None
+        for _ in range(50):
+            time.sleep(0.1)
+            ls = [x for x in log_text().splitlines()[l2:] if "取码 #" in x]
+            if ls:
+                mm = re.search(r"取码 #(\d+) ", ls[-1])
+                again = mm.group(1) if mm else ""
+                break
+        time.sleep(0.6)
+        nd = u.SendMessageW(g_list, 0x1004, 0, 0)
+        dup_add = [x for x in log_text().splitlines()[l2:] if "入队 #" in x]
+        if again is not None and m and again != m.group(1):
+            print("10) 同编号再采：跳过（第二次采到的是 #%s，环境变了）" % again)
+            ok_dup = None
+        else:
+            ok_dup = bool(again) and nd == na and not dup_add
+            print("10) 同编号再采：再采成功=%s · 队列 %d→%d · 新增入队行 %d" %
+                  (bool(again), na, nd, len(dup_add)))
+            print("   OK: 去重=%s" % ("OK" if (nd == na and not dup_add) else "FAIL"))
     else:
         print("8) 实机悬停用例：跳过（要跑加 --hover X,Y，X,Y 是游戏里某物品的屏幕坐标）")
 
@@ -309,20 +431,13 @@ try:
         time.sleep(0.8)
 
     # 热键来回切。每次按之前先最小化：程序要求前台不是它自己才认这个键
-    def tap_hot(main, vk):
-        u.ShowWindow(main, 6)
-        time.sleep(0.4)
-        tap(vk)
-        u.ShowWindow(main, 9)
-        time.sleep(1.2)
-
     # 日志按新增行看：前面按钮用例也开关过连取，整份日志里早就有关闭记录
     l_hot = log_lines()
-    tap_hot(main, vk)
+    hotkey_tap(main, vk, "用例 5")
     off_ini = ini_get("auto") == "0"
     off_chk = not checked(ga)
     off_lg = any("连取：已关闭" in x for x in log_text().splitlines()[l_hot:])
-    tap_hot(main, vk)
+    hotkey_tap(main, vk, "用例 6")
     on_ini = ini_get("auto") == "1"
     on_chk = checked(ga)
     print("5) 热键再按（关）: ini=%s 勾选=%s 日志=%s" % (off_ini, off_chk, off_lg))
@@ -332,13 +447,15 @@ try:
         "OK" if (on_ini and on_chk) else "FAIL"))
 
     checks = [ok_built, ok_ini, ok_chk, ok_lg,
-              ok_order, ok_quiet, ok_wait,
+              ok_order, ok_quiet,
               off_ini and off_chk and off_lg, on_ini and on_chk]
-    if ok_live is not None:
-        checks.append(ok_live)
+    # None = 环境不满足、用例跳过（不算通过也不算失败）
+    for extra in (ok_wait, ok_live, ok_add, ok_dup):
+        if extra is not None:
+            checks.append(extra)
     print("\n结果：%s（%d/%d）" % ("通过" if all(checks) else "失败",
                                  sum(1 for c in checks if c), len(checks)))
-    print("待人工确认（连取，游戏里悬停物品）：入队带名字、同编号跳过、换物品再加行")
+    print("待人工确认（连取，游戏里连续悬停多件）：每件都入队带名字、同编号跳过、换物品再加行")
     if not HOVER:
         print("手动「取码」的实机命中用例：python %s --hover X,Y" %
               os.path.basename(__file__))

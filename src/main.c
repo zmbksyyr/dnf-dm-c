@@ -480,9 +480,10 @@ static void tick(void) {
     }
     if (g.grab_ver != s_grab_ver) {
         s_grab_ver = g.grab_ver;
-        page_grant_setid(g.grab.id);   // 取码结果直接落到发放页的编号框
-        // 连取开着：不只是填编号，整行入队（同编号在里面就跳过）
-        if (g.cfg.grab_auto) page_grant_autoadd(&g.grab);
+        page_grant_setid(g.grab.id);   // 取码结果落到发放页的编号框（看得见的回声）
+        // 采到就整行入队，手动「取码」和连取一个待遇：用户要的是"采到就进清单"，
+        // 不是只留个编号还得再点一次「加入队列」。同编号已在队列里就跳过（去重）。
+        page_grant_autoadd(&g.grab);
     }
     card_refresh();
     status_refresh();
