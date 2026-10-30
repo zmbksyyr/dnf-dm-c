@@ -348,7 +348,7 @@ static void grab_poll(void) {
         HWND fg = GetForegroundWindow();
         // 本工具在前台时不抢键，免得影响页签切换
         // 热键就是连取的总开关：坐在游戏里也能开能停，不用切回工具。
-        // 单次取码的能力还在发放页「取码」按钮上（那条路会走扫堆回退）
+        // 单次取码在发放页「取码」按钮上：点一下再等悬停回来（grab_hit_wait）
         // 复选框的同步不在这里做：见 tick() 里每 tick 的幂等刷新
         if (fg && fg != g_main) app_grab_auto(!g.cfg.grab_auto);
     }

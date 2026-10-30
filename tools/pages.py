@@ -17,6 +17,15 @@ u.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
 u.PostMessageW.restype = wt.BOOL
 u.GetDlgItem.argtypes = [wt.HWND, ctypes.c_int]
 u.GetDlgItem.restype = wt.HWND
+u.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+u.IsWindowVisible.argtypes = [wt.HWND]
+u.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+# 不设这两个的 argtypes，HWND 会被当 32 位 int 传，句柄一大点就发丢
+u.EnumWindows.argtypes = [ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p),
+                          ctypes.c_void_p]
+u.EnumChildWindows.argtypes = [wt.HWND,
+                               ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p),
+                               ctypes.c_void_p]
 g.CreateCompatibleDC.restype = wt.HDC
 g.CreateCompatibleDC.argtypes = [wt.HDC]
 g.CreateCompatibleBitmap.restype = wt.HBITMAP
@@ -103,21 +112,45 @@ def db():
                            charset="utf8mb4", autocommit=True)
 
 
-def wait_main(timeout=20.0):
+def wait_main(proc=None, timeout=20.0):
     """等主窗口出现。FindWindow 拿到 0 时如果接着发 SendMessage，
-    HWND=0 是广播，会等到所有顶层窗口都应答——启动稍慢就会卡死几分钟。"""
+    HWND=0 是广播，会等到所有顶层窗口都应答——启动稍慢就会卡死几分钟。
+    另外桌面上可能同时开着另一个实例（用户自己跑的正式版），类名一样，
+    FindWindow 按 Z 序取第一个——拿到别人的窗口，脚本操作的、最小化的、
+    按热键的就全是人家的界面。所以传 proc 进来：只认自己启动的这个进程。"""
     t0 = time.time()
+    want = proc.pid if proc else None
     while time.time() - t0 < timeout:
-        h = u.FindWindowW("DnfGmMain", None)
-        if h:
-            return h
+        found = []
+        cb = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        def each(h, lp):
+            if not u.IsWindowVisible(h):
+                return True
+            cls = ctypes.create_unicode_buffer(64)
+            u.GetClassNameW(h, cls, 64)
+            if cls.value != "DnfGmMain":
+                return True
+            if want is None:
+                found.append(h)
+                return False
+            wpid = wt.DWORD(0)
+            u.GetWindowThreadProcessId(h, ctypes.byref(wpid))
+            if wpid.value == want:
+                found.append(h)
+                return False
+            return True
+
+        u.EnumWindows(cb(each), 0)
+        if found:
+            return found[0]
         time.sleep(0.2)
     raise RuntimeError("主窗口没出现，检查程序是否启动失败")
 
 
 if __name__ == "__main__":
     p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-    main = wait_main()
+    main = wait_main(p)
     u.SendMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)
     time.sleep(4.0)
     combo = u.GetDlgItem(main, 108)

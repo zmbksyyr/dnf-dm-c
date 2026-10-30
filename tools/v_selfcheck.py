@@ -12,7 +12,7 @@ try:
     print("已临时改名 letter → letter_selfcheck_bak")
 
     p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-    main = wait_main()
+    main = wait_main(p)
     u.PostMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)
     time.sleep(5.0)
     p.kill()

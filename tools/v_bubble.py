@@ -99,7 +99,7 @@ try:
     print("已把 m_id=%d 置为在线（测完改回）" % M_ID)
 
     p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-    main = wait_main()
+    main = wait_main(p)
     u.SendMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)     # 连接
     time.sleep(4.5)
     click(u.GetDlgItem(main, 113), 40, 12)                     # 选中第一个角色

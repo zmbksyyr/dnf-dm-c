@@ -1137,7 +1137,9 @@ static void grant_build(Page *p, HWND parent) {
     // 按钮名短，含义挂在悬浮提示上
     ui_tip(parent, GetDlgItem(parent, G_ADD),
            "把表单里的物品作为新的一项追加到队列；点了某行之后改表单会自动写回该行，点此按钮则把当前表单当新项入队");
-    ui_tip(parent, GetDlgItem(parent, G_GRAB), "读游戏内存里鼠标悬停的物品编号，填到上面的「编号」框");
+    ui_tip(parent, GetDlgItem(parent, G_GRAB),
+           "点一下，然后把鼠标移回游戏、悬停到目标物品上（5 秒内自动采到），编号填到上方「编号」框；"
+           "开着「连取」更省事：悬停即采、自动整行入队去重");
     ui_tip(parent, g_gauto,
            "开启后持续读取游戏里鼠标悬停的物品，每取到一件就整行追加到队列；队列里已有的编号自动跳过。"
            "开着工具才算，关掉不补。热键可以随时开关");

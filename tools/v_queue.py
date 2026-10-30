@@ -64,7 +64,7 @@ e0 = cur.fetchone()[0]
 print("原值 money=%s coin=%s cera=%s lev=%s" % (m0, c0, ce0[0], a0))
 
 p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main()
+main = wait_main(p)
 u.PostMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)
 time.sleep(4.5)
 click(u.GetDlgItem(main, 113), 40, 12)

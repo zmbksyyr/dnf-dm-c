@@ -130,7 +130,7 @@ void app_reload_later(void);       // 任务线程里用：让下一次 app_tick
 int  app_sync_char(void);          // 写后校验：库里真值与缓存一致返回 1（界面无需动作）
 void app_row_sync(void);           // 把 g.cur 的名字/等级/职业写回左栏那一行
 void app_load_pvf(const char *path);
-void app_grab_once(void);          // 后台取码一次，完成后 g.grab_ver 自增
+void app_grab_once(void);          // 后台取码一次（等悬停回来，最多 5s），完成后 g.grab_ver 自增
 void app_grab_fast_once(void);     // 连取节奏用：只走特征码快路径，不回退扫堆
 void app_grab_auto(int on);        // 连取总开关（复选框与热键共用，改完即写 settings.ini）
 

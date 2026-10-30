@@ -65,7 +65,7 @@ def inside(r, x, y):
 
 
 p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main()
+main = wait_main(p)
 u.PostMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)   # 连接
 time.sleep(4.0)
 # 页号可传参：python v_tab.py 2 = 发放页；不传默认 GM 页

@@ -36,7 +36,7 @@ def kids(hwnd):
 
 if __name__ == "__main__":
     p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-    main = wait_main()
+    main = wait_main(p)
     u.SendMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)
     time.sleep(4.0)
     combo = u.GetDlgItem(main, 108)

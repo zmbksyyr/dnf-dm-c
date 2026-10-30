@@ -510,26 +510,40 @@ void app_load_pvf(const char *path) {
 }
 
 // ---------------- 取码 ----------------
-// 作业上下文：fast=1 时只走特征码快路径（连取用），0 时允许扫堆回退（手动按钮用）。
+// 作业上下文：wait_ms>0 = 手动「取码」（等悬停回来，见 grab_hit_wait）；
+// 0 = 连取的快速轮次（只试一次特征码，没悬停就静默跳过）。
 // 用 static 单例而不是栈上变量：job_start 只存指针，作业跑完才读它。
-typedef struct { int fast; } GrabCtx;
+#define GRAB_WAIT_MS 5000        // 点「取码」后等用户把鼠标放回游戏的时长
+typedef struct { int wait_ms; } GrabCtx;
 static GrabCtx s_grab_ctx;
+static int s_grab_pending;       // 连取轮次占着作业线程时点了「取码」：补发
 
 static int w_grab(void *ctx, Err err) {
     GrabCtx *c = (GrabCtx *)ctx;
-    return c && c->fast ? grab_hit_fast(&g.grab, err) : grab_hit(&g.grab, err);
+    return c && c->wait_ms > 0 ? grab_hit_wait(&g.grab, c->wait_ms, err)
+                               : grab_hit_fast(&g.grab, err);
 }
 
 void app_grab_once(void) {
-    if (job_running(&g.job_grab)) return;
-    app_status("取码中…（只读扫描，稍等）");
-    s_grab_ctx.fast = 0;
+    if (job_running(&g.job_grab)) {
+        // 正在等悬停（用户又点了一次）：等的就是这件事，不用再排
+        if (s_grab_ctx.wait_ms > 0) return;
+        // 被连取的快轮次占着（每 250ms 一次，单次十几毫秒）：记下来，
+        // 作业一空就补发——点了没反应比慢半秒更难琢磨
+        s_grab_pending = 1;
+        app_status("取码：把鼠标放回游戏，悬停到目标物品上（%d 秒内）…", GRAB_WAIT_MS / 1000);
+        return;
+    }
+    // 点击会把鼠标带离游戏，悬停槽当场失效——所以这里不是"采一次"而是"等一会儿"：
+    // 用户把鼠标放回游戏里的物品上，最多 5 秒内自动采到，编号落到发放页。
+    app_status("取码：把鼠标放回游戏，悬停到目标物品上（%d 秒内）…", GRAB_WAIT_MS / 1000);
+    s_grab_ctx.wait_ms = GRAB_WAIT_MS;
     job_start(&g.job_grab, w_grab, &s_grab_ctx);
 }
 
 void app_grab_fast_once(void) {
     if (job_running(&g.job_grab)) return;
-    s_grab_ctx.fast = 1;
+    s_grab_ctx.wait_ms = 0;
     job_start(&g.job_grab, w_grab, &s_grab_ctx);
 }
 
@@ -1168,6 +1182,11 @@ void app_tick(void) {
                        (unsigned)g.grab.ms);
             app_log("取码 #%u %s · %s · 候选 %u · %ums", g.grab.id, g.grab.name, g.grab.strategy,
                     g.grab.cands, (unsigned)g.grab.ms);
+        }
+        // 刚才那一下「取码」被连取轮次挤掉了：作业刚空出来，补发
+        if (s_grab_pending) {
+            s_grab_pending = 0;
+            app_grab_once();
         }
     }
     // 轮询：单条查询同时取角色列表/在线/当前角色，每 poll_sec 一次；

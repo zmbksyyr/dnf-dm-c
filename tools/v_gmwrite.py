@@ -54,7 +54,7 @@ def logtail(n=20):
 
 
 p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main()
+main = wait_main(p)
 u.SendMessageW(u.GetDlgItem(main, 104), BM_CLICK, 0, 0)
 time.sleep(4.5)
 lv = u.GetDlgItem(main, 113)

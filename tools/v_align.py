@@ -32,7 +32,7 @@ def dpi_scale():
     return d / 96.0
 
 p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main()
+main = wait_main(p)
 u.PostMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)
 time.sleep(4.0)
 

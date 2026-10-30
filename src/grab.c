@@ -3,9 +3,11 @@
 // 思路：
 //   1. CreateToolhelp32Snapshot 按进程名找 PID 与主模块；
 //   2. 复刻参考工具：AOB 动态定位悬停对象指针槽，读取 id / 名称 / 品质（builtin）；
-//   3. 内置方案失效时，退回 61 字节物品结构扫描（scan）；
+//   3. 鼠标不在物品上时悬停槽是空的（点按钮就会这样）：等悬停回来再采（wait）；
 //   4. 名称优先用 PVF，PVF 不认识时保留内存中的 UTF-16 名称。
 // 全程只用 ReadProcessMemory / VirtualQueryEx，不写、不注入、不挂钩。
+// 扫堆（scan）只留在 --grab-probe 诊断里：它分不清谁被悬停，取的是全堆最高分，
+// 当成"取码"的结果用只会填错编号。
 #include "grab.h"
 #include "item.h"
 #include <windows.h>
@@ -282,38 +284,58 @@ static int cursor_window(u32 pid, char *cls, int cap, int *x, int *y) {
 }
 
 // ---------------------------------------------------------------- 主流程
+// 打开目标进程、取主模块。hp 由调用方 CloseHandle。
+static int open_target(u32 *pid, HANDLE *hp, u64 *base, u32 *size, char *mod, Err err) {
+    *pid = find_pid();
+    if (!*pid) {
+        snprintf(err, ERRBUF, "没找到进程 %s（请先启动游戏）", g_proc);
+        return 0;
+    }
+    *hp = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, *pid);
+    if (!*hp) *hp = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, *pid);
+    if (!*hp) {
+        snprintf(err, ERRBUF, "打开进程失败（错误码 %lu），请以管理员身份运行", GetLastError());
+        return 0;
+    }
+    *size = 0;
+    *base = module_base(*pid, mod, 128, size);
+    return 1;
+}
+
+// 命中后的收尾：名称优先 PVF，PVF 不认识时保留内存里读到的
+static void grab_finish(GrabHit *out, DWORD t0) {
+    if (g_namer) {
+        char nm[96] = "";
+        const char *n = g_namer(out->id, nm, sizeof(nm));
+        if (n && n[0] && n[0] != '#') snprintf(out->name, sizeof(out->name), "%s", n);
+    }
+    if (!out->name[0]) snprintf(out->name, sizeof(out->name), "#%u", out->id);
+    out->ms = GetTickCount() - t0;
+}
+
 static int grab_hit_ex(GrabHit *out, int allow_scan, Err err) {
     memset(out, 0, sizeof(*out));
     g_last_n = 0;
     DWORD t0 = GetTickCount();
 
-    u32 pid = find_pid();
-    if (!pid) {
-        snprintf(err, ERRBUF, "没找到进程 %s（请先启动游戏）", g_proc);
-        return 0;
-    }
+    u32 pid;
+    HANDLE hp;
+    u64 base;
+    u32 size;
+    char mod[128] = "";
+    if (!open_target(&pid, &hp, &base, &size, mod, err)) return 0;
     out->pid = pid;
 
-    HANDLE hp = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
-    if (!hp) hp = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!hp) {
-        snprintf(err, ERRBUF, "打开进程失败（错误码 %lu），请以管理员身份运行", GetLastError());
-        return 0;
-    }
-
-    char mod[128] = "";
-    u32 mod_size = 0;
-    u64 base = module_base(pid, mod, sizeof(mod), &mod_size);
-
     // 1) builtin：参考工具的 AOB 动态定位，正常端无需任何配置
-    if (base && mod_size && builtin_read(hp, pid, base, mod_size, out)) goto done;
+    if (base && size && builtin_read(hp, pid, base, size, out)) goto done;
 
     // 2) 记录鼠标所在窗口（只认属于目标进程的窗口），仅用于诊断显示
     cursor_window(pid, out->wnd, sizeof(out->wnd), &out->x, &out->y);
 
-    // 3) 自适应回退：扫堆。连取模式（allow_scan=0）跳过这条路——它单次最多读
-    //    256MB 堆内存，按 250ms 一轮的节奏会把 CPU 吃满；builtin 失效时连取
-    //    就静默停在这里，用一次手动「取码」来触发完整回退即可。
+    // 3) 自适应回退：扫堆。只有诊断（--grab-probe）还走这条路——它分不清
+    //    谁被悬停，取的是全堆最高分，当结果用只会填错编号。手动「取码」
+    //    和连取都不扫堆：前者改成等悬停回来（见 grab_hit_wait），后者
+    //    单次最多读 256MB，按 250ms 一轮的节奏会把 CPU 吃满。
     if (allow_scan) {
         Cand cs[MAX_CAND];
         int n = 0;
@@ -369,19 +391,57 @@ done:
         out->ms = GetTickCount() - t0;
         return 0;
     }
-    if (g_namer) {
-        char nm[96] = "";
-        const char *n = g_namer(out->id, nm, sizeof(nm));
-        // PVF 真名优先；未加载或查不到时保留 builtin 从内存读到的名称。
-        if (n && n[0] && n[0] != '#') snprintf(out->name, sizeof(out->name), "%s", n);
-    }
-    if (!out->name[0]) snprintf(out->name, sizeof(out->name), "#%u", out->id);
-    out->ms = GetTickCount() - t0;
+    grab_finish(out, t0);
     return 1;
 }
 
 int grab_hit(GrabHit *out, Err err)      { return grab_hit_ex(out, 1, err); }
 int grab_hit_fast(GrabHit *out, Err err) { return grab_hit_ex(out, 0, err); }
+
+// 等悬停版：特征码立即试一次，之后按 80ms 的节奏重试，最多等 ms 毫秒。
+// 手动「取码」按钮专用——按按钮这个动作本身就会把鼠标带离游戏，而游戏一发现
+// 鼠标不在物品上就会清空悬停槽（实测：点按钮的瞬间 builtin 就失效了，扫堆
+// 回退捡到的是全堆最高分的一件，不是悬停的那件）。所以这里不是"采一次"而是
+// "等一会儿"：用户把鼠标放回游戏里的物品上，最多 ms 毫秒内自动采到。
+// 这条路不回退扫堆，理由同 grab_hit_ex 的注释 3。
+int grab_hit_wait(GrabHit *out, int ms, Err err) {
+    memset(out, 0, sizeof(*out));
+    g_last_n = 0;
+    DWORD t0 = GetTickCount();
+
+    u32 pid;
+    HANDLE hp;
+    u64 base;
+    u32 size;
+    char mod[128] = "";
+    if (!open_target(&pid, &hp, &base, &size, mod, err)) return 0;
+    out->pid = pid;
+
+    // 特征码都没命中：这个端的悬停槽根本不存在，等下去也不会有结果
+    if (!base || !size || !builtin_locate(hp, pid, base, size)) {
+        snprintf(err, ERRBUF, "该游戏端没有命中悬停定位特征码，「取码」不可用（--grab-probe 可看诊断）");
+        CloseHandle(hp);
+        out->ms = GetTickCount() - t0;
+        return 0;
+    }
+
+    DWORD deadline = t0 + (DWORD)ms;
+    for (;;) {
+        if (builtin_read(hp, pid, base, size, out)) {
+            CloseHandle(hp);
+            grab_finish(out, t0);
+            return 1;
+        }
+        if (GetTickCount() >= deadline) break;
+        Sleep(80);                  // 悬停槽的变化以百毫秒计，80ms 足够跟上
+    }
+    CloseHandle(hp);
+    snprintf(err, ERRBUF,
+             "%d 秒内没在游戏里悬停到物品：把鼠标放回游戏内的目标物品上再采，或开「连取」悬停即采",
+             ms / 1000);
+    out->ms = GetTickCount() - t0;
+    return 0;
+}
 
 // ---------------------------------------------------------------- 诊断
 void grab_probe(Str *out) {

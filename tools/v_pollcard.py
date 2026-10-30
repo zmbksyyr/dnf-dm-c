@@ -72,7 +72,7 @@ lev0 = int(cur.fetchone()[0])
 print("db lev =", lev0)
 
 p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main()
+main = wait_main(p)
 u.PostMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)     # 连接
 time.sleep(4.5)
 lv = u.GetDlgItem(main, 113)                             # 左栏角色列表
