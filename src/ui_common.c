@@ -168,12 +168,6 @@ HWND ui_edit(HWND parent, const char *text, int id, int ro) {
     return ui_make(parent, L"EDIT", w, st, 0, id);
 }
 
-HWND ui_pwd(HWND parent, const char *text, int id) {
-    WCHAR w[256];
-    utf16(text, w, COUNT_OF(w));
-    return ui_make(parent, L"EDIT", w, WS_BORDER | ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP, 0, id);
-}
-
 HWND ui_button(HWND parent, const char *text, int id) {
     WCHAR w[256];
     utf16(text, w, COUNT_OF(w));

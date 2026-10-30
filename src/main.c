@@ -617,7 +617,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             g_luser = ui_label(h, "用户", 0);
             g_user = ui_edit(h, g.cfg.user, IDC_USER, 0);
             g_lpwd = ui_label(h, "密码", 0);
-            g_pwd = ui_pwd(h, g.cfg.pwd, IDC_PWD);
+            // 密码明文显示：这是本机连库用的口令，藏成圆点反而看不见、改不动也核对不了
+            g_pwd = ui_edit(h, g.cfg.pwd, IDC_PWD, 0);
             g_conn = ui_button(h, "连接", IDC_CONN);
             g_disc = ui_button(h, "断开", IDC_DISC);
 

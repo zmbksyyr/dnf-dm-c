@@ -63,7 +63,6 @@ HWND ui_label(HWND parent, const char *text, int id);
 HWND ui_label_r(HWND parent, const char *text, int id);   // 右对齐
 HWND ui_label_b(HWND parent, const char *text, int id);
 HWND ui_edit(HWND parent, const char *text, int id, int ro);
-HWND ui_pwd(HWND parent, const char *text, int id);
 HWND ui_button(HWND parent, const char *text, int id);
 HWND ui_check(HWND parent, const char *text, int id, int on);
 HWND ui_combo(HWND parent, int id, int droplist);
