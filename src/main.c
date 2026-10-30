@@ -14,6 +14,26 @@ static HWND g_conn, g_disc;
 static HWND g_lkw, g_kw, g_kwgo, g_kwclr, g_chlist, g_chinfo, g_online;
 static HWND g_lpvf, g_pvf, g_pvfbtn;
 
+// 地址预设：Python 版 GM 工具 config.json 里的 saved_servers / 默认 DB_IP。
+// 本机自架的服最常见，127.0.0.1 排第一；其余是人家现成配过的机器。
+// 框是可编辑的下拉，不在预设里直接敲也行，敲过的照样存进 settings.ini。
+static const char *const kHostList[] = {"127.0.0.1", "192.168.200.131", "test"};
+
+// 把配置里的地址放回下拉框：命中预设就选中，不命中就当成手填的文本。
+// 切回来时要能看出"现在连的是哪台"，而不是永远停在第一个预设上。
+static void host_sync(void) {
+    if (!g_host || !g.cfg.host[0]) return;
+    WCHAR w[256];
+    utf16(g.cfg.host, w, COUNT_OF(w));
+    int idx = (int)SendMessageW(g_host, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)w);
+    if (idx >= 0) {
+        ui_combo_set(g_host, idx);
+        return;
+    }
+    SendMessageW(g_host, CB_INSERTSTRING, 0, (LPARAM)w);
+    ui_combo_set(g_host, 0);
+}
+
 // ---- 角色卡 ----
 enum { CARD_N = 13 };
 static const char *kCardKey[CARD_N] = {"名称", "等级", "职业",   "状态",   "金币",     "点券", "复活币",
@@ -451,11 +471,13 @@ static void tick(void) {
         s_chars_ver = g.chars_ver;
         chars_fill();
     }
-    int ready = (g.db_ok ? 1 : 0) | (g.char_ok ? 2 : 0);
+    int ready = (g.db_ok ? 1 : 0) | (g.char_ok ? 2 : 0) | (g.cur.online ? 4 : 0);
     if (ready != s_ready) {
         s_ready = ready;
         buttons_refresh();
         chars_fill();
+        // 在线状态也进 ready：GM 页的表单在线时要置灰并把条件写进组框标题，
+        // 不重新 lock 一次，上下线切换界面不会跟着变
         ui_pages_lock();
     }
     if (g.sel != s_sel) {
@@ -610,7 +632,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             SendMessageW(g_status, SB_SETBKCOLOR, 0, (LPARAM)ui_bg_color());
 
             g_lhost = ui_label(h, "地址", 0);
-            g_host = ui_edit(h, g.cfg.host, IDC_HOST, 0);
+            // 下拉但可编辑：预设够用时点一下就走，不在预设里就自己敲。
+            // 预设取自 Python 版 GM 工具（config.json 的 saved_servers 与默认 DB_IP），
+            // 本机自架的服最常见，所以 127.0.0.1 放在第一项。
+            g_host = ui_combo(h, IDC_HOST, 0);
+            ui_combo_fill(g_host, kHostList, COUNT_OF(kHostList), 0);
+            host_sync();
             g_lport = ui_label(h, "端口", 0);
             g_port = ui_edit(h, "", IDC_PORT, 0);
             ui_set_int(g_port, g.cfg.port);

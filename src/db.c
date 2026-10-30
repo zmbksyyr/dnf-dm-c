@@ -890,11 +890,18 @@ int db_set_coin(Db *d, const Charac *c, u64 coin, Err err) {
 }
 
 int db_set_account_money(Db *d, const Charac *c, u64 money, Err err) {
-    // 这条最容易踩空：不少服的 account_cargo 是空表，UPDATE 影响 0 行，
-    // 以前一律报成功，界面上就是"改了又弹回去"。db_exec 会把这种情况说清楚。
-    return db_exec(d, "改账号金库", "taiwan_cain.account_cargo", "m_id", c->mid, err,
-                   "UPDATE taiwan_cain.account_cargo SET money=%llu WHERE m_id=%u",
-                   (unsigned long long)money, c->mid);
+    // 账号金库是懒建的：玩家没在游戏里打开过账号金库，account_cargo 里就没有这行，
+    // 光 UPDATE 影响 0 行 —— 写过就弹回去，界面上永远显示 0。这里改成有行则改、
+    // 无行则建（cargo/容量留默认，只写钱）。
+    Str s = {0};
+    str_catf(&s,
+             "INSERT INTO taiwan_cain.account_cargo (m_id,money,occ_time) "
+             "VALUES (%u,%llu,NOW()) ON DUPLICATE KEY UPDATE money=VALUES(money),occ_time=NOW()",
+             c->mid, (unsigned long long)money);
+    int ok = run(d, &s);
+    str_free(&s);
+    if (!ok) snprintf(err, ERRBUF, "改账号金库：%s", d->err);
+    return ok;
 }
 
 // 点券分两张表存，必须同生同死：扣了没加比不扣更糟
@@ -954,9 +961,17 @@ int db_set_sp(Db *d, const Charac *c, int sp, int sp2, int tp, int tp2, Err err)
 }
 
 int db_set_qp(Db *d, const Charac *c, int qp, Err err) {
-    return db_exec(d, "改 QP", "taiwan_cain.charac_quest_shop", "charac_no", c->no, err,
-                   "UPDATE taiwan_cain.charac_quest_shop SET qp=%d WHERE charac_no=%u",
-                   qp, c->no);
+    // 同账号金库：charac_quest_shop 也是懒建的（角色没碰过 QP 商店就没有这行），
+    // 只 UPDATE 会 0 行。改成有行则改、无行则建，其余加成列走表默认值 0。
+    Str s = {0};
+    str_catf(&s,
+             "INSERT INTO taiwan_cain.charac_quest_shop (charac_no,qp) VALUES (%u,%d) "
+             "ON DUPLICATE KEY UPDATE qp=VALUES(qp)",
+             c->no, qp);
+    int ok = run(d, &s);
+    str_free(&s);
+    if (!ok) snprintf(err, ERRBUF, "改 QP：%s", d->err);
+    return ok;
 }
 
 int db_set_pvp(Db *d, const Charac *c, int grade, int win, int point, Err err) {

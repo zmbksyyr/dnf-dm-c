@@ -561,8 +561,10 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     if (id == G_UNLCREATE) {
         if (!need_char()) return 0;
         if (!app_confirm(fmt_new("解除账号 mid=%u 的建角次数限制？", g.cur.mid))) return 0;
+        memset(&kc, 0, sizeof(kc));
         kc.kind = K_UNLCREATE;
         kc.mid = g.cur.mid;
+        kc.cno = g.cur.no;
         app_act("解除建角限制", char_work, &kc);
         return 0;
     }
@@ -574,6 +576,12 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (!need_char()) return 0;
+    // kc 是全局 Ctx，跨动作复用：不先清零，上一次动作留下的 i1/i2/s 会跟着跑；
+    // 更糟的是 cno/mid 从没人填过 —— 一键按钮全在写 charac_no=0，0 行影响被
+    // 判成失败，界面上就是"点了没反应/报错"。归属一律在这里定，和 gm_push 对齐。
+    memset(&kc, 0, sizeof(kc));
+    kc.cno = g.cur.no;
+    kc.mid = g.cur.mid;
     switch (id) {
         case G_SP: kc.kind = K_SP; kc.i1 = 90000; kc.i2 = 90000; break;
         case G_QP: kc.kind = K_QP; kc.i1 = 90000; break;
@@ -783,8 +791,30 @@ static void gm_lock(Page *p) {
     int on = g.char_ok;
     int ids[16] = {G_NAME, G_LEV, G_JOB, G_GROW, G_MONEY, G_COIN, G_CERA, G_POINT, G_ACCM,
                    G_GRADE, G_WIN, G_PVP_POINT};
-    for (int i = 0; i < 12; i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
+    // 表单是失焦即写，而角色在线时写完会被服务端回写覆盖（程序会拒绝提交）。
+    // 与其让人改半天发现没生效，不如在线时把这些框置灰，并把条件写在组框标题上——
+    // 灰掉的控件收不到悬停，提示只能写在旁边的文字里。一键按钮不受此限（它们直接改库）。
+    int edit = g.char_ok && !g.cur.online;
+    for (int i = 0; i < 12; i++) ui_enable(GetDlgItem(p->wnd, ids[i]), edit);
     for (int i = 0; i < 10; i++) ui_enable(GetDlgItem(p->wnd, G_SP + i), on);
+    static int s_edit = -1;
+    if (edit != s_edit) {
+        s_edit = edit;
+        struct { int id; const char *base; } bx[3] = {
+            {G_BOX_ROLE, "角色"}, {G_BOX_ASSET, "资产"}, {G_BOX_PVP, "PVP"},
+        };
+        for (int i = 0; i < 3; i++) {
+            HWND h = GetDlgItem(p->wnd, bx[i].id);
+            // 没选角色时不加任何后缀：那时候这些框是"还没东西可改"，不是"在线不能改"
+            char *t = (!g.char_ok) ? fmt_new("%s", bx[i].base)
+                      : edit       ? fmt_new("%s", bx[i].base)
+                                   : fmt_new("%s（角色在线，退出游戏才能改）", bx[i].base);
+            WCHAR w[96];
+            utf16(t, w, COUNT_OF(w));
+            if (h) SetWindowTextW(h, w);
+            free(t);
+        }
+    }
     ui_enable(GetDlgItem(p->wnd, G_UNLCREATE), g.db_ok && g.char_ok);
     ui_enable(GetDlgItem(p->wnd, G_DUMP), g.db_ok);
     ui_enable(GetDlgItem(p->wnd, G_RESTORE), g.db_ok);
@@ -846,13 +876,18 @@ static void gm_build(Page *p, HWND parent) {
     ui_tip(parent, GetDlgItem(parent, G_SCANBAD),
            "扫描全服所有角色的背包/穿戴/宠物栏/仓库/珠宝/账号金库/邮件/时装/宠物，"
            "列出错误物品并一键清除（容器写前自动备份）");
-    // 字段都靠「点到别处」落库，给几个容易误改的框补一句说明
-    ui_tip(parent, c_name, "改完点到别处即写入库；重名会退回原值");
-    ui_tip(parent, c_lev, "1~100；改完点到别处即写入库，经验按 PVF 表同步");
-    ui_tip(parent, c_money, "改完点到别处即写入库");
-    ui_tip(parent, c_coin, "改完点到别处即写入库");
-    ui_tip(parent, c_accm, "账号级金币，同账号所有角色共用；改完点到别处即写入库");
-    ui_tip(parent, c_cera, "点券和赠送点券一起提交（同一条 UPDATE）");
+    // 字段都靠「点到别处」落库。最重要的一条写在最前面：角色在线时服务端会在
+    // 登出/存档时把库里的值覆盖回去（工具这边看着是写成功了，进游戏又变回原样）。
+    // 在线判定本身在有些端上不可靠（login_status 常为 0、member_play_info 无行），
+    // 所以这里不只靠置灰，把条件直接写出来。
+    ui_tip(parent, c_name, "改完点到别处即写入库；重名会退回原值。角色在线时改会被服务端存档覆盖——要改先退出游戏");
+    ui_tip(parent, c_lev, "1~100；改完点到别处即写入库，经验按 PVF 表同步。角色在线时改了会被服务端覆盖");
+    ui_tip(parent, c_money, "改完点到别处即写入库。角色在线时改了会被服务端存档覆盖");
+    ui_tip(parent, c_coin, "改完点到别处即写入库。角色在线时改了会被服务端存档覆盖");
+    ui_tip(parent, c_accm,
+           "账号级金币，同账号所有角色共用；改完点到别处即写入库。"
+           "账号金库记录不存在时会自动建一条（容量/物品为空）");
+    ui_tip(parent, c_cera, "点券和赠送点券一起提交（同一条 UPDATE）。角色在线时改了会被服务端覆盖");
 
     // 泡点组：全服设置，跟选中哪个角色无关。开关 → 间隔/点数 → 应用，
     // 创建顺序就是 Tab 顺序，所以按这个次序建。
