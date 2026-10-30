@@ -1,4 +1,6 @@
 # 编译产物
+# tools/build.bat 默认把产物放到项目目录之外（..\_build\DNF_GM_C），
+# 下面这几条只是兜底：万一有人在树内手动编译，也不会把 exe 提交上来。
 DNF_GM.exe
 build/
 *.o
@@ -10,8 +12,10 @@ build/
 # 运行数据（程序自己生成，唯一允许写入的位置）
 config/
 
-# 开发机私有：验证脚本与临时产物，不进仓库
-tools/
+# Python 缓存与截图
+__pycache__/
+*.pyc
+tools/out/
 
 # 临时
 *.tmp
