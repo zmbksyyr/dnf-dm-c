@@ -1,5 +1,6 @@
 // app 实现：配置、异步任务、连接/角色/数据/保存。
 #include "app.h"
+#include "act.h"       // act_apply_lists（列表暂存搬入）
 
 App g;
 
@@ -224,7 +225,12 @@ static int db_busy(void) {
 
 void job_stop(Job *j) {
     if (j->th) {
-        WaitForSingleObject(j->th, 30000);
+        if (WaitForSingleObject(j->th, 30000) != WAIT_OBJECT_0) {
+            // 超时：线程还在跑，不能关句柄（线程退出时句柄才可关）。
+            // 标记 abandoned 并记日志，泄漏一个句柄但状态机不会假空闲。
+            app_log("任务线程 30 秒未退出，放弃等待（句柄保留）");
+            return;                       // 保留 j->th 和 state，等下次 job_poll 收
+        }
         CloseHandle(j->th);
         j->th = NULL;
     }
@@ -546,7 +552,6 @@ void app_grab_auto(int on) {
 
 // ---------------- 角色 ----------------
 static int s_load_want;        // 想载入但连接正忙：等空闲了再发
-static int s_reload_later;     // 任务线程要求重读（写失败回滚），由 app_tick 代劳
 
 // 载入写进 g_load_ctx.d 而不是直接写 g.data：
 // db_load_data 第一件事就是 db_free_data(out)，也就是先 free 掉 6 个 blob 再重填。
@@ -600,7 +605,8 @@ void app_reload(void) {
 }
 
 // 任务线程不能直接开作业（job_start 要跟 UI 线程抢同一份状态机），只留个请求
-void app_reload_later(void) { s_reload_later = 1; }
+static volatile LONG s_reload_later;
+void app_reload_later(void) { InterlockedExchange(&s_reload_later, 1); }
 
 // ---------------- 写后校验 ----------------
 // 写库之后把真值读回来，跟内存里的快照比一次（两条小查询，只在真写库后跑一次）：
@@ -647,6 +653,13 @@ void app_row_sync(void) {
     g.chars_ver++;                     // 左栏列表重排：只此一条，代价最小
 }
 
+// 写后校验的结果暂存：job 线程只写这里，UI 线程在 job_poll 后搬到 g.*
+// （job 线程直接写 g.cur/g.data/g.chars 与 UI 线程的绘制/遍历是 use-after-free 竞态）
+static Charac          s_sync_c;
+static CharData        s_sync_d;
+static int             s_sync_same;
+static volatile LONG   s_sync_want;
+
 int app_sync_char(void) {
     if (!g.db_ok || !g.char_ok) return 0;
     Err err = {0};
@@ -664,20 +677,30 @@ int app_sync_char(void) {
     }
     c.online = g.cur.online;               // 在线状态归轮询管，别被这次快照覆盖回去
 
-    if (same_char(&old_c, &c) && same_form(&old_d, &d) && same_rest(&old_d, &d)) {
+    // 结果暂存，由 UI 线程在 job_poll 后应用
+    s_sync_same = same_char(&old_c, &c) && same_form(&old_d, &d) && same_rest(&old_d, &d);
+    s_sync_c = c;
+    s_sync_d = d;    // 标量换成真值；blob 指针没变（d 本来就是 g.data 的浅拷贝）
+    InterlockedExchange(&s_sync_want, 1);
+    return s_sync_same;
+}
+
+// UI 线程调用：把写后校验的结果搬到 g.*（在 app_tick 的 job_poll 之后）
+void app_sync_apply(void) {
+    if (!InterlockedExchange(&s_sync_want, 0)) return;
+    if (s_sync_same) {
         app_row_sync();                    // 写入跟预期一致：界面一个字都不用动
-        return 1;
+        return;
     }
     // 库里的值跟内存里的不一样：以库为准
-    int form_changed = !same_char(&old_c, &c) || !same_form(&old_d, &d);
-    g.cur = c;
-    g.data = d;    // 标量换成真值；blob 指针没变（d 本来就是 g.data 的浅拷贝）
+    int form_changed = !same_char(&g.cur, &s_sync_c) || !same_form(&g.data, &s_sync_d);
+    g.cur = s_sync_c;
+    g.data = s_sync_d;
     if (form_changed) {
         g.data_ver++;                      // 快照换代 → 表单重填一次
         app_log("写后校验：库里的值跟写入的不一致，已按库里的值刷新");
     }
     app_row_sync();
-    return 0;
 }
 
 void app_save_draft(void) {
@@ -788,6 +811,11 @@ static GrantCtx g_grant_ctx;
 
 static int w_grant(void *ctx, Err err) {
     GrantCtx *c = (GrantCtx *)ctx;
+    // 硬校验：UI 线程的在线位是缓存，可能过期；发放前在 job 线程里查一次真值
+    if (!c->by_mail && db_is_online(&g.db, g.cur.mid)) {
+        snprintf(err, ERRBUF, "角色在线，请改用「邮件」发放");
+        return 0;
+    }
     if (c->by_mail) {
         for (int i = 0; i < s_grant_snap_n; i++) {
             NamedId *n = &s_grant_snap[i];
@@ -809,12 +837,17 @@ static int w_grant(void *ctx, Err err) {
     }
     Blob *b = &g.data.inv;
     if (!b->ok) { snprintf(err, ERRBUF, "背包未载入"); return 0; }
+    // 在本地副本上改，不碰 g.data.inv.items——UI 线程可能正在绘制背包格子。
+    // 成功后 app_tick 会 app_reload 整体刷新
+    Item *local = (Item *)xalloc(sizeof(Item) * (size_t)b->n);
+    memcpy(local, b->items, sizeof(Item) * (size_t)b->n);
+    int ok = 0;
     for (int i = 0; i < s_grant_snap_n; i++) {
         NamedId *n = &s_grant_snap[i];
         int slot = -1;
         for (int k = 0; k < b->n; k++)
-            if (item_empty(&b->items[k])) { slot = k; break; }
-        if (slot < 0) { snprintf(err, ERRBUF, "背包已满"); return 0; }
+            if (item_empty(&local[k])) { slot = k; break; }
+        if (slot < 0) { snprintf(err, ERRBUF, "背包已满"); goto done; }
         Item it;
         memset(&it, 0, sizeof(it));
         item_set_type(&it, n->type ? n->type : IT_STACK);
@@ -827,12 +860,18 @@ static int w_grant(void *ctx, Err err) {
         item_set_inc_type(&it, n->inc_type);
         item_set_inc_value(&it, n->inc_val);
         item_set_durability(&it, n->dur);
-        b->items[slot] = it;
+        local[slot] = it;
     }
-    Buf packed = {0};
-    if (!blob_pack(b, &packed)) { buf_free(&packed); snprintf(err, ERRBUF, "打包失败"); return 0; }
-    int ok = db_save_blob(&g.db, &g.cur, "taiwan_cain_2nd.inventory", "inventory", packed.p, packed.n, err);
-    buf_free(&packed);
+    {
+        Blob tmp = *b;
+        tmp.items = local;
+        Buf packed = {0};
+        if (!blob_pack(&tmp, &packed)) { buf_free(&packed); snprintf(err, ERRBUF, "打包失败"); goto done; }
+        ok = db_save_blob(&g.db, &g.cur, "taiwan_cain_2nd.inventory", "inventory", packed.p, packed.n, err);
+        buf_free(&packed);
+    }
+done:
+    free(local);
     return ok;
 }
 
@@ -843,11 +882,15 @@ int app_grant_send(int by_mail) {
         app_info(fmt_new("队列超过 %d 项，请分批发放", GRANT_SNAP_MAX));
         return 0;
     }
-    if (job_running(&g.job_act)) {
+    // 排队中也算"在进行"——否则第二次点击会覆盖 s_grant_snap，
+    // 先排队的那次发的是后一次的物品清单（发错物品）
+    if (!app_act_idle()) {
         app_info("上一个操作还在进行，等它完成再发");
         return 0;
     }
-    if (!by_mail && db_is_online(&g.db, g.cur.mid)) {
+    // 用轮询缓存的在线位，不碰连接——UI 线程直接走 g.db 会和后台作业包交错。
+    // 硬校验在 w_grant 里（job 线程内）补一道
+    if (!by_mail && g.cur.online) {
         app_info("角色在线，请改用「邮件」发放。");
         return 0;
     }
@@ -938,6 +981,7 @@ void app_init(void) {
     vec_init(&g.bans, sizeof(BanRow));
     vec_init(&g.events, sizeof(EventRow));
     vec_init(&g.event_info, sizeof(EventInfo));
+    act_init();                              // 列表暂存 Vec（act.c 内部）
     vec_init(&s_poll, sizeof(Charac));
 
     cfg_load(&g.cfg, g.cfg_path);
@@ -967,6 +1011,7 @@ void app_shutdown(void) {
     pvf_close(&g.pvf);
     db_free_data(&g.data);
     db_free_data(&g_load_ctx.d);
+    act_free();                              // 列表暂存 Vec
     if (g.db_ok) db_close(&g.db);
     if (s_log_cs_ok) { DeleteCriticalSection(&s_log_cs); s_log_cs_ok = 0; }
 }
@@ -1093,6 +1138,8 @@ void app_tick(void) {
     }
 
     if (job_poll(&g.job_act, err)) {
+        app_sync_apply();                    // 写后校验的结果搬到 g.*（job 线程只暂存）
+        act_apply_lists();                   // 列表暂存搬到 g.bans/g.events/g.event_info
         int was_write = g.write_mask != 0;
         if (err[0]) {
             app_status("%s 失败：%s", g.act_what, err);
@@ -1118,8 +1165,7 @@ void app_tick(void) {
     }
 
     // 写失败的回滚请求：重读当前角色，把乐观更新改过的内存恢复成库里的值
-    if (s_reload_later) {
-        s_reload_later = 0;
+    if (InterlockedExchange(&s_reload_later, 0)) {
         app_reload();
     }
 

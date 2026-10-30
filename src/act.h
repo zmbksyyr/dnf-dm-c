@@ -27,3 +27,6 @@ typedef struct {
 extern Ctx kc;
 
 int char_work(void *ctx, Err err);
+void act_init(void);             // 初始化列表暂存 Vec（app_init 调一次）
+void act_free(void);             // 释放列表暂存 Vec（app_shutdown 调一次）
+void act_apply_lists(void);   // UI 线程：把暂存列表搬到 g.*（job_poll 后调）

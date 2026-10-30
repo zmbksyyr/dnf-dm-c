@@ -44,22 +44,27 @@ static Cand g_last[MAX_CAND];
 static int  g_last_n;
 
 int grab_last_cands(GrabCand *out, int max) {
-    int n = g_last_n < max ? g_last_n : max;
+    // 先拷快照再排序——连取作业可能正在写 g_last，就地排序会跟它交错
+    Cand snap[MAX_CAND];
+    int n = g_last_n;
+    if (n > MAX_CAND) n = MAX_CAND;
+    memcpy(snap, g_last, sizeof(Cand) * (size_t)n);
     // 按分数降序冒泡（最多 64 个，够用）
-    for (int i = 0; i < g_last_n; i++)
-        for (int j = i + 1; j < g_last_n; j++)
-            if (g_last[j].score > g_last[i].score) {
-                Cand t = g_last[i];
-                g_last[i] = g_last[j];
-                g_last[j] = t;
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++)
+            if (snap[j].score > snap[i].score) {
+                Cand t = snap[i];
+                snap[i] = snap[j];
+                snap[j] = t;
             }
-    for (int i = 0; i < n; i++) {
-        out[i].id = g_last[i].id;
-        out[i].addr = g_last[i].addr;
-        out[i].score = g_last[i].score;
-        out[i].type = g_last[i].type;
+    int r = n < max ? n : max;
+    for (int i = 0; i < r; i++) {
+        out[i].id = snap[i].id;
+        out[i].addr = snap[i].addr;
+        out[i].score = snap[i].score;
+        out[i].type = snap[i].type;
     }
-    return n;
+    return r;
 }
 
 void grab_bind(const char *proc, GrabNameFn namer) {
@@ -398,6 +403,110 @@ int grab_hit(GrabHit *out, Err err)      { return grab_hit_ex(out, 1, err); }
 int grab_hit_fast(GrabHit *out, Err err) { return grab_hit_ex(out, 0, err); }
 
 // ---------------------------------------------------------------- 诊断
+// 各段拆子函数：grab_probe 本体超 50 行惯例，且段表/窗口/扫描三段互相独立
+
+static void probe_builtin(Str *out, HANDLE hp, u32 pid, u64 base, u32 mod_size) {
+    str_catf(out, "\n-- 内置基址（物品代码获取器 1.3）--\n");
+    str_catf(out, "  AOB: 8B F8 8B 4F 04 8B 47 08 2B C1 C1 F8 02 33 F6 85 C0\n");
+    if (builtin_locate(hp, pid, base, mod_size)) {
+        u32 obj = 0, id = 0;
+        read_mem(hp, g_builtin_slot, &obj, sizeof(obj));
+        if (obj) read_mem(hp, (u64)obj + 0x1C, &id, sizeof(id));
+        str_catf(out, "  命中 0x%llX · 指针槽 0x%llX · 对象 0x%X · id=%u\n",
+                 (unsigned long long)g_builtin_match, (unsigned long long)g_builtin_slot, obj, id);
+        str_catf(out, "  字段: id +0x1C · 名称指针 +0x20 · 品质 +0xF4\n");
+    } else {
+        str_catf(out, "  当前主模块没有命中特征码，将回退到堆扫描\n");
+    }
+}
+
+static void probe_segments(Str *out, HANDLE hp) {
+    str_catf(out, "\n-- 内存段（前 24 个可读段）--\n");
+    u64 addr = 0, total = 0;
+    int shown = 0;
+    while (addr < 0x00007FFFFFFF0000ull) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQueryEx(hp, (LPCVOID)(uintptr_t)addr, &mbi, sizeof(mbi))) break;
+        u64 reg = (u64)(uintptr_t)mbi.BaseAddress, sz = (u64)mbi.RegionSize;
+        if (mbi.State == MEM_COMMIT) {
+            total += sz;
+            if (shown < 24) {
+                str_catf(out, "  0x%012llX  %8llu KB  prot=0x%lX type=%s\n",
+                         (unsigned long long)reg, (unsigned long long)(sz / 1024),
+                         (unsigned long)mbi.Protect,
+                         mbi.Type == MEM_PRIVATE ? "private" : (mbi.Type == MEM_IMAGE ? "image" : "mapped"));
+                shown++;
+            }
+        }
+        u64 next = reg + sz;
+        if (next <= addr) break;
+        addr = next;
+    }
+    str_catf(out, "  已提交合计: %llu MB\n", (unsigned long long)(total / (1024 * 1024)));
+}
+
+static void probe_windows(Str *out, u32 pid) {
+    str_catf(out, "\n-- 目标进程窗口 --\n");
+    HWND h = GetTopWindow(NULL);
+    int cnt = 0;
+    while (h && cnt < 200) {
+        DWORD wpid = 0;
+        GetWindowThreadProcessId(h, &wpid);
+        if (wpid == pid) {
+            WCHAR cw[128] = L"", tw[128] = L"";
+            GetClassNameW(h, cw, 128);
+            GetWindowTextW(h, tw, 128);
+            RECT r;
+            GetWindowRect(h, &r);
+            char c8[128], t8[128];
+            utf8(cw, c8, sizeof(c8));
+            utf8(tw, t8, sizeof(t8));
+            str_catf(out, "  %-24s \"%s\"  (%d,%d)-(%d,%d)\n", c8, t8, (int)r.left, (int)r.top,
+                     (int)r.right, (int)r.bottom);
+            cnt++;
+        }
+        h = GetWindow(h, GW_HWNDNEXT);
+    }
+    if (!cnt) str_catf(out, "  （无顶层窗口）\n");
+}
+
+static void probe_cursor(Str *out, u32 pid) {
+    char cls[128] = "";
+    int x = 0, y = 0;
+    if (cursor_window(pid, cls, sizeof(cls), &x, &y))
+        str_catf(out, "\n鼠标: (%d,%d) 窗口 %s\n", x, y, cls);
+    else {
+        POINT pt;
+        GetCursorPos(&pt);
+        str_catf(out, "\n鼠标: (%ld,%ld) 不在目标进程窗口上\n", pt.x, pt.y);
+    }
+}
+
+static void probe_scan(Str *out) {
+    str_catf(out, "\n-- 扫描 --\n");
+    GrabHit hit;
+    Err e;
+    DWORD t0 = GetTickCount();
+    if (grab_hit(&hit, e)) {
+        str_catf(out, "  命中: id=%u 名称=%s 策略=%s 候选=%u 耗时=%lums\n", hit.id, hit.name,
+                 hit.strategy, hit.cands, (unsigned long)(GetTickCount() - t0));
+    } else {
+        str_catf(out, "  未命中: %s\n", e);
+    }
+
+    GrabCand cd[MAX_CAND];
+    int n = grab_last_cands(cd, 12);
+    if (n > 0) {
+        str_catf(out, "\n-- 候选（分数降序，前 %d）--\n", n);
+        for (int i = 0; i < n; i++) {
+            char nm[96] = "";
+            if (g_namer) g_namer(cd[i].id, nm, sizeof(nm));
+            str_catf(out, "  #%-10u score=%-4d type=0x%02X addr=0x%012llX  %s\n", cd[i].id, cd[i].score,
+                     cd[i].type, (unsigned long long)cd[i].addr, nm);
+        }
+    }
+}
+
 void grab_probe(Str *out) {
     str_catf(out, "=== DNF GM 取码诊断 ===\n");
     str_catf(out, "目标进程: %s\n", g_proc);
@@ -421,105 +530,11 @@ void grab_probe(Str *out) {
         return;
     }
 
-    str_catf(out, "\n-- 内置基址（物品代码获取器 1.3）--\n");
-    str_catf(out, "  AOB: 8B F8 8B 4F 04 8B 47 08 2B C1 C1 F8 02 33 F6 85 C0\n");
-    if (builtin_locate(hp, pid, base, mod_size)) {
-        u32 obj = 0, id = 0;
-        read_mem(hp, g_builtin_slot, &obj, sizeof(obj));
-        if (obj) read_mem(hp, (u64)obj + 0x1C, &id, sizeof(id));
-        str_catf(out, "  命中 0x%llX · 指针槽 0x%llX · 对象 0x%X · id=%u\n",
-                 (unsigned long long)g_builtin_match, (unsigned long long)g_builtin_slot, obj, id);
-        str_catf(out, "  字段: id +0x1C · 名称指针 +0x20 · 品质 +0xF4\n");
-    } else {
-        str_catf(out, "  当前主模块没有命中特征码，将回退到堆扫描\n");
-    }
-
-    // 段表
-    str_catf(out, "\n-- 内存段（前 24 个可读段）--\n");
-    u64 addr = 0, total = 0;
-    int shown = 0;
-    while (addr < 0x00007FFFFFFF0000ull) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQueryEx(hp, (LPCVOID)(uintptr_t)addr, &mbi, sizeof(mbi))) break;
-        u64 reg = (u64)(uintptr_t)mbi.BaseAddress, sz = (u64)mbi.RegionSize;
-        if (mbi.State == MEM_COMMIT) {
-            total += sz;
-            if (shown < 24) {
-                str_catf(out, "  0x%012llX  %8llu KB  prot=0x%lX type=%s\n",
-                         (unsigned long long)reg, (unsigned long long)(sz / 1024),
-                         (unsigned long)mbi.Protect,
-                         mbi.Type == MEM_PRIVATE ? "private" : (mbi.Type == MEM_IMAGE ? "image" : "mapped"));
-                shown++;
-            }
-        }
-        u64 next = reg + sz;
-        if (next <= addr) break;
-        addr = next;
-    }
-    str_catf(out, "  已提交合计: %llu MB\n", (unsigned long long)(total / (1024 * 1024)));
-
-    // DNF_WND_* 窗口
-    str_catf(out, "\n-- 目标进程窗口 --\n");
-    {
-        HWND h = GetTopWindow(NULL);
-        int cnt = 0;
-        while (h && cnt < 200) {
-            DWORD wpid = 0;
-            GetWindowThreadProcessId(h, &wpid);
-            if (wpid == pid) {
-                WCHAR cw[128] = L"", tw[128] = L"";
-                GetClassNameW(h, cw, 128);
-                GetWindowTextW(h, tw, 128);
-                RECT r;
-                GetWindowRect(h, &r);
-                char c8[128], t8[128];
-                utf8(cw, c8, sizeof(c8));
-                utf8(tw, t8, sizeof(t8));
-                str_catf(out, "  %-24s \"%s\"  (%d,%d)-(%d,%d)\n", c8, t8, (int)r.left, (int)r.top,
-                         (int)r.right, (int)r.bottom);
-                cnt++;
-            }
-            h = GetWindow(h, GW_HWNDNEXT);
-        }
-        if (!cnt) str_catf(out, "  （无顶层窗口）\n");
-    }
-
-    // 鼠标与窗口
-    {
-        char cls[128] = "";
-        int x = 0, y = 0;
-        if (cursor_window(pid, cls, sizeof(cls), &x, &y))
-            str_catf(out, "\n鼠标: (%d,%d) 窗口 %s\n", x, y, cls);
-        else {
-            POINT pt;
-            GetCursorPos(&pt);
-            str_catf(out, "\n鼠标: (%ld,%ld) 不在目标进程窗口上\n", pt.x, pt.y);
-        }
-    }
-
-    // 实际扫一次
-    str_catf(out, "\n-- 扫描 --\n");
-    GrabHit hit;
-    Err e;
-    DWORD t0 = GetTickCount();
-    if (grab_hit(&hit, e)) {
-        str_catf(out, "  命中: id=%u 名称=%s 策略=%s 候选=%u 耗时=%lums\n", hit.id, hit.name,
-                 hit.strategy, hit.cands, (unsigned long)(GetTickCount() - t0));
-    } else {
-        str_catf(out, "  未命中: %s\n", e);
-    }
-
-    GrabCand cd[MAX_CAND];
-    int n = grab_last_cands(cd, 12);
-    if (n > 0) {
-        str_catf(out, "\n-- 候选（分数降序，前 %d）--\n", n);
-        for (int i = 0; i < n; i++) {
-            char nm[96] = "";
-            if (g_namer) g_namer(cd[i].id, nm, sizeof(nm));
-            str_catf(out, "  #%-10u score=%-4d type=0x%02X addr=0x%012llX  %s\n", cd[i].id, cd[i].score,
-                     cd[i].type, (unsigned long long)cd[i].addr, nm);
-        }
-    }
+    probe_builtin(out, hp, pid, base, mod_size);
+    probe_segments(out, hp);
+    probe_windows(out, pid);
+    probe_cursor(out, pid);
+    probe_scan(out);
 
     CloseHandle(hp);
 }

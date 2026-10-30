@@ -12,14 +12,20 @@
 #define CAP_PLUGIN_AUTH 0x00080000u
 
 // ---------------- 结果集 ----------------
+#define MY_MAX_COL 1024                // 列数白名单：恶意服务器可造 2^64 列数
+
 static void row_reserve(MyResult *r, int n) {
     if (n <= r->cap) return;
-    int c = r->cap ? r->cap : 16;
-    while (c < n) c *= 2;
-    r->offs = (int *)xrealloc(r->offs, sizeof(int) * (size_t)c * (size_t)(r->ncol ? r->ncol : 1));
-    r->lens = (int *)xrealloc(r->lens, sizeof(int) * (size_t)c * (size_t)(r->ncol ? r->ncol : 1));
-    r->nulls = (u8 *)xrealloc(r->nulls, (size_t)c * (size_t)(r->ncol ? r->ncol : 1));
-    r->cap = c;
+    size_t c = r->cap ? (size_t)r->cap : 16;
+    while (c < (size_t)n) {
+        if (c > (size_t)INT_MAX / 2) { c = (size_t)INT_MAX; break; }
+        c *= 2;
+    }
+    size_t cells = c * (size_t)(r->ncol ? r->ncol : 1);
+    r->offs = (int *)xrealloc(r->offs, sizeof(int) * cells);
+    r->lens = (int *)xrealloc(r->lens, sizeof(int) * cells);
+    r->nulls = (u8 *)xrealloc(r->nulls, cells);
+    r->cap = (int)c;
 }
 
 void my_free(MyResult *r) {
@@ -51,7 +57,11 @@ u64 my_u64(const MyResult *r, int row, int col, u64 def) {
     const char *s = my_text(r, row, col);
     if (!s) return def;
     u64 v = 0;
-    for (; *s >= '0' && *s <= '9'; s++) v = v * 10 + (u64)(*s - '0');
+    for (; *s >= '0' && *s <= '9'; s++) {
+        u64 d = (u64)(*s - '0');
+        if (v > (UINT64_MAX - d) / 10) return UINT64_MAX;   // 饱和，不回绕
+        v = v * 10 + d;
+    }
     return v;
 }
 
@@ -61,7 +71,11 @@ i64 my_i64(const MyResult *r, int row, int col, i64 def) {
     int neg = *s == '-';
     if (neg) s++;
     i64 v = 0;
-    for (; *s >= '0' && *s <= '9'; s++) v = v * 10 + (*s - '0');
+    for (; *s >= '0' && *s <= '9'; s++) {
+        i64 d = *s - '0';
+        if (v > (INT64_MAX - d) / 10) return neg ? INT64_MIN : INT64_MAX;  // 饱和
+        v = v * 10 + d;
+    }
     return neg ? -v : v;
 }
 
@@ -124,7 +138,6 @@ char *mysql_escape(const char *s) {
     size_t k = 0;
     for (size_t i = 0; i < n; i++) {
         switch (s[i]) {
-            case 0: o[k++] = '\\'; o[k++] = '0'; break;
             case '\n': o[k++] = '\\'; o[k++] = 'n'; break;
             case '\r': o[k++] = '\\'; o[k++] = 'r'; break;
             case '\\': o[k++] = '\\'; o[k++] = '\\'; break;
@@ -266,14 +279,17 @@ static int send_packet(MySql *m, const void *data, size_t n) {
 
 static int recv_packet(MySql *m, Buf *out) {
     buf_clear(out);
-    u8 hdr[4];
-    if (!take(m, hdr, 4)) return 0;
-    size_t len = (size_t)hdr[0] | (size_t)hdr[1] << 8 | (size_t)hdr[2] << 16;
-    m->seq = (u32)hdr[3] + 1;
-    buf_reserve(out, len + 1);
-    if (len && !take(m, out->p, len)) return 0;
-    out->n = len;
-    out->p[len] = 0;
+    for (;;) {
+        u8 hdr[4];
+        if (!take(m, hdr, 4)) return 0;
+        size_t len = (size_t)hdr[0] | (size_t)hdr[1] << 8 | (size_t)hdr[2] << 16;
+        m->seq = (u32)hdr[3] + 1;
+        buf_reserve(out, out->n + len + 1);
+        if (len && !take(m, out->p + out->n, len)) return 0;
+        out->n += len;
+        out->p[out->n] = 0;
+        if (len < 0xFFFFFF) break;       // 载荷 < 16MB 是最后一包
+    }
     return 1;
 }
 
@@ -423,6 +439,7 @@ static void add_row(MyResult *r, Buf *pkt) {
         if (!get_lenenc(pkt->p, pkt->n, &off, &len)) continue;
         if (len == UINT64_MAX) continue;
         if (off + len > pkt->n) len = pkt->n - off;
+        if (r->arena.n > INT_MAX - (size_t)len - 1) continue;   // arena 超 2GB 截断防护
         r->offs[idx] = (int)r->arena.n;
         buf_put(&r->arena, pkt->p + off, (size_t)len);
         buf_putc(&r->arena, 0);
@@ -458,7 +475,9 @@ int mysql_query(MySql *m, const char *sql, MyResult *r) {
     {
         size_t off = 0;
         u64 ncol = 0;
-        if (!get_lenenc(pkt.p, pkt.n, &off, &ncol) || ncol == 0) { die(m, "列数解析失败"); goto done; }
+        if (!get_lenenc(pkt.p, pkt.n, &off, &ncol) || ncol == 0 || ncol > MY_MAX_COL) {
+            die(m, "列数异常"); goto done;
+        }
         r->ncol = (int)ncol;
         r->cols = (char **)xalloc(sizeof(char *) * (size_t)ncol);
         memset(r->cols, 0, sizeof(char *) * (size_t)ncol);

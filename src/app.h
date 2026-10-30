@@ -127,7 +127,8 @@ void app_list_chars(const char *kw);
 void app_select_char(int idx);
 void app_reload(void);
 void app_reload_later(void);       // 任务线程里用：让下一次 app_tick 重读当前角色
-int  app_sync_char(void);          // 写后校验：库里真值与缓存一致返回 1（界面无需动作）
+int  app_sync_char(void);          // 写后校验（job 线程）：结果暂存，返回 1=与缓存一致
+void app_sync_apply(void);         // UI 线程：把暂存的校验结果搬到 g.*（job_poll 后调）
 void app_row_sync(void);           // 把 g.cur 的名字/等级/职业写回左栏那一行
 void app_load_pvf(const char *path);
 void app_grab_fast_once(void);     // 连续取码一轮：只走特征码快路径，不回退扫堆

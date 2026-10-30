@@ -5,13 +5,21 @@
 // ---------------- 内存 ----------------
 void *xalloc(size_t n) {
     void *p = malloc(n ? n : 1);
-    if (!p) ExitProcess(2);
+    if (!p) {
+        OutputDebugStringA("DNF_GM: xalloc OOM, exiting\n");
+        MessageBoxA(NULL, "内存分配失败，程序即将退出", "DNF GM", MB_ICONERROR);
+        ExitProcess(2);
+    }
     return p;
 }
 
 void *xrealloc(void *p, size_t n) {
     void *q = realloc(p, n ? n : 1);
-    if (!q) ExitProcess(2);
+    if (!q) {
+        OutputDebugStringA("DNF_GM: xrealloc OOM, exiting\n");
+        MessageBoxA(NULL, "内存分配失败，程序即将退出", "DNF GM", MB_ICONERROR);
+        ExitProcess(2);
+    }
     return q;
 }
 
@@ -58,12 +66,23 @@ void str_cat(Str *s, const char *z) {
 void str_catc(Str *s, char c) { str_catn(s, &c, 1); }
 
 void str_catf(Str *s, const char *f, ...) {
-    char tmp[2048];
-    va_list ap;
+    va_list ap, ap2;
     va_start(ap, f);
-    fmtv(tmp, sizeof(tmp), f, ap);
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, f, ap);
     va_end(ap);
-    str_cat(s, tmp);
+    if (n <= 0) { va_end(ap2); return; }
+    if (n < 2048) {
+        char tmp[2048];
+        vsnprintf(tmp, sizeof(tmp), f, ap2);
+        str_cat(s, tmp);
+    } else {
+        char *big = (char *)xalloc((size_t)n + 1);
+        vsnprintf(big, (size_t)n + 1, f, ap2);
+        str_cat(s, big);
+        free(big);
+    }
+    va_end(ap2);
 }
 
 void str_setn(Str *s, const char *p, int n) {
