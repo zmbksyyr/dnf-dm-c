@@ -4,6 +4,7 @@
 #include "util.h"
 #include "mysql.h"
 #include "item.h"
+#include <time.h>
 
 // ---------------- 活动 ----------------
 int db_list_events(Db *d, Vec *out, Err err) {
@@ -48,12 +49,48 @@ int db_list_event_info(Db *d, Vec *out, Err err) {
     return 1;
 }
 
-int db_add_event(Db *d, u32 type, i64 p1, i64 p2, Err err) {
+int db_add_event(Db *d, u32 type, i64 p1, i64 p2, int days, Err err) {
+    long st_t = 0, et_t = 0;
+    if (days > 0) {
+        // 持续时间：start_time=现在(Unix 时间戳)，end_time=现在+days 天。
+        // dnf_event_log.start_time/end_time 是 int(11)，服务端按 time_t 解析；
+        // 0/0 表示无时限（工具侧「永久」语义，与 GMTOOL set_event 插入 0,0 一致）。
+        time_t now = time(NULL);
+        st_t = (long)now;
+        et_t = (long)now + (long)days * 86400L;
+    }
     Str s = {0};
     str_catf(&s,
              "INSERT INTO d_taiwan.dnf_event_log "
              "(occ_time,event_type,parameter1,parameter2,server_id,event_flag,start_time,end_time) "
-             "VALUES (0,%u,%lld,%lld,0,0,0,0)", type, (long long)p1, (long long)p2);
+             "VALUES (0,%u,%lld,%lld,0,0,%ld,%ld)", type, (long long)p1, (long long)p2, st_t, et_t);
+    int ok = run(d, &s);
+    str_free(&s);
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    return ok;
+}
+
+// 往活动字典（dnf_event_info）插一条：下拉里没有的活动，GM 自己补定义。
+// 表是 utf8，连接默认 utf8mb4 是其超集，直接插即可，不必切 charset。
+int db_add_event_info(Db *d, u32 id, const char *name, const char *explain, Err err) {
+    char *en = mysql_escape(name ? name : "");
+    char *ee = mysql_escape(explain ? explain : "");
+    Str s = {0};
+    str_catf(&s,
+             "INSERT INTO d_taiwan.dnf_event_info "
+             "(event_id,event_name,event_explain,apply_type,start_date,end_date) "
+             "VALUES (%u,'%s','%s',0,'0000-00-00','0000-00-00')", id, en, ee);
+    free(en);
+    free(ee);
+    int ok = run(d, &s);
+    str_free(&s);
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    return ok;
+}
+
+int db_clear_events(Db *d, Err err) {
+    Str s = {0};
+    str_cat(&s, "DELETE FROM d_taiwan.dnf_event_log");
     int ok = run(d, &s);
     str_free(&s);
     if (!ok) snprintf(err, ERRBUF, "%s", d->err);
@@ -126,17 +163,22 @@ int db_ban(Db *d, u32 mid, int days, int type, int value, const char *reason, Er
     GetLocalTime(&st);
     snprintf(now, sizeof(now), "%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour,
              st.wMinute, st.wSecond);
-    FILETIME ft;
-    SystemTimeToFileTime(&st, &ft);
-    ULARGE_INTEGER u;
-    u.LowPart = ft.dwLowDateTime;
-    u.HighPart = ft.dwHighDateTime;
-    u.QuadPart += (u64)days * 864000000000ull;
-    ft.dwLowDateTime = u.LowPart;
-    ft.dwHighDateTime = u.HighPart;
-    FileTimeToSystemTime(&ft, &st);
-    snprintf(end, sizeof(end), "%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour,
-             st.wMinute, st.wSecond);
+    if (days <= 0) {
+        // 永久封禁：结束时间推到很远
+        snprintf(end, sizeof(end), "2099-12-31 23:59:59");
+    } else {
+        FILETIME ft;
+        SystemTimeToFileTime(&st, &ft);
+        ULARGE_INTEGER u;
+        u.LowPart = ft.dwLowDateTime;
+        u.HighPart = ft.dwHighDateTime;
+        u.QuadPart += (u64)days * 864000000000ull;
+        ft.dwLowDateTime = u.LowPart;
+        ft.dwHighDateTime = u.HighPart;
+        FileTimeToSystemTime(&ft, &st);
+        snprintf(end, sizeof(end), "%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour,
+                 st.wMinute, st.wSecond);
+    }
 
     set_names(d, "latin1");
     char *e = mysql_escape(reason ? reason : "");

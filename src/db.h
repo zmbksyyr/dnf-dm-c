@@ -185,8 +185,10 @@ int  db_purge_quest_items(Db *d, const Charac *c, const u32 *ids, int n, int *re
 // 活动
 int  db_list_events(Db *d, Vec *out, Err err);                            // Vec<EventRow>
 int  db_list_event_info(Db *d, Vec *out, Err err);                        // Vec<EventInfo>
-int  db_add_event(Db *d, u32 type, i64 p1, i64 p2, Err err);
+int  db_add_event(Db *d, u32 type, i64 p1, i64 p2, int days, Err err);
 int  db_del_event(Db *d, u64 log_id, Err err);
+int  db_clear_events(Db *d, Err err);     // 清空 dnf_event_log（全服活动停启用）
+int  db_add_event_info(Db *d, u32 id, const char *name, const char *explain, Err err);  // 往活动字典插一条
 
 // 封停
 int  db_list_bans(Db *d, Vec *out, Err err);                              // Vec<BanRow>

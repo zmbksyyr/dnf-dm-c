@@ -5,7 +5,7 @@
 
 // ================================================================ 封停页
 enum { B_LIST = PAGE_ID(PAGE_BAN, 1), B_CHAR, B_BANTYPE, B_DAYS, B_REASON, B_BAN, B_UNBAN,
-       B_REFRESH, B_INFO, B_PWD, B_RESETPWD };
+       B_REFRESH, B_INFO, B_PWD, B_RESETPWD, B_Q1, B_Q3, B_Q7, B_Q30 };
 
 static HWND b_list, b_char, b_bantype, b_days, b_reason, b_info, b_pwd;
 
@@ -99,6 +99,10 @@ static LRESULT ban_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             g.lists_ready &= ~(u32)(L_BANS | L_BANCHARS);
             ban_reload(p);
             return 0;
+        case B_Q1:  SetWindowTextA(b_days, "1");  return 0;
+        case B_Q3:  SetWindowTextA(b_days, "3");  return 0;
+        case B_Q7:  SetWindowTextA(b_days, "7");  return 0;
+        case B_Q30: SetWindowTextA(b_days, "30"); return 0;
         case B_BAN: {
             int idx = ban_sel_idx();
             char reason[160];
@@ -107,14 +111,17 @@ static LRESULT ban_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             if (idx < 0) { app_info("请先在列表中选一个角色。"); return 0; }
             u32 mid = s_char_mid[idx];
             u32 charac_no = s_char_no[idx];
-            // 封禁类型：0=账号封禁 1=角色封禁
-            int is_char_ban = (int)SendMessageW(b_bantype, CB_GETCURSEL, 0, 0) == 1;
-            int days = ui_int(b_days);
-            if (days < 1) days = 1;
+            // 封禁类型：0=账号封禁 1=角色封禁 2=永久封禁
+            int sel = (int)SendMessageW(b_bantype, CB_GETCURSEL, 0, 0);
+            int is_char_ban = (sel == 1);
+            int is_perm     = (sel == 2);
+            int days = is_perm ? 0 : ui_int(b_days);
+            if (!is_perm && days < 1) days = 1;   // 非永久至少 1 天，避免误封永久
+            const char *dur = is_perm ? "永久" : fmt_new("%d 天", days);
 
             if (is_char_ban) {
-                if (!app_confirm(fmt_new("角色封禁：封停角色 No.%u（所属账号 mid=%u）共 %d 天？",
-                                         charac_no, mid, days)))
+                if (!app_confirm(fmt_new("角色封禁：封停角色 No.%u（所属账号 mid=%u）%s？",
+                                         charac_no, mid, dur)))
                     return 0;
                 kc.kind = K_BAN;
                 kc.mid = mid;
@@ -122,7 +129,8 @@ static LRESULT ban_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
                 kc.i2 = 2;           // punish_type=2 角色封禁
                 kc.i3 = (int)charac_no;  // punish_value=charac_no
             } else {
-                if (!app_confirm(fmt_new("账号封禁：封停账号 mid=%u 共 %d 天？", mid, days)))
+                if (!app_confirm(fmt_new("%s：封停账号 mid=%u %s？",
+                                         is_perm ? "永久账号封禁" : "账号封禁", mid, dur)))
                     return 0;
                 kc.kind = K_BAN;
                 kc.mid = mid;
@@ -182,11 +190,11 @@ static void ban_layout(Page *p, int w, int h) {
     ui_add(&r, b_info, -1);
 
     int y = pad + rowh + g;
-    // 列表 + 底部操作区（3 行）
-    int btm = rc.bottom - pad - rowh * 3 - g * 3;
+    // 列表 + 底部操作区（4 行）
+    int btm = rc.bottom - pad - rowh * 4 - g * 4;
     MoveWindow(b_list, pad, y, rc.right - pad * 2, btm - y, TRUE);
 
-    // 第一行：角色选择 + 封禁类型 + 天数
+    // 第一行：角色选择 + 封禁类型 + 天数 + 原因
     y = btm + g;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "角色"), ui_scale(34));
@@ -207,17 +215,28 @@ static void ban_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, B_RESETPWD, "重置密码"), ui_scale(76));
     ui_add(&r, ui_lbl_at(p->wnd, "（账号级操作在 GM 页）"), -1);
 
-    // 第三行：提示
+    // 第三行：快捷时长
+    y += rowh + g;
+    ui_row(&r, p->wnd, pad, y, rowh);
+    ui_add(&r, ui_lbl_at(p->wnd, "快捷"), ui_scale(40));
+    ui_add(&r, ui_btn_at(p->wnd, B_Q1, "1天"), ui_scale(48));
+    ui_add(&r, ui_btn_at(p->wnd, B_Q3, "3天"), ui_scale(48));
+    ui_add(&r, ui_btn_at(p->wnd, B_Q7, "7天"), ui_scale(48));
+    ui_add(&r, ui_btn_at(p->wnd, B_Q30, "30天"), ui_scale(56));
+    ui_add(&r, ui_lbl_at(p->wnd, "（选「永久封禁」忽略天数，封到 2099）"), -1);
+
+    // 第四行：提示
     y += rowh + g;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_lbl_at(p->wnd,
-        "封禁类型：账号 = 封停整个账号登录；角色 = 只禁该角色，账号仍可登录其它角色"), -1);
+        "封禁类型：账号 = 封停整个账号登录；角色 = 只禁该角色，账号仍可登录其它角色；永久 = 封到 2099"), -1);
 }
 
 static void ban_lock(Page *p) {
     (void)p;
     int on = g.db_ok;
-    int ids[] = {B_BAN, B_UNBAN, B_REFRESH, B_CHAR, B_BANTYPE, B_DAYS, B_REASON, B_PWD, B_RESETPWD};
+    int ids[] = {B_BAN, B_UNBAN, B_REFRESH, B_CHAR, B_BANTYPE, B_DAYS, B_REASON, B_PWD, B_RESETPWD,
+                 B_Q1, B_Q3, B_Q7, B_Q30};
     for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
 }
 
@@ -232,6 +251,7 @@ static void ban_build(Page *p, HWND parent) {
     // 封禁类型下拉
     SendMessageW(b_bantype, CB_ADDSTRING, 0, (LPARAM)L"账号封禁");
     SendMessageW(b_bantype, CB_ADDSTRING, 0, (LPARAM)L"角色封禁");
+    SendMessageW(b_bantype, CB_ADDSTRING, 0, (LPARAM)L"永久封禁");
     SendMessageW(b_bantype, CB_SETCURSEL, 0, 0);
     ui_cols(b_list, (const char *const[]){"账号", "mid", "类型", "目标", "开始", "结束", "原因"},
             (const int[]){110, 56, 44, 160, 125, 125, 160}, 7);
@@ -239,12 +259,20 @@ static void ban_build(Page *p, HWND parent) {
     ui_button(parent, "解除封停", B_UNBAN);
     ui_button(parent, "执行封停", B_BAN);
     ui_button(parent, "重置密码", B_RESETPWD);
+    ui_button(parent, "1天", B_Q1);
+    ui_button(parent, "3天", B_Q3);
+    ui_button(parent, "7天", B_Q7);
+    ui_button(parent, "30天", B_Q30);
     ui_tip(parent, GetDlgItem(parent, B_REFRESH), "重新读取封停记录与角色列表");
     ui_tip(parent, b_char, "从下拉列表中选择要封停的角色；列表包含所有角色（含已删除的）");
-    ui_tip(parent, b_bantype, "账号封禁 = 封停整个账号登录；角色封禁 = 只禁该角色，账号仍可登录其它角色");
+    ui_tip(parent, b_bantype, "账号封禁 = 封停整个账号登录；角色封禁 = 只禁该角色，账号仍可登录其它角色；永久封禁 = 封到 2099");
     ui_tip(parent, GetDlgItem(parent, B_BAN), "按选中的角色和封禁类型写入一条封停记录");
     ui_tip(parent, GetDlgItem(parent, B_UNBAN), "解除列表里选中那条封停（按惩罚类型精确解封）");
     ui_tip(parent, GetDlgItem(parent, B_RESETPWD), "把选中角色所属账号的登录密码改成「新密码」里的值");
+    ui_tip(parent, GetDlgItem(parent, B_Q1), "设时长为 1 天");
+    ui_tip(parent, GetDlgItem(parent, B_Q3), "设时长为 3 天");
+    ui_tip(parent, GetDlgItem(parent, B_Q7), "设时长为 7 天");
+    ui_tip(parent, GetDlgItem(parent, B_Q30), "设时长为 30 天");
 }
 
 void page_ban_create(Page *p) {

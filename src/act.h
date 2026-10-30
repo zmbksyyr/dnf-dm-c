@@ -9,7 +9,7 @@
 enum {
     K_RENAME = 1, K_LEV, K_MONEY, K_COIN, K_CERA, K_JOB, K_ACCM,
     K_SP, K_QP, K_NOWEIGHT, K_SLOT, K_UNLOCK, K_EXPERT, K_FATIGUE, K_DUNGEON, K_PUNISH, K_QCLR,
-    K_PVP, K_BAN, K_UNBAN, K_BANLIST, K_BANCHARS, K_EVLIST, K_EVADD, K_EVDEL,
+    K_PVP, K_BAN, K_UNBAN, K_BANLIST, K_BANCHARS, K_EVLIST, K_EVADD, K_EVDEL, K_EVCLEAR, K_EVADDICT,
     K_RESETPWD, K_UNLCREATE
 };
 
@@ -20,6 +20,7 @@ typedef struct {
     int  i1, i2, i3;
     u64  u1, u2;
     char s[160];
+    char s2[160];    // 第二个文本参数（如活动字典的「说明」）
 } Ctx;
 
 // 各页面拼好参数后就地提交。app_act 会把整个结构拷进队列，所以这个共享实例

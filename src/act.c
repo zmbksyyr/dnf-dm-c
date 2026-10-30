@@ -103,11 +103,12 @@ static int char_do(void *ctx, Err err) {
             InterlockedOr(&s_lists_dirty, L_BANCHARS);
             return db_list_chars(&g.db, &s_ban_chars_next, 5000, NULL, err);
         case K_EVLIST:
-            // 同上，写暂存
-            if (!s_event_info_next.n && !g.event_info.n &&
-                !db_list_event_info(&g.db, &s_event_info_next, err)) return 0;
+            // 同上，写暂存。活动字典小，每次刷新都重拉，保证「新增定义」能立刻出现在下拉里
+            if (!db_list_event_info(&g.db, &s_event_info_next, err)) return 0;
             return db_list_events(&g.db, &s_events_next, err);
-        case K_EVADD: return db_add_event(&g.db, (u32)c->i1, c->u1, c->u2, err);
+        case K_EVADD: return db_add_event(&g.db, (u32)c->i1, c->u1, c->u2, c->i2, err);
+        case K_EVCLEAR: return db_clear_events(&g.db, err);
+        case K_EVADDICT: return db_add_event_info(&g.db, (u32)c->u1, c->s, c->s2, err);
         case K_EVDEL: return db_del_event(&g.db, (u64)c->u1, err);
         case K_RESETPWD: return db_reset_pwd(&g.db, c->mid, c->s, err);
         case K_UNLCREATE: return db_unlock_create(&g.db, c->mid, err);
