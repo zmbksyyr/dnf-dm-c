@@ -74,8 +74,11 @@ int db_list_bans(Db *d, Vec *out, Err err) {
     Str s = {0};
     str_cat(&s,
             "SELECT p.m_id,p.punish_type,p.punish_value,p.start_time,p.end_time,p.reason,"
-            "a.accountname FROM d_taiwan.member_punish_info p "
+            "a.accountname,"
+            "IFNULL(c.charac_name,'') "
+            "FROM d_taiwan.member_punish_info p "
             "LEFT JOIN d_taiwan.accounts a ON a.UID=p.m_id "
+            "LEFT JOIN taiwan_cain.charac_info c ON c.charac_no=p.punish_value AND p.punish_type=2 "
             // 到期的封禁已经失效，摆出来只会让人误判
             "WHERE p.apply_flag<>0 AND p.end_time>NOW() ORDER BY p.m_id");
     MyResult r = {0};
@@ -89,10 +92,12 @@ int db_list_bans(Db *d, Vec *out, Err err) {
         b->mid = (u32)my_u64(&r, i, 0, 0);
         b->type = (int)my_i64(&r, i, 1, 0);
         b->value = (int)my_i64(&r, i, 2, 0);
+        b->charac_no = b->type == 2 ? (u32)b->value : 0;
         cp_text(b->start, sizeof(b->start), &r, i, 3);
         cp_text(b->end, sizeof(b->end), &r, i, 4);
         cp_text(b->reason, sizeof(b->reason), &r, i, 5);
         cp_text(b->account, sizeof(b->account), &r, i, 6);
+        cp_text(b->char_name, sizeof(b->char_name), &r, i, 7);
     }
     my_free(&r);
     str_free(&s);
@@ -149,7 +154,16 @@ int db_ban(Db *d, u32 mid, int days, int type, int value, const char *reason, Er
     return ok;
 }
 
-int db_unban(Db *d, u32 mid, Err err) { return db_reset_punish(d, mid, err); }
+// type=0 全部清除，type=1 只清账号封禁，type=2 只清角色封禁
+int db_unban(Db *d, u32 mid, int type, Err err) {
+    if (type == 0) return db_reset_punish(d, mid, err);
+    Str s = {0};
+    str_catf(&s, "DELETE FROM d_taiwan.member_punish_info WHERE m_id=%u AND punish_type=%d", mid, type);
+    int ok = run(d, &s);
+    str_free(&s);
+    if (!ok) snprintf(err, ERRBUF, "解封：%s", d->err);
+    return ok;
+}
 
 int db_find_mid(Db *d, const char *name, u32 *mid, Err err) {
     set_names(d, "latin1");

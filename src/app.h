@@ -19,6 +19,8 @@ typedef struct {
     int  bubble_on;
     int  bubble_sec;
     int  bubble_val;
+    int  bubble_start;   // 泡点生效开始时间（距 0 点的分钟数，0-1439）
+    int  bubble_end;     // 泡点生效结束时间（同上；start==end 表示全天）
 } Config;
 
 // 一次性后台任务：UI 只轮询 state，不阻塞
@@ -85,6 +87,7 @@ typedef struct {
     Vec    avatars;        // AvatarRow
     Vec    quests;         // QuestRow
     Vec    bans;           // BanRow
+    Vec    ban_chars;      // Charac：封停页的角色选择器数据源
     Vec    events;         // EventRow
     Vec    event_info;     // EventInfo
 
@@ -97,7 +100,8 @@ typedef struct {
 } App;
 
 // lists_ready 位
-enum { L_MAILS = 1, L_PETS = 2, L_AVAS = 4, L_QUESTS = 8, L_BANS = 16, L_EVENTS = 32 };
+enum { L_MAILS = 1, L_PETS = 2, L_AVAS = 4, L_QUESTS = 8, L_BANS = 16, L_EVENTS = 32,
+       L_BANCHARS = 64 };
 
 extern App g;
 
@@ -157,9 +161,10 @@ int  app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz);
 int  app_act_idle(void);                 // 连接空闲且没有排队动作：能直接发
 #define app_act(what, fn, ctx) app_act_n((what), (fn), (void *)(ctx), (int)sizeof(*(ctx)))
 
-// 泡点：开关 / 间隔秒 / 每次点数。改完立即写回 settings.ini，计时从改的那一刻重来。
+// 泡点：开关 / 间隔秒 / 每次点数 / 生效时段（分钟，start==end 全天）。
+// 改完立即写回 settings.ini，计时从改的那一刻重来。
 // 结算由 app_tick 驱动，只在本工具开着、且连库期间发生（关掉不补算）。
-void app_bubble_apply(int on, int sec, int val);
+void app_bubble_apply(int on, int sec, int val, int start_min, int end_min);
 void app_bubble_status(char *out, int cap);   // 一行人话，给 GM 页底部标签用
 
 // 发放

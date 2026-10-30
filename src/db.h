@@ -45,7 +45,8 @@ typedef struct {
 typedef struct {
     u32  mid;
     int  type, value;
-    char account[48], ip[24], start[24], end[24], reason[160];
+    u32  charac_no;      // 角色封禁时的角色编号（type=2 时有效）
+    char account[48], char_name[48], ip[24], start[24], end[24], reason[160];
 } BanRow;
 
 // 活动：log 是「当前启用的活动」，info 是「活动字典」
@@ -175,7 +176,8 @@ int  db_del_event(Db *d, u64 log_id, Err err);
 // 封停
 int  db_list_bans(Db *d, Vec *out, Err err);                              // Vec<BanRow>
 int  db_ban(Db *d, u32 mid, int days, int type, int value, const char *reason, Err err);
-int  db_unban(Db *d, u32 mid, Err err);
+// type=1 账号封禁（value 不用），type=2 角色封禁（value=charac_no）
+int  db_unban(Db *d, u32 mid, int type, Err err);   // 按惩罚类型解封（type=0 全部清除）
 int  db_find_mid(Db *d, const char *name, u32 *mid, Err err);
 
 // 账号

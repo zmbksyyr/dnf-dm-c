@@ -6,7 +6,7 @@ Ctx kc;
 // 列表暂存：job 线程只写这里，UI 线程在 job_poll 后搬到 g.*。
 // 直接写 g.bans/g.events 是 vec_clear+VEC_ADD（realloc），UI 线程同时遍历/绘制
 // 就是 use-after-free。双缓冲：job 写暂存，UI 线程在 job_poll 成功后交换。
-static Vec  s_bans_next, s_events_next, s_event_info_next;
+static Vec  s_bans_next, s_ban_chars_next, s_events_next, s_event_info_next;
 static volatile LONG s_lists_dirty;   // L_BANS | L_EVENTS 位掩码
 
 // UI 线程调用：把暂存列表搬到 g.*（在 app_tick 的 job_poll 之后）
@@ -17,6 +17,12 @@ void act_apply_lists(void) {
         g.bans = s_bans_next;
         vec_init(&s_bans_next, sizeof(BanRow));
         g.lists_ready |= L_BANS;
+    }
+    if (dirty & L_BANCHARS) {
+        vec_free(&g.ban_chars);
+        g.ban_chars = s_ban_chars_next;
+        vec_init(&s_ban_chars_next, sizeof(Charac));
+        g.lists_ready |= L_BANCHARS;
     }
     if (dirty & L_EVENTS) {
         vec_free(&g.events);
@@ -31,12 +37,14 @@ void act_apply_lists(void) {
 
 void act_init(void) {
     vec_init(&s_bans_next, sizeof(BanRow));
+    vec_init(&s_ban_chars_next, sizeof(Charac));
     vec_init(&s_events_next, sizeof(EventRow));
     vec_init(&s_event_info_next, sizeof(EventInfo));
 }
 
 void act_free(void) {
     vec_free(&s_bans_next);
+    vec_free(&s_ban_chars_next);
     vec_free(&s_events_next);
     vec_free(&s_event_info_next);
 }
@@ -86,10 +94,14 @@ static int char_do(void *ctx, Err err) {
         case K_QCLR: return db_clear_quests(&g.db, &who, err);
         case K_PVP: return db_set_pvp(&g.db, &who, c->i1, c->i2, c->i3, err);
         case K_BAN: return db_ban(&g.db, c->mid, c->i1, c->i2, c->i3, c->s, err);
-        case K_UNBAN: return db_unban(&g.db, c->mid, err);
+        case K_UNBAN: return db_unban(&g.db, c->mid, c->i2, err);
         case K_BANLIST:
             // 写暂存，不碰 g.bans——UI 线程可能正在遍历
             return db_list_bans(&g.db, &s_bans_next, err);
+        case K_BANCHARS:
+            // 封停页角色选择器：加载全部角色（含已删除的，封禁操作可能针对任意角色）
+            InterlockedOr(&s_lists_dirty, L_BANCHARS);
+            return db_list_chars(&g.db, &s_ban_chars_next, 5000, NULL, err);
         case K_EVLIST:
             // 同上，写暂存
             if (!s_event_info_next.n && !g.event_info.n &&
@@ -118,6 +130,7 @@ int char_work(void *ctx, Err err) {
     if (mine && sync_after(c->kind)) app_sync_char();
     // 列表操作：暂存就绪，标脏等 UI 线程在 job_poll 后搬入
     if (c->kind == K_BANLIST) InterlockedOr(&s_lists_dirty, L_BANS);
+    if (c->kind == K_BANCHARS) InterlockedOr(&s_lists_dirty, L_BANCHARS);
     if (c->kind == K_EVLIST)  InterlockedOr(&s_lists_dirty, L_EVENTS);
     return 1;
 }

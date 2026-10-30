@@ -55,6 +55,8 @@ static void cfg_load(Config *c, const char *path) {
     c->bubble_on = ini_int(L"bubble", L"on", 0, w);
     c->bubble_sec = ini_int(L"bubble", L"sec", 60, w);
     c->bubble_val = ini_int(L"bubble", L"val", 1, w);
+    c->bubble_start = ini_int(L"bubble", L"start", 0, w);
+    c->bubble_end = ini_int(L"bubble", L"end", 0, w);
 
     if (c->font < 8 || c->font > 14) c->font = 9;
     if (c->poll_sec < 2) c->poll_sec = 3;
@@ -77,6 +79,8 @@ static void cfg_save(const Config *c, const char *path) {
     ini_set(L"bubble", L"on", fmt_new("%d", c->bubble_on), w);
     ini_set(L"bubble", L"sec", fmt_new("%d", c->bubble_sec), w);
     ini_set(L"bubble", L"val", fmt_new("%d", c->bubble_val), w);
+    ini_set(L"bubble", L"start", fmt_new("%d", c->bubble_start), w);
+    ini_set(L"bubble", L"end", fmt_new("%d", c->bubble_end), w);
 }
 
 // ---------------- 日志/提示 ----------------
@@ -1036,19 +1040,47 @@ static int w_bubble(void *ctx, Err err) {
     return 1;
 }
 
-void app_bubble_apply(int on, int sec, int val) {
+void app_bubble_apply(int on, int sec, int val, int start_min, int end_min) {
     if (sec < 5) sec = 5;             // 下限 5 秒：再快就是拿一条连接刷库
     if (sec > 86400) sec = 86400;
     if (val < 1) val = 1;
     if (val > 1000000) val = 1000000;
+    // 时间窗口：0-1439 分钟；start==end 表示全天
+    if (start_min < 0) start_min = 0;
+    if (start_min > 1439) start_min = 1439;
+    if (end_min < 0) end_min = 0;
+    if (end_min > 1439) end_min = 1439;
     g.cfg.bubble_on = on ? 1 : 0;
     g.cfg.bubble_sec = sec;
     g.cfg.bubble_val = val;
+    g.cfg.bubble_start = start_min;
+    g.cfg.bubble_end = end_min;
     s_bubble_next = 0;                // 从改的这一刻重新计时，别沿用旧时刻
     cfg_save(&g.cfg, g.cfg_path);
-    app_status("泡点：%s · 每 %d 秒 +%d 点", on ? "已启用" : "已停用", sec, val);
-    app_log("泡点：%s · 每 %d 秒 +%d 点（赠送点券，只算在线账号）",
-            on ? "已启用" : "已停用", sec, val);
+    char t1[8], t2[8];
+    snprintf(t1, sizeof(t1), "%02d:%02d", start_min / 60, start_min % 60);
+    snprintf(t2, sizeof(t2), "%02d:%02d", end_min / 60, end_min % 60);
+    if (start_min == end_min)
+        app_status("泡点：%s · 每 %d 秒 +%d 点 · 全天生效", on ? "已启用" : "已停用", sec, val);
+    else
+        app_status("泡点：%s · 每 %d 秒 +%d 点 · %s~%s 生效", on ? "已启用" : "已停用", sec, val, t1, t2);
+    if (start_min == end_min)
+        app_log("泡点：%s · 每 %d 秒 +%d 点（赠送点券，只算在线账号，全天生效）",
+                on ? "已启用" : "已停用", sec, val);
+    else
+        app_log("泡点：%s · 每 %d 秒 +%d 点（赠送点券，只算在线账号，%s~%s 生效）",
+                on ? "已启用" : "已停用", sec, val, t1, t2);
+}
+
+// 当前是否在泡点生效时段内（start==end 表示全天）
+static int bubble_in_window(void) {
+    if (g.cfg.bubble_start == g.cfg.bubble_end) return 1;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    int now_min = st.wHour * 60 + st.wMinute;
+    int s = g.cfg.bubble_start, e = g.cfg.bubble_end;
+    if (s < e) return now_min >= s && now_min < e;
+    return now_min >= s || now_min < e;   // 跨夜：如 22:00~08:00
 }
 
 void app_bubble_status(char *out, int cap) {
@@ -1056,19 +1088,30 @@ void app_bubble_status(char *out, int cap) {
         snprintf(out, cap, "未启用");
         return;
     }
+    char tw[32] = "";
+    if (g.cfg.bubble_start != g.cfg.bubble_end) {
+        char t1[8], t2[8];
+        snprintf(t1, sizeof(t1), "%02d:%02d", g.cfg.bubble_start / 60, g.cfg.bubble_start % 60);
+        snprintf(t2, sizeof(t2), "%02d:%02d", g.cfg.bubble_end / 60, g.cfg.bubble_end % 60);
+        snprintf(tw, sizeof(tw), " · %s~%s", t1, t2);
+    }
+    if (!bubble_in_window()) {
+        snprintf(out, cap, "已启用 · 不在生效时段%s", tw);
+        return;
+    }
     if (!g.db_ok) {
-        snprintf(out, cap, "已启用 · 等数据库连接后开始计时");
+        snprintf(out, cap, "已启用 · 等数据库连接后开始计时%s", tw);
         return;
     }
     u64 now = now_ms();
     int left = s_bubble_next > now ? (int)((s_bubble_next - now) / 1000) : 0;
     if (!s_bubble_runs)
-        snprintf(out, cap, "已启用 · %d 秒后首次结算", left);
+        snprintf(out, cap, "已启用 · %d 秒后首次结算%s", left, tw);
     else if (s_bubble_paid)
-        snprintf(out, cap, "已启用 · 上次 %u 个账号各 +%d 点 · %d 秒后下次",
-                 s_bubble_paid, g.cfg.bubble_val, left);
+        snprintf(out, cap, "已启用 · 上次 %u 个账号各 +%d 点 · %d 秒后下次%s",
+                 s_bubble_paid, g.cfg.bubble_val, left, tw);
     else
-        snprintf(out, cap, "已启用 · 上次没有在线账号 · %d 秒后下次", left);
+        snprintf(out, cap, "已启用 · 上次没有在线账号 · %d 秒后下次%s", left, tw);
 }
 
 // ---------------- 周期轮询 ----------------
@@ -1171,7 +1214,8 @@ void app_tick(void) {
 
     // 泡点：到点才发，而且必须连接空闲、队列里也没人的操作 —— 不跟人抢那条连接。
     // 没连库或没启用就把计时清零，下次连上从整段间隔重新开始。
-    if (!g.db_ok || !g.cfg.bubble_on) {
+    // 不在生效时段（起止时间设置）时暂停计时，进入时段后重新开始。
+    if (!g.db_ok || !g.cfg.bubble_on || !bubble_in_window()) {
         s_bubble_next = 0;
     } else if (!db_busy() && !g_pq_n) {
         u64 now = now_ms();
