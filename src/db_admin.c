@@ -999,6 +999,334 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
     return 1;
 }
 
+// ---------------- 任务模版 导入 / 导出 ----------------
+// 任务进度分散在两张表里：new_charac_quest（已完成任务 blob + 20 个进行中任务槽
+// 及其触发器）和 charac_quest_shop（任务商店换来的永久属性加成）。
+// 模版就是把这两张表的一份快照存成纯 key=value 文本，blob 写成 MySQL 的 X'..'
+// 十六进制字面量——导入时直接拼进 INSERT，不用再解一遍码。
+// 典型用法：大号把「主线全清」导成模版，小号导入即跳过推图。
+static const char *kQuestTabs[] = {"taiwan_cain.new_charac_quest", "taiwan_cain.charac_quest_shop"};
+
+void db_quest_tpl_path(char *out, int cap, const Charac *c) {
+    char dir[MAX_PATH], ts[32];
+    art_dir("export", dir, sizeof(dir));
+    art_stamp(ts, sizeof(ts));
+    snprintf(out, (size_t)cap, "%s\\任务模版-%u-%s.txt", dir, c->no, ts);
+}
+
+int db_export_quest(Db *d, const Charac *c, const char *path, Err err) {
+    set_names(d, "utf8");
+    Str out = {0};
+    char ts[32];
+    now_str(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S");
+    str_catf(&out,
+             "# DNF GM 任务模版 v1\n"
+             "# 源角色 %s (charac_no=%u, m_id=%u)\n"
+             "# 导出时间 %s\n"
+             "#\n"
+             "# clear_quest / quest_notify 是十六进制 blob，其余都是数值。\n"
+             "# 导入会先删掉目标角色在这两张表里的现有行，再按模版写回。\n\n",
+             c->name, c->no, c->mid, ts);
+    if (!file_write(path, out.p, (size_t)out.n)) {
+        snprintf(err, ERRBUF, "无法写入 %s", path);
+        str_free(&out);
+        return 0;
+    }
+    str_clear(&out);
+
+    int nt = 0;
+    for (int ti = 0; ti < COUNT_OF(kQuestTabs); ti++) {
+        char dbn[64], tb[64];
+        if (!split_tbl(kQuestTabs[ti], dbn, sizeof(dbn), tb, sizeof(tb))) continue;
+
+        Vec names, types;
+        vec_init(&names, sizeof(Str));
+        vec_init(&types, sizeof(Str));
+        Str q = {0};
+        MyResult r = {0};
+        str_catf(&q, "SELECT COLUMN_NAME,DATA_TYPE FROM information_schema.COLUMNS "
+                     "WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' ORDER BY ORDINAL_POSITION",
+                 dbn, tb);
+        if (select1(d, &q, &r)) {
+            for (int i = 0; i < r.nrow; i++) {
+                Str *a = VEC_ADD(&names, Str);
+                memset(a, 0, sizeof(*a));
+                str_set(a, my_text(&r, i, 0) ? my_text(&r, i, 0) : "");
+                Str *b = VEC_ADD(&types, Str);
+                memset(b, 0, sizeof(*b));
+                str_set(b, my_text(&r, i, 1) ? my_text(&r, i, 1) : "");
+            }
+        }
+        my_free(&r);
+        str_clear(&q);
+        if (!names.n) {
+            vec_free_strs(&names);
+            vec_free_strs(&types);
+            continue;
+        }
+
+        str_catf(&q, "SELECT * FROM `%s`.`%s` WHERE charac_no=%u", dbn, tb, c->no);
+        int ok = select1(d, &q, &r);
+        str_free(&q);
+        if (!ok) {
+            snprintf(err, ERRBUF, "读 %s 失败：%s", kQuestTabs[ti], d->err);
+            my_free(&r);
+            vec_free_strs(&names);
+            vec_free_strs(&types);
+            str_free(&out);
+            return 0;
+        }
+        str_catf(&out, "[%s]\n", kQuestTabs[ti]);
+        if (!r.nrow) {
+            str_cat(&out, "# 该角色在这张表里没有记录\n\n");
+        } else {
+            for (int k = 0; k < names.n; k++) {
+                const char *cn = str_c(VEC_AT(&names, Str, k));
+                if (!strcmp(cn, "charac_no")) continue;      // 主键不进模版，导入时按目标角色写
+                const char *v = my_text(&r, 0, k);
+                str_catf(&out, "%s=", cn);
+                if (!v) str_cat(&out, "NULL");
+                else if (is_bin_type(str_c(VEC_AT(&types, Str, k))))
+                    sql_lit(&out, v, my_len(&r, 0, k), 1);
+                else
+                    str_cat(&out, v);
+                str_catc(&out, '\n');
+            }
+            str_catc(&out, '\n');
+            nt++;
+        }
+        file_append(path, out.p, (size_t)out.n);
+        str_clear(&out);
+        my_free(&r);
+        vec_free_strs(&names);
+        vec_free_strs(&types);
+    }
+    str_free(&out);
+    if (!nt) {
+        snprintf(err, ERRBUF, "角色「%s」还没有任何任务记录，没什么可导出的", c->name);
+        return 0;
+    }
+    return 1;
+}
+
+// 值只允许数值、NULL 或 X'..' 十六进制字面量，其余一律拒绝：
+// 这些字符串要原样拼进 SQL，放行等于把注入口子留在模版文件里。
+static int tpl_val_ok(const char *v) {
+    if (!v || !v[0]) return 0;
+    if (!strcmp(v, "NULL")) return 1;
+    if (v[0] == 'X' && v[1] == '\'') {
+        size_t n = strlen(v);
+        if (n < 3 || v[n - 1] != '\'') return 0;
+        for (size_t i = 2; i + 1 < n; i++) {
+            char c = v[i];
+            int hex = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+            if (!hex) return 0;
+        }
+        return 1;
+    }
+    for (const char *p = v; *p; p++) {
+        if (*p >= '0' && *p <= '9') continue;
+        if (*p == '-' && p == v) continue;
+        return 0;
+    }
+    return 1;
+}
+
+typedef struct {
+    Str sec, key, val;
+} TplLine;
+
+static void tpl_lines_free(Vec *v) {
+    for (int i = 0; i < v->n; i++) {
+        TplLine *t = VEC_AT(v, TplLine, i);
+        str_free(&t->sec);
+        str_free(&t->key);
+        str_free(&t->val);
+    }
+    vec_free(v);
+}
+
+// 取某张表在模版里配好的所有列，拼成 (cols, vals)。返回列数；-1 = 值不合法
+static int tpl_cols(Vec *lines, const char *full, Vec *names, Str *cols, Str *vals, Err err) {
+    int n = 0;
+    for (int k = 0; k < names->n; k++) {
+        const char *cn = str_c(VEC_AT(names, Str, k));
+        if (!strcmp(cn, "charac_no")) continue;
+        const char *v = NULL;
+        for (int i = 0; i < lines->n; i++) {
+            TplLine *t = VEC_AT(lines, TplLine, i);
+            if (strcmp(str_c(&t->sec), full)) continue;
+            if (strcmp(str_c(&t->key), cn)) continue;
+            v = str_c(&t->val);
+            break;
+        }
+        if (!v) continue;                       // 模版里没写这一列就留默认值
+        if (!tpl_val_ok(v)) {
+            snprintf(err, ERRBUF, "模版里 %s 的值是 %s，不是数值或 X'..' 十六进制", cn, v);
+            return -1;
+        }
+        if (n) {
+            str_catc(cols, ',');
+            str_catc(vals, ',');
+        }
+        str_catf(cols, "`%s`", cn);
+        str_cat(vals, v);
+        n++;
+    }
+    return n;
+}
+
+int db_import_quest(Db *d, const Charac *c, const char *path, int *tables, Err err) {
+    if (tables) *tables = 0;
+    Buf f = {0};
+    if (!file_read(path, &f) || !f.n) {
+        snprintf(err, ERRBUF, "读不到模版文件 %s", path);
+        buf_free(&f);
+        return 0;
+    }
+    char head[80] = {0};
+    size_t hn = f.n < sizeof(head) - 1 ? f.n : sizeof(head) - 1;
+    memcpy(head, f.p, hn);
+    if (!strstr(head, "DNF GM 任务模版")) {
+        snprintf(err, ERRBUF, "这不是任务模版文件（开头缺标识行）");
+        buf_free(&f);
+        return 0;
+    }
+
+    Vec lines;
+    vec_init(&lines, sizeof(TplLine));
+    Str cur = {0};
+    size_t i = 0;
+    while (i < f.n) {
+        size_t j = i;
+        while (j < f.n && f.p[j] != '\n') j++;
+        size_t e = j;
+        if (e > i && f.p[e - 1] == '\r') e--;
+        Str ln = {0};
+        str_catn(&ln, (const char *)f.p + i, (int)(e - i));
+        i = j + 1;
+        const char *s = str_c(&ln);
+        if (!s[0] || s[0] == '#') {
+            str_free(&ln);
+            continue;
+        }
+        if (s[0] == '[') {
+            size_t L = strlen(s);
+            if (L > 2 && s[L - 1] == ']') {
+                str_clear(&cur);
+                str_catn(&cur, s + 1, (int)(L - 2));
+            }
+            str_free(&ln);
+            continue;
+        }
+        const char *eq = strchr(s, '=');
+        if (eq && eq != s) {
+            TplLine *t = VEC_ADD(&lines, TplLine);
+            memset(t, 0, sizeof(*t));
+            str_catn(&t->sec, str_c(&cur), cur.n);
+            str_catn(&t->key, s, (int)(eq - s));
+            str_cat(&t->val, eq + 1);
+        }
+        str_free(&ln);
+    }
+    str_free(&cur);
+    buf_free(&f);
+
+    Str s = {0};
+    str_cat(&s, "BEGIN");
+    if (!run(d, &s)) {
+        snprintf(err, ERRBUF, "开启事务失败：%s", d->err);
+        str_free(&s);
+        tpl_lines_free(&lines);
+        return 0;
+    }
+
+    int ok = 1;
+    int nt = 0;
+    for (int ti = 0; ti < COUNT_OF(kQuestTabs) && ok; ti++) {
+        const char *full = kQuestTabs[ti];
+        char dbn[64], tb[64];
+        if (!split_tbl(full, dbn, sizeof(dbn), tb, sizeof(tb))) continue;
+
+        int have_sec = 0;
+        for (int i = 0; i < lines.n; i++)
+            if (!strcmp(str_c(&VEC_AT(&lines, TplLine, i)->sec), full)) { have_sec = 1; break; }
+        if (!have_sec) continue;                // 模版里没这一段就别动这张表
+
+        Vec names;
+        vec_init(&names, sizeof(Str));
+        Str q = {0};
+        MyResult r = {0};
+        str_catf(&q, "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                     "WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' ORDER BY ORDINAL_POSITION",
+                 dbn, tb);
+        if (select1(d, &q, &r)) {
+            for (int i = 0; i < r.nrow; i++) {
+                Str *a = VEC_ADD(&names, Str);
+                memset(a, 0, sizeof(*a));
+                str_set(a, my_text(&r, i, 0) ? my_text(&r, i, 0) : "");
+            }
+        }
+        my_free(&r);
+        str_free(&q);
+
+        Str cols = {0}, vals = {0};
+        int n = names.n ? tpl_cols(&lines, full, &names, &cols, &vals, err) : 0;
+        vec_free_strs(&names);
+        if (n < 0) {
+            ok = 0;
+        } else if (n == 0) {
+            // 一段里一个字段都没有：多半是拿错了文件，别去删目标角色的现有数据
+            snprintf(err, ERRBUF, "模版里 %s 这一段没有任何可用字段", tb);
+            ok = 0;
+        } else {
+            str_clear(&s);
+            str_catf(&s, "DELETE FROM `%s`.`%s` WHERE charac_no=%u", dbn, tb, c->no);
+            if (!run(d, &s)) {
+                snprintf(err, ERRBUF, "清掉 %s 的旧任务失败：%s", tb, d->err);
+                ok = 0;
+            } else {
+                str_clear(&s);
+                str_catf(&s, "INSERT INTO `%s`.`%s` (`charac_no`,%s) VALUES (%u,%s)",
+                         dbn, tb, str_c(&cols), c->no, str_c(&vals));
+                if (!run(d, &s)) {
+                    snprintf(err, ERRBUF, "写入 %s 失败：%s", tb, d->err);
+                    ok = 0;
+                } else {
+                    nt++;
+                }
+            }
+        }
+        str_free(&cols);
+        str_free(&vals);
+    }
+
+    str_clear(&s);
+    if (ok && !nt) {
+        snprintf(err, ERRBUF, "模版里没有可导入的任务数据");
+        ok = 0;
+    }
+    if (ok) {
+        str_cat(&s, "COMMIT");
+        if (!run(d, &s)) {
+            snprintf(err, ERRBUF, "提交事务失败：%s", d->err);
+            ok = 0;
+        }
+    }
+    if (!ok) {
+        str_clear(&s);
+        str_cat(&s, "ROLLBACK");
+        run(d, &s);
+    }
+    str_free(&s);
+    tpl_lines_free(&lines);
+    if (!ok) return 0;
+
+    if (tables) *tables = nt;
+    db_undo_flush(0);
+    return 1;
+}
+
 // ---------------- 全服错误物品扫描 ----------------
 // 覆盖一切能挂物品编号的地方：容器 blob（背包/穿戴/宠物栏/仓库/珠宝/账号金库）、
 // 邮件附件、时装/宠物表行。角色多时较慢，只在后台线程调用。

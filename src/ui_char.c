@@ -23,6 +23,9 @@ enum {
     // VIP：独立号段。上面 G_SP..G_QCLR 是连续的（G_SP+i 批量置灰依赖这一点），
     // 插进去会挪动整段编号，所以单独占一个号，不并进递增链。
     G_VIP = PAGE_ID(PAGE_GM, 50),
+    // 任务模版导入/导出：同样单独占号。一键组那 10 个按钮是 G_SP+i 连续编号的，
+    // 再往后加会撞上 G_DUMP 那一整段，所以这两个也走独立号段。
+    G_QEXP = PAGE_ID(PAGE_GM, 51), G_QIMP,
     // 分组框：纯视觉容器，不参与 enable / 提交。ID 单独起一段，避开上面连续递增的控件号
     G_BOX_ROLE = PAGE_ID(PAGE_GM, 60), G_BOX_ASSET, G_BOX_PVP, G_BOX_ONCE, G_BOX_ACCT,
     G_BOX_MISC, G_BOX_BUB
@@ -282,6 +285,50 @@ static void on_char_dump(void) {
         return;
     app_status("正在备份角色…");
     app_db_backup_char();
+}
+
+// ---------------- 任务模版 导入 / 导出 ----------------
+static void on_quest_exp(void) {
+    if (!g.db_ok) { app_info("请先连接数据库。"); return; }
+    if (!g.char_ok) { app_info("请先选择角色。"); return; }
+    char path[MAX_PATH];
+    db_quest_tpl_path(path, sizeof(path), &g.cur);
+    if (!app_confirm(fmt_new("把「%s」的任务进度导出成模版？\n\n%s\n\n"
+                             "含已完成任务、20 个进行中任务槽及其触发器、任务商店属性加成。",
+                             g.cur.name, path)))
+        return;
+    app_status("正在导出任务模版…");
+    app_quest_export();
+}
+
+static void on_quest_imp(void) {
+    if (!g.db_ok) { app_info("请先连接数据库。"); return; }
+    if (!g.char_ok) { app_info("请先选择角色。"); return; }
+    char dir[MAX_PATH], back[MAX_PATH];
+    exe_dir(dir, sizeof(dir));
+    snprintf(back, sizeof(back), "%s\\config\\export", dir);
+
+    WCHAR file[MAX_PATH] = L"";
+    WCHAR wdir[MAX_PATH];
+    utf16(back, wdir, MAX_PATH);
+    OPENFILENAMEW ofn;
+    memset(&ofn, 0, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_main;
+    ofn.lpstrFilter = L"任务模版 (*.txt)\0*.txt\0所有文件\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrInitialDir = wdir;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (!GetOpenFileNameW(&ofn)) return;
+    char path[MAX_PATH];
+    utf8(file, path, sizeof(path));
+    if (!app_confirm(fmt_new("把\n%s\n的任务进度套到「%s」身上？\n\n"
+                             "会先删掉该角色现有的任务记录，再按模版写回。",
+                             path, g.cur.name)))
+        return;
+    app_status("正在导入任务模版…");
+    app_quest_import(path);
 }
 
 // ---------------- 全服清错误物品（维护动作，不挑角色） ----------------
@@ -578,6 +625,8 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     if (id == G_CDUMP) { on_char_dump(); return 0; }
     if (id == G_SCANBAD) { on_scanbad(); return 0; }
     if (id == G_CLONE) { app_clone_char(); return 0; }
+    if (id == G_QEXP) { on_quest_exp(); return 0; }
+    if (id == G_QIMP) { on_quest_imp(); return 0; }
     if (id == G_UNLCREATE) {
         if (!need_char()) return 0;
         if (!app_confirm(fmt_new("解除账号 mid=%u 的建角次数限制？", g.cur.mid))) return 0;
@@ -812,13 +861,14 @@ static void gm_layout(Page *p, int w, int h) {
     static const int kBoxL[3] = {G_BOX_ROLE, G_BOX_ASSET, G_BOX_PVP};
     static const int kBoxR[4] = {G_BOX_ONCE, G_BOX_ACCT, G_BOX_MISC, G_BOX_BUB};
     static const int kOnce[] = {G_SP, G_QP, G_NOWEIGHT, G_SLOT, G_UNLOCK,
-                                G_EXPERT, G_FATIGUE, G_DUNGEON, G_PUNISH, G_QCLR};
+                                G_EXPERT, G_FATIGUE, G_DUNGEON, G_PUNISH, G_QCLR,
+                                G_QEXP, G_QIMP};
     static const int kAcct[] = {G_UNLCREATE};
     static const int kMisc[] = {G_DUMP, G_CDUMP, G_RESTORE, G_SCANBAD, G_CLONE};
     int wL[3], wR[4];
     for (int i = 0; i < 3; i++) wL[i] = padY + 2 * natF;
     wL[1] = padY + 3 * natF;        // 资产组三行（多了 VIP），按行数给高才不会挤成一团
-    wR[0] = padY + 5 * natB;        // 一键：10 个按钮，2 列 5 行
+    wR[0] = padY + 6 * natB;        // 一键：12 个按钮，2 列 6 行
     wR[1] = padY + 1 * natB;        // 账号：解除建角限制
     wR[2] = padY + 3 * natB;        // 维护：5 个按钮，2 列 3 行
     // 泡点组：开关(24) + 目标行(49) + 间隔/起止行(49) + 点券/D点/D币行(49)
@@ -865,7 +915,7 @@ static void gm_layout(Page *p, int w, int h) {
     gm_rows(pw, &L[0], role, 2);
     gm_rows(pw, &L[1], asset, 3);
     gm_rows(pw, &L[2], pvp, 2);
-    gm_btns(pw, &R[0], kOnce, 10, 2);
+    gm_btns(pw, &R[0], kOnce, 12, 2);
     gm_btns(pw, &R[1], kAcct, 1, 1);
     gm_btns(pw, &R[2], kMisc, 4, 2);
     gm_bubble(pw, &R[3]);
@@ -881,6 +931,8 @@ static void gm_lock(Page *p) {
     int edit = g.char_ok && !g.cur.online;
     for (int i = 0; i < 13; i++) ui_enable(GetDlgItem(p->wnd, ids[i]), edit);
     for (int i = 0; i < 10; i++) ui_enable(GetDlgItem(p->wnd, G_SP + i), on);
+    ui_enable(GetDlgItem(p->wnd, G_QEXP), on);
+    ui_enable(GetDlgItem(p->wnd, G_QIMP), on);
     static int s_edit = -1;
     if (edit != s_edit) {
         s_edit = edit;
@@ -947,6 +999,8 @@ static void gm_build(Page *p, HWND parent) {
                                  "副职业满级", "补满疲劳", "解锁全图", "清除惩罚", "清空任务"};
     for (int i = 0; i < COUNT_OF(kBtn); i++)
         ui_button(parent, kBtn[i], G_SP + i);
+    ui_button(parent, "导出任务模版", G_QEXP);
+    ui_button(parent, "导入任务模版", G_QIMP);
 
     // 同上：解除建角限制在账号组里，位置比维护组那排按钮高，先建它
     ui_button(parent, "解除建角限制", G_UNLCREATE);
@@ -966,6 +1020,12 @@ static void gm_build(Page *p, HWND parent) {
            "把当前角色整份复制成一个新角色：背包/穿戴/仓库/技能/任务/时装宠物一起复制，"
            "新角色自动取名（原名 + 数字后缀）。整个过程是一个事务，出错会整体回滚。"
            "账号共享的账号金库不复制");
+    ui_tip(parent, GetDlgItem(parent, G_QEXP),
+           "把当前角色的任务进度存成一份文本模版：已完成任务、20 个进行中任务槽及触发器、"
+           "任务商店属性加成。存到 config/export，可手工改数值");
+    ui_tip(parent, GetDlgItem(parent, G_QIMP),
+           "选一份任务模版套到当前角色上：先删掉该角色现有的任务记录，再按模版写回。"
+           "适合用大号的「主线全清」模版给小号跳过推图");
     // 字段都靠「点到别处」落库。最重要的一条写在最前面：角色在线时服务端会在
     // 登出/存档时把库里的值覆盖回去（工具这边看着是写成功了，进游戏又变回原样）。
     // 在线判定本身在有些端上不可靠（login_status 常为 0、member_play_info 无行），

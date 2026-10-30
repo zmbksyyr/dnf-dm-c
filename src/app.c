@@ -1009,6 +1009,38 @@ void app_clone_char(void) {
     app_act("克隆角色", w_clone_char, &g_clc);
 }
 
+// ---------------- 任务模版 导入 / 导出 ----------------
+static int w_quest_export(void *ctx, Err err) {
+    DbJobCtx *c = (DbJobCtx *)ctx;
+    if (!db_export_quest(&g.db, &g.cur, c->path, err)) return 0;
+    app_log("导出任务模版 · %s → %s", g.cur.name, c->path);
+    return 1;
+}
+
+static int w_quest_import(void *ctx, Err err) {
+    DbJobCtx *c = (DbJobCtx *)ctx;
+    int nt = 0;
+    if (!db_import_quest(&g.db, &g.cur, c->path, &nt, err)) return 0;
+    app_log("导入任务模版 · %s ← %s（覆盖 %d 张表）", g.cur.name, c->path, nt);
+    return 1;
+}
+
+void app_quest_export(void) {
+    if (!g.db_ok) { app_info("请先连接数据库。"); return; }
+    if (!g.char_ok) { app_info("请先选择角色。"); return; }
+    if (!app_act_idle()) { app_info("上一个操作还在进行，等它完成再做"); return; }
+    db_quest_tpl_path(g_dbc.path, sizeof(g_dbc.path), &g.cur);
+    app_act("导出任务模版", w_quest_export, &g_dbc);
+}
+
+void app_quest_import(const char *path) {
+    if (!g.db_ok) { app_info("请先连接数据库。"); return; }
+    if (!g.char_ok) { app_info("请先选择角色。"); return; }
+    if (!app_act_idle()) { app_info("上一个操作还在进行，等它完成再做"); return; }
+    snprintf(g_dbc.path, sizeof(g_dbc.path), "%s", path);
+    app_act("导入任务模版", w_quest_import, &g_dbc);
+}
+
 // ---------------- 生命周期 ----------------
 void app_init(void) {
     InitializeCriticalSection(&s_log_cs);

@@ -242,6 +242,12 @@ int  db_del_tab_orphan(Db *d, int avatar, u64 ui_id, Err err);
 void db_backup_char_path(char *out, int cap, const Charac *c);
 int  db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *rows, Err err);
 
+// 任务模版：把角色的任务进度（已完成 / 进行中 / 任务商店属性）导成一份纯文本，
+// 也能把模版套到别的角色上。文件是 key=value，blob 写成 X'..'，可以手工改。
+void db_quest_tpl_path(char *out, int cap, const Charac *c);
+int  db_export_quest(Db *d, const Charac *c, const char *path, Err err);
+int  db_import_quest(Db *d, const Charac *c, const char *path, int *tables, Err err);
+
 // 角色克隆：把一个角色连同它的背包/装备/技能/任务等整份复制成一个新角色。
 // 全程在一个事务里，中途任何一步失败就整体回滚，不会留下半个角色。
 // out_name 回填新角色名（调用方拿去提示 / 刷新），out_no 回填新 charac_no。

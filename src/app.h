@@ -186,3 +186,7 @@ void app_db_restore(const char *path);
 
 // 角色克隆（后台执行，单个事务，失败整体回滚）
 void app_clone_char(void);
+
+// 任务模版：当前角色的任务进度导出成文本 / 导入一份模版覆盖当前角色
+void app_quest_export(void);
+void app_quest_import(const char *path);
