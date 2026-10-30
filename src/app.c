@@ -1,6 +1,7 @@
 // app 实现：配置、异步任务、连接/角色/数据/保存。
 #include "app.h"
 #include "act.h"       // act_apply_lists（列表暂存搬入）
+#include <stdio.h>     // app_bubble_export 用 FILE/fopen
 
 App g;
 
@@ -54,9 +55,18 @@ static void cfg_load(Config *c, const char *path) {
 
     c->bubble_on = ini_int(L"bubble", L"on", 0, w);
     c->bubble_sec = ini_int(L"bubble", L"sec", 60, w);
-    c->bubble_val = ini_int(L"bubble", L"val", 1, w);
+    c->bubble_target = ini_int(L"bubble", L"target", 0, w);
+    c->bubble_coin = ini_int(L"bubble", L"coin", 0, w);
+    c->bubble_dpoint = ini_int(L"bubble", L"dpoint", 0, w);
+    c->bubble_dcoin = ini_int(L"bubble", L"dcoin", 0, w);
+    c->bubble_item = (u32)ini_int(L"bubble", L"item", 0, w);
+    c->bubble_itemnum = ini_int(L"bubble", L"itemnum", 0, w);
+    c->bubble_tno = (u32)ini_int(L"bubble", L"tno", 0, w);
     c->bubble_start = ini_int(L"bubble", L"start", 0, w);
     c->bubble_end = ini_int(L"bubble", L"end", 0, w);
+    // 旧版只有单一 val（=D币），迁移到 dcoin
+    if (c->bubble_coin==0 && c->bubble_dpoint==0 && c->bubble_dcoin==0)
+        c->bubble_dcoin = ini_int(L"bubble", L"val", 1, w);
 
     if (c->font < 8 || c->font > 14) c->font = 9;
     if (c->poll_sec < 2) c->poll_sec = 3;
@@ -78,7 +88,13 @@ static void cfg_save(const Config *c, const char *path) {
     ini_set(L"grab", L"auto", fmt_new("%d", c->grab_auto), w);
     ini_set(L"bubble", L"on", fmt_new("%d", c->bubble_on), w);
     ini_set(L"bubble", L"sec", fmt_new("%d", c->bubble_sec), w);
-    ini_set(L"bubble", L"val", fmt_new("%d", c->bubble_val), w);
+    ini_set(L"bubble", L"target", fmt_new("%d", c->bubble_target), w);
+    ini_set(L"bubble", L"coin", fmt_new("%d", c->bubble_coin), w);
+    ini_set(L"bubble", L"dpoint", fmt_new("%d", c->bubble_dpoint), w);
+    ini_set(L"bubble", L"dcoin", fmt_new("%d", c->bubble_dcoin), w);
+    ini_set(L"bubble", L"item", fmt_new("%u", c->bubble_item), w);
+    ini_set(L"bubble", L"itemnum", fmt_new("%d", c->bubble_itemnum), w);
+    ini_set(L"bubble", L"tno", fmt_new("%u", c->bubble_tno), w);
     ini_set(L"bubble", L"start", fmt_new("%d", c->bubble_start), w);
     ini_set(L"bubble", L"end", fmt_new("%d", c->bubble_end), w);
 }
@@ -1021,30 +1037,35 @@ void app_shutdown(void) {
 }
 
 // ---------------- 泡点 ----------------
-// 每 bubble_sec 秒给「在线账号」的赠送点券加 bubble_val 点（账在账号维度，
-// 所以一个账号挂多个角色也只发一份）。只算本工具开着的时间：关掉就停、重开从零
-// 计时，不补算——补算要给每个账号记上次结算时刻，等于把服务端的账本搬到 GM 台上。
+// 每 bubble_sec 秒按目标人群 + 多奖励给账号/角色加点。账在账号维度（D点/D币）或
+// 角色维度（点券/物品），所以一个账号挂多个角色也只发一份。只算本工具开着的时间：
+// 关掉就停、重开从零计时，不补算——补算要给每个账号记上次结算时刻，等于把服务端的账本搬到 GM 台上。
 static u64 s_bubble_next;      // 下次结算时刻（0 = 还没开始计时）
-static u32 s_bubble_paid;      // 上次命中的账号数
+static u32 s_bubble_paid;      // 上次命中的对象数
 static u32 s_bubble_runs;      // 已结算次数
 
-typedef struct {
-    int val;
-} BubbleCtx;
-
 static int w_bubble(void *ctx, Err err) {
+    (void)ctx;
     u32 n = 0;
-    if (!db_bubble_tick(&g.db, ((BubbleCtx *)ctx)->val, &n, err)) return 0;
+    BubbleCfg bc = {
+        g.cfg.bubble_target, g.cfg.bubble_coin, g.cfg.bubble_dpoint, g.cfg.bubble_dcoin,
+        g.cfg.bubble_item, g.cfg.bubble_itemnum, g.cfg.bubble_tno
+    };
+    if (!db_bubble_tick(&g.db, &bc, &n, err)) return 0;
     s_bubble_paid = n;
     s_bubble_runs++;
     return 1;
 }
 
-void app_bubble_apply(int on, int sec, int val, int start_min, int end_min) {
+void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dcoin,
+                      u32 item, int itemnum, u32 tno, int start_min, int end_min) {
     if (sec < 5) sec = 5;             // 下限 5 秒：再快就是拿一条连接刷库
     if (sec > 86400) sec = 86400;
-    if (val < 1) val = 1;
-    if (val > 1000000) val = 1000000;
+    if (coin < 0) coin = 0;
+    if (dpoint < 0) dpoint = 0;
+    if (dcoin < 0) dcoin = 0;
+    if (itemnum < 0) itemnum = 0;
+    if (target < 0 || target > 3) target = 0;
     // 时间窗口：0-1439 分钟；start==end 表示全天
     if (start_min < 0) start_min = 0;
     if (start_min > 1439) start_min = 1439;
@@ -1052,7 +1073,13 @@ void app_bubble_apply(int on, int sec, int val, int start_min, int end_min) {
     if (end_min > 1439) end_min = 1439;
     g.cfg.bubble_on = on ? 1 : 0;
     g.cfg.bubble_sec = sec;
-    g.cfg.bubble_val = val;
+    g.cfg.bubble_target = target;
+    g.cfg.bubble_coin = coin;
+    g.cfg.bubble_dpoint = dpoint;
+    g.cfg.bubble_dcoin = dcoin;
+    g.cfg.bubble_item = item;
+    g.cfg.bubble_itemnum = itemnum;
+    g.cfg.bubble_tno = tno;
     g.cfg.bubble_start = start_min;
     g.cfg.bubble_end = end_min;
     s_bubble_next = 0;                // 从改的这一刻重新计时，别沿用旧时刻
@@ -1060,16 +1087,25 @@ void app_bubble_apply(int on, int sec, int val, int start_min, int end_min) {
     char t1[8], t2[8];
     snprintf(t1, sizeof(t1), "%02d:%02d", start_min / 60, start_min % 60);
     snprintf(t2, sizeof(t2), "%02d:%02d", end_min / 60, end_min % 60);
+    const char *tg = target == 0 ? "仅在线" : target == 1 ? "全服" :
+                     target == 2 ? "指定角色" : "指定账号";
+    char rw[128] = "";
+    if (coin)   snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "点券+%d ", coin);
+    if (dpoint) snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "D点+%d ", dpoint);
+    if (dcoin)  snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "D币+%d ", dcoin);
+    if (item)   snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "物品%d×%d ", item,
+                         itemnum > 0 ? itemnum : 1);
+    if (!rw[0]) snprintf(rw, sizeof(rw), "（无奖励）");
     if (start_min == end_min)
-        app_status("泡点：%s · 每 %d 秒 +%d 点 · 全天生效", on ? "已启用" : "已停用", sec, val);
+        app_status("泡点：%s · 每 %d 秒 · %s · %s · 全天生效", on ? "已启用" : "已停用", sec, tg, rw);
     else
-        app_status("泡点：%s · 每 %d 秒 +%d 点 · %s~%s 生效", on ? "已启用" : "已停用", sec, val, t1, t2);
+        app_status("泡点：%s · 每 %d 秒 · %s · %s · %s~%s 生效",
+                   on ? "已启用" : "已停用", sec, tg, rw, t1, t2);
     if (start_min == end_min)
-        app_log("泡点：%s · 每 %d 秒 +%d 点（赠送点券，只算在线账号，全天生效）",
-                on ? "已启用" : "已停用", sec, val);
+        app_log("泡点：%s · 每 %d 秒 · 目标%s · %s · 全天生效", on ? "已启用" : "已停用", sec, tg, rw);
     else
-        app_log("泡点：%s · 每 %d 秒 +%d 点（赠送点券，只算在线账号，%s~%s 生效）",
-                on ? "已启用" : "已停用", sec, val, t1, t2);
+        app_log("泡点：%s · 每 %d 秒 · 目标%s · %s · %s~%s 生效",
+                on ? "已启用" : "已停用", sec, tg, rw, t1, t2);
 }
 
 // 当前是否在泡点生效时段内（start==end 表示全天）
@@ -1105,16 +1141,39 @@ void app_bubble_status(char *out, int cap) {
     }
     u64 now = now_ms();
     int left = s_bubble_next > now ? (int)((s_bubble_next - now) / 1000) : 0;
+    const char *tg = g.cfg.bubble_target==0?"仅在线":g.cfg.bubble_target==1?"全服":
+                     g.cfg.bubble_target==2?"指定角色":"指定账号";
     if (!s_bubble_runs)
-        snprintf(out, cap, "已启用 · %d 秒后首次结算%s", left, tw);
+        snprintf(out, cap, "已启用 · %s · %d 秒后首次结算%s", tg, left, tw);
     else if (s_bubble_paid)
-        snprintf(out, cap, "已启用 · 上次 %u 个账号各 +%d 点 · %d 秒后下次%s",
-                 s_bubble_paid, g.cfg.bubble_val, left, tw);
+        snprintf(out, cap, "已启用 · %s · 上次 %u 个对象已加奖励 · %d 秒后下次%s",
+                 tg, s_bubble_paid, left, tw);
     else
-        snprintf(out, cap, "已启用 · 上次没有在线账号 · %d 秒后下次%s", left, tw);
+        snprintf(out, cap, "已启用 · %s · 上次没有符合条件的对象 · %d 秒后下次%s", tg, left, tw);
 }
 
 // ---------------- 周期轮询 ----------------
+void app_bubble_export(void) {
+    char dir[MAX_PATH], outp[MAX_PATH], logp[MAX_PATH];
+    app_log_path(logp, sizeof(logp));
+    art_dir("export", dir, sizeof(dir));
+    path_join(outp, sizeof(outp), dir, "泡点记录.txt");
+    FILE *fin = fopen(logp, "rb");
+    if (!fin) { app_info("没有可导出的泡点记录（日志文件不存在）"); return; }
+    FILE *fout = fopen(outp, "wb");
+    if (!fout) { fclose(fin); app_info("导出失败：无法写入 泡点记录.txt"); return; }
+    char line[2048];
+    int n = 0;
+    while (fgets(line, sizeof(line), fin)) {
+        if (strstr(line, "泡点结算") || strstr(line, "泡点：")) {
+            fputs(line, fout);
+            n++;
+        }
+    }
+    fclose(fin); fclose(fout);
+    app_info(fmt_new("已导出 %d 条泡点记录到：\n%s", n, outp));
+}
+
 void app_tick(void) {
     Err err;
     static u64 last_poll = 0;
@@ -1224,16 +1283,16 @@ void app_tick(void) {
             s_bubble_next = now + step;
         } else if (now >= s_bubble_next) {
             s_bubble_next = now + step;
-            BubbleCtx bc = {g.cfg.bubble_val};
-            job_start(&g.job_bubble, w_bubble, &bc);
+            job_start(&g.job_bubble, w_bubble, NULL);
         }
     }
     if (job_poll(&g.job_bubble, err)) {
         if (err[0]) {
             app_log("泡点结算失败：%s", err);
         } else if (s_bubble_paid) {
-            app_log("泡点结算：%u 个在线账号各 +%d 点（赠送点券）", s_bubble_paid,
-                    g.cfg.bubble_val);
+            const char *tg = g.cfg.bubble_target==0?"仅在线":g.cfg.bubble_target==1?"全服":
+                             g.cfg.bubble_target==2?"指定角色":"指定账号";
+            app_log("泡点结算：%s · %u 个对象已加奖励", tg, s_bubble_paid);
         }
     }
 

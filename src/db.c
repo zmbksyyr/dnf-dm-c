@@ -947,27 +947,78 @@ int db_set_cera(Db *d, const Charac *c, u64 cera, u64 point, Err err) {
     return db_tx_commit(d, err);
 }
 
-// 泡点：给每个在线账号的赠送点券加 val。
-// 一条 UPDATE ... JOIN 写完，要么全加要么一个不加，不需要事务。
-// 不走 db_exec：那里把「命中 0 行」当失败，而这里没人上线是正常结果。
-int db_bubble_tick(Db *d, int val, u32 *paid, Err err) {
-    if (val <= 0) {
-        if (paid) *paid = 0;
-        return 1;
+// 泡点结算：按目标人群 + 多奖励（赠送点券 / D点 / D币 / 物品）给账号或角色加点。
+// 每条奖励是一条 UPDATE ... JOIN（或 INSERT ... SELECT），要么全加要么不加。
+// 不走 db_exec：那里把「命中 0 行」当失败，而这里没人符合条件本是正常结果。
+int db_bubble_tick(Db *d, const BubbleCfg *cfg, u32 *paid, Err err) {
+    if (paid) *paid = 0;
+    if (cfg->coin <= 0 && cfg->dpoint <= 0 && cfg->dcoin <= 0 && cfg->item == 0) {
+        return 1;   // 没设任何奖励
     }
-    Str s = {0};
-    u64 aff = 0;
-    // account 是 varchar(30)。拿它跟 int 的 m_id 直接比会把列转成数字、索引失效；
-    // 反过来把 m_id 转成字符，两边都是字符串，索引还在。
-    str_catf(&s,
-             "UPDATE taiwan_billing.cash_cera_point p"
-             " JOIN (SELECT DISTINCT m_id FROM taiwan_login.login_account_3"
-             " WHERE login_status>=1) l ON p.account=CAST(l.m_id AS CHAR)"
-             " SET p.cera_point=p.cera_point+%d, p.mod_date=NOW()", val);
-    int ok = run_aff(d, &s, &aff);
-    if (!ok) snprintf(err, ERRBUF, "泡点结算：%s", d->err);
-    else if (paid) *paid = (u32)aff;
-    str_free(&s);
+    // 目标集合子查询：chars = 角色号集合，mids = 账号 m_id 集合（账号级奖励用）
+    Str chs = {0}, mids = {0};
+    if (cfg->target == 0) {          // 仅在线
+        str_cat(&chs, "SELECT charac_no FROM taiwan_cain.charac_info WHERE m_id IN "
+                      "(SELECT m_id FROM taiwan_login.login_account_3 WHERE login_status>=1)");
+        str_cat(&mids, "SELECT DISTINCT m_id FROM taiwan_login.login_account_3 WHERE login_status>=1");
+    } else if (cfg->target == 1) {   // 全服（含离线）
+        str_cat(&chs, "SELECT charac_no FROM taiwan_cain.charac_info WHERE delete_flag=0");
+        str_cat(&mids, "SELECT DISTINCT m_id FROM taiwan_cain.charac_info WHERE delete_flag=0");
+    } else if (cfg->target == 2) {   // 指定角色
+        str_catf(&chs, "SELECT charac_no FROM taiwan_cain.charac_info WHERE charac_no=%u", cfg->tno);
+        str_catf(&mids, "SELECT m_id FROM taiwan_cain.charac_info WHERE charac_no=%u", cfg->tno);
+    } else {                         // 指定账号
+        str_catf(&chs, "SELECT charac_no FROM taiwan_cain.charac_info WHERE m_id=%u", cfg->tno);
+        str_catf(&mids, "SELECT %u AS m_id", cfg->tno);
+    }
+
+    int ok = 1;
+    u64 aff = 0, paid_rows = 0;
+    // 赠送点券（角色级，inventory.coin）
+    if (cfg->coin > 0) {
+        Str s = {0};
+        str_catf(&s, "UPDATE taiwan_cain_2nd.inventory i JOIN (%s) t ON i.charac_no=t.charac_no "
+                     "SET i.coin=i.coin+%d", chs.p, cfg->coin);
+        if (!run_aff(d, &s, &aff)) { ok = 0; snprintf(err, ERRBUF, "泡点·点券：%s", d->err); }
+        else paid_rows = aff;
+        str_free(&s);
+    }
+    // D点（账号级，cash_cera.cera）
+    if (cfg->dpoint > 0) {
+        Str s = {0};
+        str_catf(&s, "UPDATE taiwan_billing.cash_cera c JOIN (%s) t ON c.account=CAST(t.m_id AS CHAR) "
+                     "SET c.cera=c.cera+%d", mids.p, cfg->dpoint);
+        if (!run_aff(d, &s, &aff)) { ok = 0; snprintf(err, ERRBUF, "泡点·D点：%s", d->err); }
+        else if (paid_rows == 0) paid_rows = aff;
+        str_free(&s);
+    }
+    // D币（账号级，cash_cera_point.cera_point）
+    if (cfg->dcoin > 0) {
+        Str s = {0};
+        str_catf(&s, "UPDATE taiwan_billing.cash_cera_point p JOIN (%s) t ON p.account=CAST(t.m_id AS CHAR) "
+                     "SET p.cera_point=p.cera_point+%d", mids.p, cfg->dcoin);
+        if (!run_aff(d, &s, &aff)) { ok = 0; snprintf(err, ERRBUF, "泡点·D币：%s", d->err); }
+        else if (paid_rows == 0) paid_rows = aff;
+        str_free(&s);
+    }
+    // 物品：逐收件人插一封（全服目标跳过，避免海量插入卡死）
+    if (cfg->item != 0 && cfg->itemnum > 0 && cfg->target != 1) {
+        int n = cfg->itemnum > 0 ? cfg->itemnum : 1;
+        if (n > 200) n = 200;
+        for (int k = 0; k < n; k++) {
+            Str s = {0};
+            str_catf(&s, "INSERT INTO taiwan_cain_2nd.postal "
+                         "(occ_time,send_charac_name,receive_charac_no,item_id,gold,letter_id,"
+                         "avata_flag,creature_flag,unlimit_flag) "
+                         "SELECT NOW(),'泡点',charac_no,%u,0,0,0,0,1 FROM (%s) t",
+                         cfg->item, chs.p);
+            if (!run_aff(d, &s, &aff)) { ok = 0; snprintf(err, ERRBUF, "泡点·物品：%s", d->err); }
+            else if (paid_rows == 0) paid_rows = aff;
+            str_free(&s);
+        }
+    }
+    str_free(&chs); str_free(&mids);
+    if (paid) *paid = (u32)paid_rows;
     return ok;
 }
 

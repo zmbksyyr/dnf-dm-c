@@ -17,8 +17,14 @@ typedef struct {
     int  grab_auto;
     char grab_proc[64];
     int  bubble_on;
-    int  bubble_sec;
-    int  bubble_val;
+    int  bubble_sec;     // 结算间隔（秒）
+    int  bubble_target;  // 0=仅在线 1=全服(含离线) 2=指定角色 3=指定账号
+    int  bubble_coin;    // 赠送点券 (inventory.coin)
+    int  bubble_dpoint;  // D点 (cash_cera.cera)
+    int  bubble_dcoin;   // D币 (cash_cera_point.cera_point)
+    u32  bubble_item;    // 物品 ID（0=不发）
+    int  bubble_itemnum; // 物品数量
+    u32  bubble_tno;     // 指定角色 charac_no / 指定账号 m_id
     int  bubble_start;   // 泡点生效开始时间（距 0 点的分钟数，0-1439）
     int  bubble_end;     // 泡点生效结束时间（同上；start==end 表示全天）
 } Config;
@@ -161,11 +167,13 @@ int  app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz);
 int  app_act_idle(void);                 // 连接空闲且没有排队动作：能直接发
 #define app_act(what, fn, ctx) app_act_n((what), (fn), (void *)(ctx), (int)sizeof(*(ctx)))
 
-// 泡点：开关 / 间隔秒 / 每次点数 / 生效时段（分钟，start==end 全天）。
+// 泡点：开关 / 间隔秒 / 目标人群 / 多奖励（赠送点券·D点·D币·物品）/ 生效时段。
 // 改完立即写回 settings.ini，计时从改的那一刻重来。
 // 结算由 app_tick 驱动，只在本工具开着、且连库期间发生（关掉不补算）。
-void app_bubble_apply(int on, int sec, int val, int start_min, int end_min);
+void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dcoin,
+                      u32 item, int itemnum, u32 tno, int start_min, int end_min);
 void app_bubble_status(char *out, int cap);   // 一行人话，给 GM 页底部标签用
+void app_bubble_export(void);                // 把泡点结算记录导出为 txt
 
 // 发放
 void app_grant_add(u32 id);

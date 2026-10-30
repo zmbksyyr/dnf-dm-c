@@ -119,7 +119,16 @@ int  db_set_cera(Db *d, const Charac *c, u64 cera, u64 point, Err err);
 
 // 泡点结算：给每个在线账号的赠送点券加 val，paid 带回命中账号数。
 // 0 行是正常结果（没人在线），不是失败。
-int  db_bubble_tick(Db *d, int val, u32 *paid, Err err);
+typedef struct {
+    int  target;      // 0=仅在线 1=全服(含离线) 2=指定角色 3=指定账号
+    int  coin;        // 赠送点券 (inventory.coin)
+    int  dpoint;      // D点 (cash_cera.cera)
+    int  dcoin;       // D币 (cash_cera_point.cera_point)
+    u32  item;        // 物品 ID（0=不发）
+    int  itemnum;     // 物品数量
+    u32  tno;         // 指定角色 charac_no / 指定账号 m_id
+} BubbleCfg;
+int  db_bubble_tick(Db *d, const BubbleCfg *cfg, u32 *paid, Err err);
 int  db_set_delete_flag(Db *d, const Charac *c, int deleted, Err err);
 
 // GM 一键
