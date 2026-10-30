@@ -81,8 +81,11 @@ static void cfg_save(const Config *c, const char *path) {
 // ---------------- 日志/提示 ----------------
 // 逐行 append 意味着每条日志都开/关一次文件；改成内存攒批，1s 或 8KB 落一次盘。
 // 文件按天分：config/logs/log-20261030.txt，只留最近 7 天。
+// s_log 被 job 线程（app_log）和 UI 线程（app_log_flush）同时访问，必须加锁。
 static Str s_log;
 static u64 s_log_ms;
+static CRITICAL_SECTION s_log_cs;
+static int s_log_cs_ok;
 
 void app_log_path(char *out, int cap) {
     char dir[MAX_PATH], day[16];
@@ -92,13 +95,16 @@ void app_log_path(char *out, int cap) {
 }
 
 void app_log_flush(void) {
-    if (s_log.n <= 0) return;
+    if (!s_log_cs_ok) return;
+    EnterCriticalSection(&s_log_cs);
+    if (s_log.n <= 0) { LeaveCriticalSection(&s_log_cs); return; }
     char path[MAX_PATH];
     app_log_path(path, sizeof(path));
     file_append(path, s_log.p, s_log.n);
     s_log.n = 0;
     if (s_log.p) s_log.p[0] = 0;
     s_log_ms = now_ms();
+    LeaveCriticalSection(&s_log_cs);
 }
 
 void app_log(const char *fmt, ...) {
@@ -109,8 +115,11 @@ void app_log(const char *fmt, ...) {
     va_end(ap);
     now_str(ts, sizeof(ts), "%H:%M:%S");
     snprintf(line, sizeof(line), "[%s] %s\r\n", ts, msg);
+    if (s_log_cs_ok) EnterCriticalSection(&s_log_cs);
     str_cat(&s_log, line);
-    if (s_log.n >= 8192) app_log_flush();
+    int full = s_log.n >= 8192;
+    if (s_log_cs_ok) LeaveCriticalSection(&s_log_cs);
+    if (full) app_log_flush();
 }
 
 void app_status(const char *fmt, ...) {
@@ -791,6 +800,13 @@ void app_grant_add(u32 id) {
     app_status("已加入队列：%s", nm);
 }
 
+// 发放队列快照：w_grant 在 job 线程跑，g.grant 在 UI 线程可被增删——直接遍历
+// g.grant 是竞态（realloc 后指针悬空 / 删项后越界）。发前拷一份，job 只读快照。
+// 快照放独立静态数组（不在 GrantCtx 里）：GrantCtx 要塞进 app_act 的 768B 队列缓冲，
+// 带不下 256 项物品。一次只发一批，所以一份快照就够。
+#define GRANT_SNAP_MAX 256
+static NamedId s_grant_snap[GRANT_SNAP_MAX];
+static int     s_grant_snap_n;
 typedef struct {
     int by_mail;
 } GrantCtx;
@@ -799,8 +815,8 @@ static GrantCtx g_grant_ctx;
 static int w_grant(void *ctx, Err err) {
     GrantCtx *c = (GrantCtx *)ctx;
     if (c->by_mail) {
-        for (int i = 0; i < g.grant.n; i++) {
-            NamedId *n = VEC_AT(&g.grant, NamedId, i);
+        for (int i = 0; i < s_grant_snap_n; i++) {
+            NamedId *n = &s_grant_snap[i];
             GrantItem gi;
             memset(&gi, 0, sizeof(gi));
             gi.id = n->id;
@@ -819,8 +835,8 @@ static int w_grant(void *ctx, Err err) {
     }
     Blob *b = &g.data.inv;
     if (!b->ok) { snprintf(err, ERRBUF, "背包未载入"); return 0; }
-    for (int i = 0; i < g.grant.n; i++) {
-        NamedId *n = VEC_AT(&g.grant, NamedId, i);
+    for (int i = 0; i < s_grant_snap_n; i++) {
+        NamedId *n = &s_grant_snap[i];
         int slot = -1;
         for (int k = 0; k < b->n; k++)
             if (item_empty(&b->items[k])) { slot = k; break; }
@@ -849,6 +865,14 @@ static int w_grant(void *ctx, Err err) {
 int app_grant_send(int by_mail) {
     if (!g.char_ok) { app_info("请先选择角色"); return 0; }
     if (g.grant.n == 0) { app_info("发放队列为空"); return 0; }
+    if (g.grant.n > GRANT_SNAP_MAX) {
+        app_info(fmt_new("队列超过 %d 项，请分批发放", GRANT_SNAP_MAX));
+        return 0;
+    }
+    if (job_running(&g.job_act)) {
+        app_info("上一个操作还在进行，等它完成再发");
+        return 0;
+    }
     if (!by_mail && db_is_online(&g.db, g.cur.mid)) {
         app_info("角色在线，请改用「邮件」发放。");
         return 0;
@@ -856,6 +880,8 @@ int app_grant_send(int by_mail) {
     if (!app_confirm(by_mail ? fmt_new("把 %d 种物品发到 %s 的邮箱？", g.grant.n, g.cur.name)
                              : fmt_new("把 %d 种物品直接放进 %s 的背包？", g.grant.n, g.cur.name)))
         return 0;
+    s_grant_snap_n = (int)g.grant.n;
+    memcpy(s_grant_snap, g.grant.p, sizeof(NamedId) * (size_t)g.grant.n);
     g_grant_ctx.by_mail = by_mail;
     return app_act(by_mail ? "邮件发放" : "直接入包", w_grant, &g_grant_ctx);
 }
@@ -914,6 +940,8 @@ void app_db_restore(const char *path) {
 
 // ---------------- 生命周期 ----------------
 void app_init(void) {
+    InitializeCriticalSection(&s_log_cs);
+    s_log_cs_ok = 1;
     char dir[MAX_PATH], sub[MAX_PATH], logs[MAX_PATH];
     exe_dir(dir, sizeof(dir));
     path_join(sub, sizeof(sub), dir, "config");
@@ -958,6 +986,7 @@ void app_shutdown(void) {
     job_stop(&g.job_poll);
     job_stop(&g.job_act);
     job_stop(&g.job_grab);
+    job_stop(&g.job_bubble);
     db_undo_flush(1);                 // 本会话的写前快照落盘
     app_log("退出");
     app_log_flush();
@@ -965,6 +994,7 @@ void app_shutdown(void) {
     db_free_data(&g.data);
     db_free_data(&g_load_ctx.d);
     if (g.db_ok) db_close(&g.db);
+    if (s_log_cs_ok) { DeleteCriticalSection(&s_log_cs); s_log_cs_ok = 0; }
 }
 
 // ---------------- 泡点 ----------------

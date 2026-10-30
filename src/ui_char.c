@@ -812,7 +812,6 @@ static void gm_lock(Page *p) {
             WCHAR w[96];
             utf16(t, w, COUNT_OF(w));
             if (h) SetWindowTextW(h, w);
-            free(t);
         }
     }
     ui_enable(GetDlgItem(p->wnd, G_UNLCREATE), g.db_ok && g.char_ok);

@@ -641,13 +641,19 @@ void fmt(char *out, int cap, const char *f, ...) {
     va_end(ap);
 }
 
+// 轮转静态缓冲：返回的指针下次调用即失效，调用方不拥有、不 free。
+// 只在 UI 线程使用（job 线程走 fmtv 栈缓冲）。4 槽够用——最深的嵌套是
+// app_confirm(ternary(fmt_new, fmt_new))，同时活 2 个；留一倍余量。
 char *fmt_new(const char *f, ...) {
-    char tmp[4096];
+    static char buf[4][4096];
+    static int  slot;
+    char *out = buf[slot];
+    slot = (slot + 1) & 3;
     va_list ap;
     va_start(ap, f);
-    fmtv(tmp, sizeof(tmp), f, ap);
+    fmtv(out, 4096, f, ap);
     va_end(ap);
-    return str_dup(tmp);
+    return out;
 }
 
 void hex_str(const void *d, size_t n, Str *out) {

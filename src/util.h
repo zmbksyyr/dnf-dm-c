@@ -139,7 +139,7 @@ void hash_sha1(const void *d, size_t n, u8 out[20]);
 // ---------------- 其它 ----------------
 void fmtv(char *out, int cap, const char *f, va_list ap);
 void fmt(char *out, int cap, const char *f, ...);
-char *fmt_new(const char *f, ...);                       // malloc 字符串
+char *fmt_new(const char *f, ...);                       // 轮转静态缓冲，下次调用失效，不要 free
 void hex_str(const void *d, size_t n, Str *out);
 void now_str(char *out, int cap, const char *f);
 u64  now_ms(void);

@@ -294,7 +294,8 @@ void ui_text(HWND w, const char *utf8) {
     WCHAR *p = tmp;
     int cap = COUNT_OF(tmp);
     if ((int)strlen(utf8) + 1 > cap) {
-        p = (WCHAR *)xalloc((strlen(utf8) + 1) * sizeof(WCHAR));
+        cap = (int)strlen(utf8) + 1;
+        p = (WCHAR *)xalloc((size_t)cap * sizeof(WCHAR));
         if (!p) return;
     }
     utf16(utf8, p, cap);
