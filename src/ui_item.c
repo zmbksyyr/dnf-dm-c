@@ -627,10 +627,11 @@ void page_query_create(Page *p) {
 enum {
     G_ID = PAGE_ID(PAGE_GRANT, 1), G_NUM, G_TYPE, G_ENH, G_INC, G_INCV, G_FORGE,
     G_SEAL, G_SEALC, G_DUR, G_ADD, G_LIST, G_DEL, G_CLR, G_MAIL, G_INV, G_INFO, G_GRAB,
-    G_EXPORT, G_IMPORT
+    G_EXPORT, G_IMPORT, G_GAUTO
 };
 
 static HWND g_id, g_num, g_type, g_enh, g_inc, g_incv, g_forge, g_seal, g_sealc, g_dur, g_list, g_info;
+static HWND g_gauto;   // 连取开关
 static HWND g_hint;     // 队列怎么用，写一行在按钮下面，省得猜
 static int g_sync;      // 重填队列时屏蔽 LVN_ITEMCHANGED
 static int g_bind = -1; // 表单当前绑定的队列行；-1 = 未绑定（只填表单，不写回）
@@ -1021,6 +1022,10 @@ static LRESULT grant_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
                 return 0;
             case G_INV: app_grant_send(0); grant_reload(NULL); return 0;
             case G_GRAB: app_grab_once(); return 0;
+            case G_GAUTO:
+                // 复选框自己就是新状态，直接交给 app 层落盘并驱动轮询
+                app_grab_auto(SendMessageW(g_gauto, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                return 0;
             case G_EXPORT: grant_export(); return 0;
             case G_IMPORT: grant_import(); return 0;
         }
@@ -1072,6 +1077,7 @@ static void grant_layout(Page *p, int w, int h) {
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_btn_at(p->wnd, G_ADD, "加入队列"), ui_scale(88));
     ui_add(&r, ui_btn_at(p->wnd, G_GRAB, "取码"), ui_scale(56));
+    ui_add(&r, g_gauto, ui_scale(64));
     ui_add(&r, ui_btn_at(p->wnd, G_DEL, "移除所选"), ui_scale(84));
     ui_add(&r, ui_btn_at(p->wnd, G_CLR, "清空队列"), ui_scale(84));
     ui_add(&r, ui_btn_at(p->wnd, G_EXPORT, "导出"), ui_scale(56));
@@ -1097,10 +1103,13 @@ static void grant_lock(Page *p) {
 }
 
 static void grant_build(Page *p, HWND parent) {
+    // 创建顺序就是 Tab 顺序：这一行照视觉排（编号 → 类型 → 数量 → 强化 …），
+    // g_num 原来建在 g_type 前面，Tab 会从编号直接跳到数量再绕回类型
     g_id = ui_edit(parent, "", G_ID, 0);
-    g_num = ui_edit(parent, "1", G_NUM, 0);
     g_type = ui_combo(parent, G_TYPE, 1);
     ui_combo_fill(g_type, kTypeList, COUNT_OF(kTypeList), 2);
+    g_num = ui_edit(parent, "1", G_NUM, 0);
+    g_dur = ui_edit(parent, "0", G_DUR, 0);   // 耐久在第一行末尾，跟着建
     g_enh = ui_edit(parent, "0", G_ENH, 0);
     g_inc = ui_combo(parent, G_INC, 1);
     ui_combo_fill(g_inc, kIncList, COUNT_OF(kIncList), 0);
@@ -1108,25 +1117,30 @@ static void grant_build(Page *p, HWND parent) {
     g_forge = ui_edit(parent, "0", G_FORGE, 0);
     g_seal = ui_check(parent, "封装", G_SEAL, 0);
     g_sealc = ui_edit(parent, "0", G_SEALC, 0);
-    g_dur = ui_edit(parent, "0", G_DUR, 0);
-    g_list = ui_list(parent, G_LIST);
     g_info = ui_label(parent, "请先选择角色", G_INFO);
     g_hint = ui_label(parent, "单击队列行载回上方表单；改完点到别处就自动写回该行。"
                               "新物品点「加入队列」入队，发放用底部「邮件发放 / 直接入包」。", 0);
-    ui_cols(g_list, (const char *const[]){"物品名", "编号", "数量", "强化", "增幅", "锻造", "封装", "耐久"},
-            (const int[]){240, 84, 60, 50, 90, 50, 70, 56}, 8);
     ui_button(parent, "加入队列", G_ADD);
     ui_button(parent, "取码", G_GRAB);
+    g_gauto = ui_check(parent, "连取", G_GAUTO, g.cfg.grab_auto);
     ui_button(parent, "移除所选", G_DEL);
     ui_button(parent, "清空队列", G_CLR);
-    ui_button(parent, "邮件发放", G_MAIL);
-    ui_button(parent, "直接入包", G_INV);
+    // 创建顺序就是 Tab 顺序：这一行照视觉排（…清空队列→导出→导入）
     ui_button(parent, "导出", G_EXPORT);
     ui_button(parent, "导入", G_IMPORT);
+    // 列表建在按钮行后面；底部那一对（邮件发放/直接入包）建在最后，视觉上也在最下面
+    g_list = ui_list(parent, G_LIST);
+    ui_cols(g_list, (const char *const[]){"物品名", "编号", "数量", "强化", "增幅", "锻造", "封装", "耐久"},
+            (const int[]){240, 84, 60, 50, 90, 50, 70, 56}, 8);
+    ui_button(parent, "邮件发放", G_MAIL);
+    ui_button(parent, "直接入包", G_INV);
     // 按钮名短，含义挂在悬浮提示上
     ui_tip(parent, GetDlgItem(parent, G_ADD),
            "把表单里的物品作为新的一项追加到队列；点了某行之后改表单会自动写回该行，点此按钮则把当前表单当新项入队");
     ui_tip(parent, GetDlgItem(parent, G_GRAB), "读游戏内存里鼠标悬停的物品编号，填到上面的「编号」框");
+    ui_tip(parent, g_gauto,
+           "开启后持续读取游戏里鼠标悬停的物品，每取到一件就整行追加到队列；队列里已有的编号自动跳过。"
+           "开着工具才算，关掉不补。热键可以随时开关");
     ui_tip(parent, GetDlgItem(parent, G_DEL), "从队列里删掉当前选中的那一行");
     ui_tip(parent, GetDlgItem(parent, G_CLR), "清空整个队列");
     ui_tip(parent, GetDlgItem(parent, G_EXPORT), "把队列导出成 config 下的 .tsv，可用记事本改");
@@ -1141,6 +1155,45 @@ void page_grant_setid(u32 id) {
     if (!g_id || !id) return;
     ui_set_int(g_id, (int)id);
 }
+
+// 连取命中：整行入队，不是只填编号。同编号直接跳过——鼠标在同一个物品上
+// 会停好几拍，不去重队列里就会灌进一堆重复行。想要同编号不同配置，
+// 照旧用「加入队列」手动加（手动这条路不去重）。
+void page_grant_autoadd(const GrabHit *h) {
+    if (!h || !h->id || !g_list) return;      // 页没建过就没地方放，宁可不收
+    for (int i = 0; i < (int)g.grant.n; i++) {
+        NamedId *e = VEC_AT(&g.grant, NamedId, i);
+        if (e->id == h->id) {
+            app_status("连取跳过 #%u %s（队列中已有）", h->id, h->name);
+            return;
+        }
+    }
+    // 数量/强化/增幅这些配置以表单为准：表单就是"下一件入队物品的模板"，
+    // 想改默认配置先改表单再悬停物品；入队后选中新行，接着改表单就是改它
+    NamedId v;
+    grant_form_get(&v);
+    v.id = h->id;
+    snprintf(v.name, sizeof(v.name), "%s", h->name);
+    NamedId *n = VEC_ADD(&g.grant, NamedId);
+    *n = v;
+    g_bind = -1;
+    grant_reload(NULL);
+    int last = (int)g.grant.n - 1;
+    ui_row_sel_set(g_list, last);
+    g_bind = last;
+    app_status("连取入队 #%u %s（队列 %d 项）", h->id, h->name, (int)g.grant.n);
+    app_log("连取入队 #%u %s · %s（队列 %d 项）", h->id, h->name, h->type, (int)g.grant.n);
+}
+
+// 热键切换开关后，复选框不会自己跟上，这里补同步（页没建就是空操作）
+void page_grant_syncauto(void) {
+    if (!g_gauto) return;
+    int want = g.cfg.grab_auto ? BST_CHECKED : BST_UNCHECKED;
+    if ((int)SendMessageW(g_gauto, BM_GETCHECK, 0, 0) != want)
+        SendMessageW(g_gauto, BM_SETCHECK, (WPARAM)want, 0);
+}
+
+int page_grant_built(void) { return g_list != NULL; }
 
 void page_grant_create(Page *p) {
     p->build = grant_build;

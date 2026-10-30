@@ -68,7 +68,9 @@ p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
 main = wait_main()
 u.PostMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)   # 连接
 time.sleep(4.0)
-switch(main, 8)                                        # GM 页
+# 页号可传参：python v_tab.py 2 = 发放页；不传默认 GM 页
+PAGE = int(sys.argv[1]) if len(sys.argv) > 1 else 8
+switch(main, PAGE)                                      # GM 页
 time.sleep(1.0)
 
 page = None

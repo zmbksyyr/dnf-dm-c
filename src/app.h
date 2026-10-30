@@ -131,6 +131,8 @@ int  app_sync_char(void);          // 写后校验：库里真值与缓存一致
 void app_row_sync(void);           // 把 g.cur 的名字/等级/职业写回左栏那一行
 void app_load_pvf(const char *path);
 void app_grab_once(void);          // 后台取码一次，完成后 g.grab_ver 自增
+void app_grab_fast_once(void);     // 连取节奏用：只走特征码快路径，不回退扫堆
+void app_grab_auto(int on);        // 连取总开关（复选框与热键共用，改完即写 settings.ini）
 
 // 页面数据
 Blob *app_page_blob(int page);

@@ -347,7 +347,10 @@ static void grab_poll(void) {
     if (now && !down) {
         HWND fg = GetForegroundWindow();
         // 本工具在前台时不抢键，免得影响页签切换
-        if (fg && fg != g_main) app_grab_once();
+        // 热键就是连取的总开关：坐在游戏里也能开能停，不用切回工具。
+        // 单次取码的能力还在发放页「取码」按钮上（那条路会走扫堆回退）
+        // 复选框的同步不在这里做：见 tick() 里每 tick 的幂等刷新
+        if (fg && fg != g_main) app_grab_auto(!g.cfg.grab_auto);
     }
     down = now;
 }
@@ -421,7 +424,16 @@ static void select_page(int i) {
 
 static void tick(void) {
     app_tick();
+    // 连取开着而发放页还没建过：采到的东西没地方放。这里只改页签的选中项，
+    // 真正的切页交给下面那段页签轮询去完成——直接调 select_page 的话，
+    // tab 的选中项还是旧页，下一 tick 又会被打回去。
+    // g_list 一建上这个判断就不再成立，不会反复切页打断用户。
+    if (g.cfg.grab_auto && !page_grant_built())
+        SendMessageW(g_tab, TCM_SETCURSEL, (WPARAM)PAGE_GRANT, 0);
     grab_poll();
+    // 复选框是 g.cfg.grab_auto 的投影：热键在游戏里切换时发放页可能还没建、
+    // 也可能不在前台，边沿那一下同步不上。每 tick 幂等刷一次，100ms 内必然收敛。
+    page_grant_syncauto();
     page_gm_pump();      // GM 页排队的写入往前推：跟本页是否可见无关
 
     // 从最小化恢复时，子控件的绘制表面已被系统丢弃，和切页一样会留白：
@@ -469,6 +481,8 @@ static void tick(void) {
     if (g.grab_ver != s_grab_ver) {
         s_grab_ver = g.grab_ver;
         page_grant_setid(g.grab.id);   // 取码结果直接落到发放页的编号框
+        // 连取开着：不只是填编号，整行入队（同编号在里面就跳过）
+        if (g.cfg.grab_auto) page_grant_autoadd(&g.grab);
     }
     card_refresh();
     status_refresh();

@@ -510,15 +510,41 @@ void app_load_pvf(const char *path) {
 }
 
 // ---------------- 取码 ----------------
+// 作业上下文：fast=1 时只走特征码快路径（连取用），0 时允许扫堆回退（手动按钮用）。
+// 用 static 单例而不是栈上变量：job_start 只存指针，作业跑完才读它。
+typedef struct { int fast; } GrabCtx;
+static GrabCtx s_grab_ctx;
+
 static int w_grab(void *ctx, Err err) {
-    (void)ctx;
-    return grab_hit(&g.grab, err);
+    GrabCtx *c = (GrabCtx *)ctx;
+    return c && c->fast ? grab_hit_fast(&g.grab, err) : grab_hit(&g.grab, err);
 }
 
 void app_grab_once(void) {
     if (job_running(&g.job_grab)) return;
     app_status("取码中…（只读扫描，稍等）");
-    job_start(&g.job_grab, w_grab, NULL);
+    s_grab_ctx.fast = 0;
+    job_start(&g.job_grab, w_grab, &s_grab_ctx);
+}
+
+void app_grab_fast_once(void) {
+    if (job_running(&g.job_grab)) return;
+    s_grab_ctx.fast = 1;
+    job_start(&g.job_grab, w_grab, &s_grab_ctx);
+}
+
+void app_grab_auto(int on) {
+    on = on ? 1 : 0;
+    if (on == g.cfg.grab_auto) return;
+    g.cfg.grab_auto = on;
+    cfg_save(&g.cfg, g.cfg_path);
+    if (on) {
+        app_status("连取：已开启 · 在游戏里把鼠标放到物品上，会自动入队发放列表");
+        app_log("连取：已开启 · 悬停到的物品整行入队，队列里已有的编号跳过");
+    } else {
+        app_status("连取：已关闭");
+        app_log("连取：已关闭");
+    }
 }
 
 // ---------------- 角色 ----------------
@@ -1119,10 +1145,24 @@ void app_tick(void) {
     app_flush_pending();              // 失焦写库的落地时机
     if (now_ms() - s_log_ms > 1000) app_log_flush();
 
+    // 连取：开着就按 250ms 的节奏起快速取码。它只读游戏内存，不碰数据库连接，
+    // 所以不用等 db_busy——和泡点/轮询各走各的作业线程，互不抢占。
+    // builtin 命中后每轮只读几个地址（微秒级），代价可以忽略。
+    static u64 s_grab_ms = 0;
+    if (g.cfg.grab_auto && !job_running(&g.job_grab) && now_ms() - s_grab_ms > 250) {
+        s_grab_ms = now_ms();
+        app_grab_fast_once();
+    }
+
     if (job_poll(&g.job_grab, err)) {
+        static char s_grab_err[ERRBUF];   // 连取时同一句错误每 250ms 来一次，只报头一回
         if (err[0]) {
-            app_status("取码失败：%s", err);
+            if (!g.cfg.grab_auto || strcmp(err, s_grab_err)) {
+                app_status("取码失败：%s", err);
+                snprintf(s_grab_err, sizeof(s_grab_err), "%s", err);
+            }
         } else {
+            s_grab_err[0] = 0;
             g.grab_ver++;
             app_status("取到物品 #%u %s（%s · %ums）", g.grab.id, g.grab.name, g.grab.strategy,
                        (unsigned)g.grab.ms);

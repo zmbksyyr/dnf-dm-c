@@ -18,6 +18,11 @@ typedef struct {
 // 扫一次；返回 1 命中 0 未命中，失败时 err 有原因
 int  grab_hit(GrabHit *out, Err err);
 
+// 连取用的快速版：只走 builtin 特征码路径，失败不回退扫堆。
+// 扫堆单次要读几百 MB，按 250ms 的节奏跑会一直占着 CPU；
+// 而 builtin 命中后每次只读几个地址，微秒级，适合持续轮询。
+int  grab_hit_fast(GrabHit *out, Err err);
+
 // 诊断文本（--grab-probe 落 config/grab-probe.txt）
 void grab_probe(Str *out);
 

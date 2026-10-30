@@ -282,7 +282,7 @@ static int cursor_window(u32 pid, char *cls, int cap, int *x, int *y) {
 }
 
 // ---------------------------------------------------------------- 主流程
-int grab_hit(GrabHit *out, Err err) {
+static int grab_hit_ex(GrabHit *out, int allow_scan, Err err) {
     memset(out, 0, sizeof(*out));
     g_last_n = 0;
     DWORD t0 = GetTickCount();
@@ -311,8 +311,10 @@ int grab_hit(GrabHit *out, Err err) {
     // 2) 记录鼠标所在窗口（只认属于目标进程的窗口），仅用于诊断显示
     cursor_window(pid, out->wnd, sizeof(out->wnd), &out->x, &out->y);
 
-    // 3) 自适应回退：扫堆
-    {
+    // 3) 自适应回退：扫堆。连取模式（allow_scan=0）跳过这条路——它单次最多读
+    //    256MB 堆内存，按 250ms 一轮的节奏会把 CPU 吃满；builtin 失效时连取
+    //    就静默停在这里，用一次手动「取码」来触发完整回退即可。
+    if (allow_scan) {
         Cand cs[MAX_CAND];
         int n = 0;
         u64 scanned = 0;
@@ -377,6 +379,9 @@ done:
     out->ms = GetTickCount() - t0;
     return 1;
 }
+
+int grab_hit(GrabHit *out, Err err)      { return grab_hit_ex(out, 1, err); }
+int grab_hit_fast(GrabHit *out, Err err) { return grab_hit_ex(out, 0, err); }
 
 // ---------------------------------------------------------------- 诊断
 void grab_probe(Str *out) {
