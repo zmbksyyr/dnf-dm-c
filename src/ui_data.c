@@ -50,6 +50,7 @@ static int tab_work(void *ctx, Err err) {
 
 static void tab_scan_start(void) {
     if (!g.db_ok) { app_info("请先连接数据库。"); return; }
+    if (job_running(&g.job_act)) { app_info("上一个操作还在进行，等它完成"); return; }
     if (!g_tabscan.cap) vec_init(&g_tabscan, sizeof(TabOrphan));
     g_tabscan.n = 0;
     g_tab_pending = 1;
@@ -80,6 +81,7 @@ static void tab_fill(void) {
 
 static void tab_del_run(int all) {
     if (!g_tabscan.n) { app_info("没有可删的记录。"); return; }
+    if (job_running(&g.job_act)) { app_info("上一个操作还在进行，等它完成"); return; }
     if (!g_tabdel.cap) vec_init(&g_tabdel, sizeof(TabOrphan));
     g_tabdel.n = 0;
     if (all) {
