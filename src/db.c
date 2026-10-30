@@ -906,19 +906,34 @@ int db_set_account_money(Db *d, const Charac *c, u64 money, Err err) {
 
 // 点券分两张表存，必须同生同死：扣了没加比不扣更糟
 int db_set_cera(Db *d, const Charac *c, u64 cera, u64 point, Err err) {
+    // cash_cera / cash_cera_point 也是懒建的（账号没充过点券就没有行），
+    // 和 account_cargo / charac_quest_shop 一个毛病：光 UPDATE 会 0 行报失败。
+    // 改成有行则改、无行则建。用事务包住两张表，要么都改要么都不改。
     if (!db_tx_begin(d, err)) return 0;
-    if (!db_exec(d, "改点券", "taiwan_billing.cash_cera", "account", c->mid, err,
-                 "UPDATE taiwan_billing.cash_cera SET cera=%llu WHERE account=%u",
-                 (unsigned long long)cera, c->mid))
-        goto fail;
-    if (!db_exec(d, "改赠送点券", "taiwan_billing.cash_cera_point", "account", c->mid, err,
-                 "UPDATE taiwan_billing.cash_cera_point SET cera_point=%llu WHERE account=%u",
-                 (unsigned long long)point, c->mid))
-        goto fail;
+    Str s = {0};
+    str_catf(&s,
+             "INSERT INTO taiwan_billing.cash_cera (account,cera) VALUES (%u,%llu) "
+             "ON DUPLICATE KEY UPDATE cera=VALUES(cera)",
+             c->mid, (unsigned long long)cera);
+    int ok = run(d, &s);
+    str_free(&s);
+    if (!ok) {
+        snprintf(err, ERRBUF, "改点券：%s", d->err);
+        db_tx_rollback(d);
+        return 0;
+    }
+    str_catf(&s,
+             "INSERT INTO taiwan_billing.cash_cera_point (account,cera_point) VALUES (%u,%llu) "
+             "ON DUPLICATE KEY UPDATE cera_point=VALUES(cera_point)",
+             c->mid, (unsigned long long)point);
+    ok = run(d, &s);
+    str_free(&s);
+    if (!ok) {
+        snprintf(err, ERRBUF, "改赠送点券：%s", d->err);
+        db_tx_rollback(d);
+        return 0;
+    }
     return db_tx_commit(d, err);
-fail:
-    db_tx_rollback(d);
-    return 0;
 }
 
 // 泡点：给每个在线账号的赠送点券加 val。
