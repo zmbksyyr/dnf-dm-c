@@ -626,12 +626,12 @@ void page_query_create(Page *p) {
 // ================================================================ 发放页
 enum {
     G_ID = PAGE_ID(PAGE_GRANT, 1), G_NUM, G_TYPE, G_ENH, G_INC, G_INCV, G_FORGE,
-    G_SEAL, G_SEALC, G_DUR, G_ADD, G_LIST, G_DEL, G_CLR, G_MAIL, G_INV, G_INFO, G_GRAB,
+    G_SEAL, G_SEALC, G_DUR, G_ADD, G_LIST, G_DEL, G_CLR, G_MAIL, G_INV, G_INFO,
     G_EXPORT, G_IMPORT, G_GAUTO
 };
 
 static HWND g_id, g_num, g_type, g_enh, g_inc, g_incv, g_forge, g_seal, g_sealc, g_dur, g_list, g_info;
-static HWND g_gauto;   // 连取开关
+static HWND g_gauto;   // 连续取码开关
 static HWND g_hint;     // 队列怎么用，写一行在按钮下面，省得猜
 static int g_sync;      // 重填队列时屏蔽 LVN_ITEMCHANGED
 static int g_bind = -1; // 表单当前绑定的队列行；-1 = 未绑定（只填表单，不写回）
@@ -1021,7 +1021,6 @@ static LRESULT grant_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
                 grant_reload(NULL);
                 return 0;
             case G_INV: app_grant_send(0); grant_reload(NULL); return 0;
-            case G_GRAB: app_grab_once(); return 0;
             case G_GAUTO:
                 // 复选框自己就是新状态，直接交给 app 层落盘并驱动轮询
                 app_grab_auto(SendMessageW(g_gauto, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -1076,8 +1075,7 @@ static void grant_layout(Page *p, int w, int h) {
     y += rowh + g;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_btn_at(p->wnd, G_ADD, "加入队列"), ui_scale(88));
-    ui_add(&r, ui_btn_at(p->wnd, G_GRAB, "取码"), ui_scale(56));
-    ui_add(&r, g_gauto, ui_scale(64));
+    ui_add(&r, g_gauto, ui_scale(88));
     ui_add(&r, ui_btn_at(p->wnd, G_DEL, "移除所选"), ui_scale(84));
     ui_add(&r, ui_btn_at(p->wnd, G_CLR, "清空队列"), ui_scale(84));
     ui_add(&r, ui_btn_at(p->wnd, G_EXPORT, "导出"), ui_scale(56));
@@ -1121,8 +1119,7 @@ static void grant_build(Page *p, HWND parent) {
     g_hint = ui_label(parent, "单击队列行载回上方表单；改完点到别处就自动写回该行。"
                               "新物品点「加入队列」入队，发放用底部「邮件发放 / 直接入包」。", 0);
     ui_button(parent, "加入队列", G_ADD);
-    ui_button(parent, "取码", G_GRAB);
-    g_gauto = ui_check(parent, "连取", G_GAUTO, g.cfg.grab_auto);
+    g_gauto = ui_check(parent, "连续取码", G_GAUTO, g.cfg.grab_auto);
     ui_button(parent, "移除所选", G_DEL);
     ui_button(parent, "清空队列", G_CLR);
     // 创建顺序就是 Tab 顺序：这一行照视觉排（…清空队列→导出→导入）
@@ -1137,11 +1134,8 @@ static void grant_build(Page *p, HWND parent) {
     // 按钮名短，含义挂在悬浮提示上
     ui_tip(parent, GetDlgItem(parent, G_ADD),
            "把表单里的物品作为新的一项追加到队列；点了某行之后改表单会自动写回该行，点此按钮则把当前表单当新项入队");
-    ui_tip(parent, GetDlgItem(parent, G_GRAB),
-           "点一下，然后把鼠标移回游戏、悬停到目标物品上（5 秒内自动采到）："
-           "采到就整行追加到队列，编号同时填进上方「编号」框；队列里已有的编号自动跳过");
     ui_tip(parent, g_gauto,
-           "开启后持续读取游戏里鼠标悬停的物品，每取到一件就整行追加到队列；队列里已有的编号自动跳过。"
+           "默认开启。开启后持续读取游戏里鼠标悬停的物品，每取到一件就整行追加到队列；队列里已有的编号自动跳过。"
            "开着工具才算，关掉不补。热键可以随时开关");
     ui_tip(parent, GetDlgItem(parent, G_DEL), "从队列里删掉当前选中的那一行");
     ui_tip(parent, GetDlgItem(parent, G_CLR), "清空整个队列");
@@ -1158,18 +1152,15 @@ void page_grant_setid(u32 id) {
     ui_set_int(g_id, (int)id);
 }
 
-// 取码命中：整行入队，不是只填编号。手动「取码」和连取走同一条路——
-// 用户的预期是"采到就进清单"。同编号直接跳过：连取时鼠标在同一件物品上
-// 会停好几拍，不去重队列里就会灌进一堆重复行；手动重复采同一件也一样。
+// 取码命中：整行入队，不是只填编号。同编号静默跳过：连续取码时鼠标在同一件
+// 物品上会停好几拍（每 250ms 采到一次），不去重队列里就会灌进一堆重复行，
+// 也不值得每次都弹状态栏——换到新物品时的「取到物品」提示就是反馈。
 // 想要同编号不同配置，照旧用「加入队列」手动加（手动这条路不去重）。
 void page_grant_autoadd(const GrabHit *h) {
     if (!h || !h->id || !g_list) return;      // 页没建过就没地方放，宁可不收
     for (int i = 0; i < (int)g.grant.n; i++) {
         NamedId *e = VEC_AT(&g.grant, NamedId, i);
-        if (e->id == h->id) {
-            app_status("跳过 #%u %s（队列中已有）", h->id, h->name);
-            return;
-        }
+        if (e->id == h->id) return;
     }
     // 数量/强化/增幅这些配置以表单为准：表单就是"下一件入队物品的模板"，
     // 想改默认配置先改表单再悬停物品；入队后选中新行，接着改表单就是改它

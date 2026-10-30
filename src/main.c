@@ -366,11 +366,11 @@ static void grab_poll(void) {
     int now = (GetAsyncKeyState(vk) & 0x8000) != 0;
     if (now && !down) {
         HWND fg = GetForegroundWindow();
-        // 本工具在前台时不抢键，免得影响页签切换
-        // 热键就是连取的总开关：坐在游戏里也能开能停，不用切回工具。
-        // 单次取码在发放页「取码」按钮上：点一下再等悬停回来（grab_hit_wait）
+        // 本工具在前台时不抢键，免得影响页签切换。fg 为 NULL（激活交接的瞬间、
+        // 桌面没有前台窗口）也算"不是本工具"——键这时根本送不进我们的控件。
+        // 热键就是连续取码的总开关：坐在游戏里也能开能停，不用切回工具。
         // 复选框的同步不在这里做：见 tick() 里每 tick 的幂等刷新
-        if (fg && fg != g_main) app_grab_auto(!g.cfg.grab_auto);
+        if (fg != g_main) app_grab_auto(!g.cfg.grab_auto);
     }
     down = now;
 }
@@ -444,7 +444,7 @@ static void select_page(int i) {
 
 static void tick(void) {
     app_tick();
-    // 连取开着而发放页还没建过：采到的东西没地方放。这里只改页签的选中项，
+    // 连续取码开着而发放页还没建过：采到的东西没地方放。这里只改页签的选中项，
     // 真正的切页交给下面那段页签轮询去完成——直接调 select_page 的话，
     // tab 的选中项还是旧页，下一 tick 又会被打回去。
     // g_list 一建上这个判断就不再成立，不会反复切页打断用户。
@@ -503,8 +503,8 @@ static void tick(void) {
     if (g.grab_ver != s_grab_ver) {
         s_grab_ver = g.grab_ver;
         page_grant_setid(g.grab.id);   // 取码结果落到发放页的编号框（看得见的回声）
-        // 采到就整行入队，手动「取码」和连取一个待遇：用户要的是"采到就进清单"，
-        // 不是只留个编号还得再点一次「加入队列」。同编号已在队列里就跳过（去重）。
+        // 采到就整行入队：用户要的是"采到就进清单"，不是只留个编号还得再点一次
+        // 「加入队列」。同编号已在队列里就跳过（去重）。
         page_grant_autoadd(&g.grab);
     }
     card_refresh();

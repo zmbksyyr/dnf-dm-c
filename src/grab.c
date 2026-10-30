@@ -3,11 +3,11 @@
 // 思路：
 //   1. CreateToolhelp32Snapshot 按进程名找 PID 与主模块；
 //   2. 复刻参考工具：AOB 动态定位悬停对象指针槽，读取 id / 名称 / 品质（builtin）；
-//   3. 鼠标不在物品上时悬停槽是空的（点按钮就会这样）：等悬停回来再采（wait）；
+//   3. 鼠标不在物品上时悬停槽是空的：连续取码按节奏轮询，空槽就跳过，绝不猜；
 //   4. 名称优先用 PVF，PVF 不认识时保留内存中的 UTF-16 名称。
 // 全程只用 ReadProcessMemory / VirtualQueryEx，不写、不注入、不挂钩。
 // 扫堆（scan）只留在 --grab-probe 诊断里：它分不清谁被悬停，取的是全堆最高分，
-// 当成"取码"的结果用只会填错编号。
+// 当成取码结果用只会填错编号。
 #include "grab.h"
 #include "item.h"
 #include <windows.h>
@@ -333,8 +333,7 @@ static int grab_hit_ex(GrabHit *out, int allow_scan, Err err) {
     cursor_window(pid, out->wnd, sizeof(out->wnd), &out->x, &out->y);
 
     // 3) 自适应回退：扫堆。只有诊断（--grab-probe）还走这条路——它分不清
-    //    谁被悬停，取的是全堆最高分，当结果用只会填错编号。手动「取码」
-    //    和连取都不扫堆：前者改成等悬停回来（见 grab_hit_wait），后者
+    //    谁被悬停，取的是全堆最高分，当结果用只会填错编号。连续取码不扫堆：
     //    单次最多读 256MB，按 250ms 一轮的节奏会把 CPU 吃满。
     if (allow_scan) {
         Cand cs[MAX_CAND];
@@ -397,51 +396,6 @@ done:
 
 int grab_hit(GrabHit *out, Err err)      { return grab_hit_ex(out, 1, err); }
 int grab_hit_fast(GrabHit *out, Err err) { return grab_hit_ex(out, 0, err); }
-
-// 等悬停版：特征码立即试一次，之后按 80ms 的节奏重试，最多等 ms 毫秒。
-// 手动「取码」按钮专用——按按钮这个动作本身就会把鼠标带离游戏，而游戏一发现
-// 鼠标不在物品上就会清空悬停槽（实测：点按钮的瞬间 builtin 就失效了，扫堆
-// 回退捡到的是全堆最高分的一件，不是悬停的那件）。所以这里不是"采一次"而是
-// "等一会儿"：用户把鼠标放回游戏里的物品上，最多 ms 毫秒内自动采到。
-// 这条路不回退扫堆，理由同 grab_hit_ex 的注释 3。
-int grab_hit_wait(GrabHit *out, int ms, Err err) {
-    memset(out, 0, sizeof(*out));
-    g_last_n = 0;
-    DWORD t0 = GetTickCount();
-
-    u32 pid;
-    HANDLE hp;
-    u64 base;
-    u32 size;
-    char mod[128] = "";
-    if (!open_target(&pid, &hp, &base, &size, mod, err)) return 0;
-    out->pid = pid;
-
-    // 特征码都没命中：这个端的悬停槽根本不存在，等下去也不会有结果
-    if (!base || !size || !builtin_locate(hp, pid, base, size)) {
-        snprintf(err, ERRBUF, "该游戏端没有命中悬停定位特征码，「取码」不可用（--grab-probe 可看诊断）");
-        CloseHandle(hp);
-        out->ms = GetTickCount() - t0;
-        return 0;
-    }
-
-    DWORD deadline = t0 + (DWORD)ms;
-    for (;;) {
-        if (builtin_read(hp, pid, base, size, out)) {
-            CloseHandle(hp);
-            grab_finish(out, t0);
-            return 1;
-        }
-        if (GetTickCount() >= deadline) break;
-        Sleep(80);                  // 悬停槽的变化以百毫秒计，80ms 足够跟上
-    }
-    CloseHandle(hp);
-    snprintf(err, ERRBUF,
-             "%d 秒内没在游戏里悬停到物品：把鼠标放回游戏内的目标物品上再采，或开「连取」悬停即采",
-             ms / 1000);
-    out->ms = GetTickCount() - t0;
-    return 0;
-}
 
 // ---------------------------------------------------------------- 诊断
 void grab_probe(Str *out) {

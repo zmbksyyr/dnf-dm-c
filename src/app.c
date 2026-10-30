@@ -49,7 +49,7 @@ static void cfg_load(Config *c, const char *path) {
 
     ini_str(L"grab", L"proc", c->grab_proc, sizeof(c->grab_proc), w);
     if (!c->grab_proc[0]) snprintf(c->grab_proc, sizeof(c->grab_proc), "DNF.exe");
-    c->grab_auto = ini_int(L"grab", L"auto", 0, w);
+    c->grab_auto = ini_int(L"grab", L"auto", 1, w);   // 默认开启连续取码
 
     c->bubble_on = ini_int(L"bubble", L"on", 0, w);
     c->bubble_sec = ini_int(L"bubble", L"sec", 60, w);
@@ -518,42 +518,16 @@ void app_load_pvf(const char *path) {
     job_start(&g.job_pvf, w_pvf, &g_pvf_ctx);
 }
 
-// ---------------- 取码 ----------------
-// 作业上下文：wait_ms>0 = 手动「取码」（等悬停回来，见 grab_hit_wait）；
-// 0 = 连取的快速轮次（只试一次特征码，没悬停就静默跳过）。
-// 用 static 单例而不是栈上变量：job_start 只存指针，作业跑完才读它。
-#define GRAB_WAIT_MS 5000        // 点「取码」后等用户把鼠标放回游戏的时长
-typedef struct { int wait_ms; } GrabCtx;
-static GrabCtx s_grab_ctx;
-static int s_grab_pending;       // 连取轮次占着作业线程时点了「取码」：补发
-
+// ---------------- 连续取码 ----------------
+// 快速轮次：只试一次特征码，没悬停就静默跳过。
 static int w_grab(void *ctx, Err err) {
-    GrabCtx *c = (GrabCtx *)ctx;
-    return c && c->wait_ms > 0 ? grab_hit_wait(&g.grab, c->wait_ms, err)
-                               : grab_hit_fast(&g.grab, err);
-}
-
-void app_grab_once(void) {
-    if (job_running(&g.job_grab)) {
-        // 正在等悬停（用户又点了一次）：等的就是这件事，不用再排
-        if (s_grab_ctx.wait_ms > 0) return;
-        // 被连取的快轮次占着（每 250ms 一次，单次十几毫秒）：记下来，
-        // 作业一空就补发——点了没反应比慢半秒更难琢磨
-        s_grab_pending = 1;
-        app_status("取码：把鼠标放回游戏，悬停到目标物品上（%d 秒内）…", GRAB_WAIT_MS / 1000);
-        return;
-    }
-    // 点击会把鼠标带离游戏，悬停槽当场失效——所以这里不是"采一次"而是"等一会儿"：
-    // 用户把鼠标放回游戏里的物品上，最多 5 秒内自动采到，编号落到发放页。
-    app_status("取码：把鼠标放回游戏，悬停到目标物品上（%d 秒内）…", GRAB_WAIT_MS / 1000);
-    s_grab_ctx.wait_ms = GRAB_WAIT_MS;
-    job_start(&g.job_grab, w_grab, &s_grab_ctx);
+    (void)ctx;
+    return grab_hit_fast(&g.grab, err);
 }
 
 void app_grab_fast_once(void) {
     if (job_running(&g.job_grab)) return;
-    s_grab_ctx.wait_ms = 0;
-    job_start(&g.job_grab, w_grab, &s_grab_ctx);
+    job_start(&g.job_grab, w_grab, NULL);
 }
 
 void app_grab_auto(int on) {
@@ -562,11 +536,11 @@ void app_grab_auto(int on) {
     g.cfg.grab_auto = on;
     cfg_save(&g.cfg, g.cfg_path);
     if (on) {
-        app_status("连取：已开启 · 在游戏里把鼠标放到物品上，会自动入队发放列表");
-        app_log("连取：已开启 · 悬停到的物品整行入队，队列里已有的编号跳过");
+        app_status("连续取码：已开启 · 在游戏里把鼠标放到物品上，会自动入队发放列表");
+        app_log("连续取码：已开启 · 悬停到的物品整行入队，队列里已有的编号跳过");
     } else {
-        app_status("连取：已关闭");
-        app_log("连取：已关闭");
+        app_status("连续取码：已关闭");
+        app_log("连续取码：已关闭");
     }
 }
 
@@ -1189,34 +1163,38 @@ void app_tick(void) {
     app_flush_pending();              // 失焦写库的落地时机
     if (now_ms() - s_log_ms > 1000) app_log_flush();
 
-    // 连取：开着就按 250ms 的节奏起快速取码。它只读游戏内存，不碰数据库连接，
+    // 连续取码：开着就按节奏起快速采集。它只读游戏内存，不碰数据库连接，
     // 所以不用等 db_busy——和泡点/轮询各走各的作业线程，互不抢占。
     // builtin 命中后每轮只读几个地址（微秒级），代价可以忽略。
+    // 游戏没开时错误不会变，放慢到 2s 一轮省 CPU；游戏在（哪怕没悬停）保持 250ms 跟手。
     static u64 s_grab_ms = 0;
-    if (g.cfg.grab_auto && !job_running(&g.job_grab) && now_ms() - s_grab_ms > 250) {
+    static int s_grab_slow = 0;
+    if (g.cfg.grab_auto && !job_running(&g.job_grab) &&
+        now_ms() - s_grab_ms > (s_grab_slow ? 2000 : 250)) {
         s_grab_ms = now_ms();
         app_grab_fast_once();
     }
 
     if (job_poll(&g.job_grab, err)) {
-        static char s_grab_err[ERRBUF];   // 连取时同一句错误每 250ms 来一次，只报头一回
+        static char s_grab_err[ERRBUF];   // 同一句错误每轮都来，只报头一回
+        static u32  s_grab_last;          // 上一件采到的编号：同一件只记一条
         if (err[0]) {
             if (!g.cfg.grab_auto || strcmp(err, s_grab_err)) {
                 app_status("取码失败：%s", err);
                 snprintf(s_grab_err, sizeof(s_grab_err), "%s", err);
             }
+            s_grab_slow = !g.grab.pid;    // 连游戏都没开/打不开：下一轮放慢
         } else {
             s_grab_err[0] = 0;
-            g.grab_ver++;
-            app_status("取到物品 #%u %s（%s · %ums）", g.grab.id, g.grab.name, g.grab.strategy,
-                       (unsigned)g.grab.ms);
-            app_log("取码 #%u %s · %s · 候选 %u · %ums", g.grab.id, g.grab.name, g.grab.strategy,
-                    g.grab.cands, (unsigned)g.grab.ms);
-        }
-        // 刚才那一下「取码」被连取轮次挤掉了：作业刚空出来，补发
-        if (s_grab_pending) {
-            s_grab_pending = 0;
-            app_grab_once();
+            s_grab_slow = 0;
+            if (g.grab.id != s_grab_last) {
+                s_grab_last = g.grab.id;
+                app_status("取到物品 #%u %s（%s · %ums）", g.grab.id, g.grab.name, g.grab.strategy,
+                           (unsigned)g.grab.ms);
+                app_log("取码 #%u %s · %s · 候选 %u · %ums", g.grab.id, g.grab.name, g.grab.strategy,
+                        g.grab.cands, (unsigned)g.grab.ms);
+            }
+            g.grab_ver++;   // 总是推进：队列里删掉同一件再悬停，要能重新入队
         }
     }
     // 轮询：单条查询同时取角色列表/在线/当前角色，每 poll_sec 一次；
