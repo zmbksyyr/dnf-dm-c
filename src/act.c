@@ -1,0 +1,81 @@
+// act：命令表的实现。所有 db_* 调用集中在这里，页面那边只填 kind 和参数。
+#include "act.h"
+
+Ctx kc;
+
+// 这些操作会改到内存里那份快照：写完要回读校验一次（其余动作只动库，快照不变）
+static int sync_after(int kind) {
+    switch (kind) {
+        case K_RENAME: case K_LEV: case K_JOB: case K_MONEY: case K_COIN: case K_CERA:
+        case K_ACCM: case K_SP: case K_QP: case K_PVP:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int char_do(void *ctx, Err err) {
+    Ctx *c = (Ctx *)ctx;
+    // 归属角色在入队那一刻就定下来了。等队列排到、这个线程开跑时，用户可能已经
+    // 切到别的角色 —— 那时再读 g.cur，A 的改动就写进 B 了。这里只认 ctx 里的编号。
+    Charac who;
+    memset(&who, 0, sizeof(who));
+    who.no = c->cno;
+    who.mid = c->mid;
+    switch (c->kind) {
+        case K_RENAME:
+            // 重名检查放在任务线程里做：UI 线程直接查库会和后台作业抢同一条连接
+            if (db_name_taken(&g.db, c->s, who.no)) {
+                snprintf(err, ERRBUF, "名字「%s」已被占用", c->s);
+                return 0;
+            }
+            return db_set_name(&g.db, &who, c->s, err);
+        case K_LEV: return db_set_lev(&g.db, &who, c->i1, (u32)c->u1, err);
+        case K_MONEY: return db_set_money(&g.db, &who, c->u1, err);
+        case K_COIN: return db_set_coin(&g.db, &who, c->u1, err);
+        case K_CERA: return db_set_cera(&g.db, &who, c->u1, c->u2, err);
+        case K_JOB: return db_set_job(&g.db, &who, c->i1, c->i2, err);
+        case K_ACCM: return db_set_account_money(&g.db, &who, c->u1, err);
+        case K_SP: return db_set_sp(&g.db, &who, c->i1, c->i1, c->i2, c->i2, err);
+        case K_QP: return db_set_qp(&g.db, &who, c->i1, err);
+        case K_NOWEIGHT: return db_no_weight(&g.db, &who, err);
+        case K_SLOT: return db_open_equip_slot(&g.db, &who, err);
+        case K_UNLOCK: return db_unlock_lev_equip(&g.db, &who, err);
+        case K_EXPERT: return db_max_expert(&g.db, &who, err);
+        case K_FATIGUE: return db_set_fatigue(&g.db, &who, err);
+        case K_DUNGEON: return db_unlock_dungeon(&g.db, &who, err);
+        case K_PUNISH: return db_reset_punish(&g.db, c->mid, err);
+        case K_QCLR: return db_clear_quests(&g.db, &who, err);
+        case K_PVP: return db_set_pvp(&g.db, &who, c->i1, c->i2, c->i3, err);
+        case K_BAN: return db_ban(&g.db, c->mid, c->i1, c->i2, c->i3, c->s, err);
+        case K_UNBAN: return db_unban(&g.db, c->mid, err);
+        case K_BANLIST:
+            g.lists_ready |= L_BANS;
+            return db_list_bans(&g.db, &g.bans, err);
+        case K_EVLIST:
+            g.lists_ready |= L_EVENTS;
+            if (!g.event_info.n && !db_list_event_info(&g.db, &g.event_info, err)) return 0;
+            return db_list_events(&g.db, &g.events, err);
+        case K_EVADD: return db_add_event(&g.db, (u32)c->i1, c->u1, c->u2, err);
+        case K_EVDEL: return db_del_event(&g.db, (u64)c->u1, err);
+        case K_RESETPWD: return db_reset_pwd(&g.db, c->mid, c->s, err);
+        case K_UNLCREATE: return db_unlock_create(&g.db, c->mid, err);
+    }
+    return 0;
+}
+
+int char_work(void *ctx, Err err) {
+    Ctx *c = (Ctx *)ctx;
+    // 只有归属还是当前角色的，回读/回滚才有意义：用户已经切走，这次写属于上一个
+    // 角色，拿它去动当前快照就是把别人的数据糊到眼前这个角色上
+    int mine = c->cno == 0 || c->cno == g.cur.no;
+    if (!char_do(ctx, err)) {
+        // 写失败：内存里已经按「用户的意图」改过（乐观更新要抢先堵住旧值回填），
+        // 现在得整段重读回滚，否则表单和左栏会停在那个根本没写进库的值上
+        // （改名被拒最典型：界面上留着那个重名，看着像改成功了）
+        if (mine && sync_after(c->kind)) app_reload_later();
+        return 0;
+    }
+    if (mine && sync_after(c->kind)) app_sync_char();
+    return 1;
+}

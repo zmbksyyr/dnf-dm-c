@@ -1,0 +1,9 @@
+# 换行符策略：纯 Windows 项目，仓库内统一存 LF，检出成 CRLF。
+# 原来源码里 CRLF/LF 混着（db.c 是 CRLF、db.h 是 LF），每次改动都会
+# 掺进一堆「整文件变化」的 diff 噪音。
+* text=auto eol=crlf
+
+# 二进制，不要做任何转换
+*.ico binary
+*.exe binary
+*.pvf binary

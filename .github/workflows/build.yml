@@ -1,0 +1,123 @@
+name: build
+
+# 只在手动触发时跑，push 不自动出包
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ZIG_VERSION: 0.17.0
+  RELEASE_TAG: latest
+  EXE_NAME: DNF_GM.exe
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- 工具链 ----
+      - name: 安装 zig
+        shell: pwsh
+        run: |
+          $url = "https://ziglang.org/download/$env:ZIG_VERSION/zig-x86_64-windows-$env:ZIG_VERSION.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "zig.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP "zig")
+          $dir = (Get-ChildItem (Join-Path $env:RUNNER_TEMP "zig") -Directory | Select-Object -First 1).FullName
+          # GITHUB_PATH 只对后续 step 生效，当前 step 里要自己更新 PATH
+          Add-Content -Path $env:GITHUB_PATH -Value $dir
+          $env:PATH = "$dir;$env:PATH"
+          zig version
+
+      # ---- 编译 ----
+      - name: 编译
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          zig rc -fo build/res.obj src/res.rc
+          if ($LASTEXITCODE -ne 0) { throw "资源编译失败" }
+
+          # 参数必须写成数组再 splat：pwsh 会把 -Wl,--subsystem,windows 里的逗号
+          # 当成数组分隔符，直接写成一行会报 "Missing argument in parameter list"
+          $cc = @(
+            'cc', '-target', 'x86_64-windows-gnu', '-std=c11', '-O2',
+            '-DNDEBUG', '-DUNICODE', '-D_UNICODE',
+            '-Isrc', '-static', '-s', '-Wl,--subsystem,windows'
+          )
+          $cc += (Get-ChildItem src/*.c | ForEach-Object { $_.FullName })
+          $cc += @(
+            'build/res.obj',
+            '-lcomctl32', '-lcomdlg32', '-lshell32', '-luser32',
+            '-lgdi32', '-lole32', '-lws2_32', '-ladvapi32',
+            '-o', $env:EXE_NAME
+          )
+
+          zig @cc
+          if ($LASTEXITCODE -ne 0) { throw "编译失败" }
+
+          $f = Get-Item $env:EXE_NAME
+          $h = (Get-FileHash $env:EXE_NAME -Algorithm SHA256).Hash
+          "产物 $($f.Name)  $($f.Length) 字节  sha256=$h"
+          "SIZE=$($f.Length)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ---- 打包 ----
+      - name: 打包
+        shell: pwsh
+        run: |
+          $now  = [DateTime]::UtcNow
+          $cn   = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId($now, 'China Standard Time')
+          $date = $cn.ToString('yyyyMMdd')
+          $sha  = (git rev-parse --short=7 HEAD)
+          $name = "dnf-gm-c-$date-$sha.zip"
+
+          Compress-Archive -Path $env:EXE_NAME, README.md -DestinationPath $name -Force
+          $f = Get-Item $name
+          "包 $($f.Name)  $($f.Length) 字节"
+
+          # 传给后续 step
+          "ASSET_NAME=$name"       | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "BUILD_STAMP=$date·$sha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ---- 覆盖到唯一的 Release ----
+      - name: 清掉旧产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          # Release 不存在就建（tag 固定，永远只有这一个）
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --title "Release" --notes "由 Actions 手动触发，每次覆盖"
+            if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败" }
+          }
+
+          # 逐个删掉现有 asset —— 只留刚打出来的这一个
+          $names = gh release view $env:RELEASE_TAG --json assets --jq '.assets[].name'
+          foreach ($n in $names) {
+            if ([string]::IsNullOrWhiteSpace($n)) { continue }
+            "删除旧产物：$n"
+            gh release delete-asset $env:RELEASE_TAG $n --yes
+            if ($LASTEXITCODE -ne 0) { throw "删除 $n 失败" }
+          }
+
+      - name: 上传新产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release upload $env:RELEASE_TAG $env:ASSET_NAME
+          if ($LASTEXITCODE -ne 0) { throw "上传失败" }
+
+          gh release edit $env:RELEASE_TAG `
+            --notes "构建于 $env:BUILD_STAMP · 提交 $env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) { throw "更新说明失败" }
+
+      # ---- 回执 ----
+      - name: 结果
+        shell: pwsh
+        run: |
+          "产物：$env:ASSET_NAME （$env:SIZE 字节）"
+          "位置：https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$env:RELEASE_TAG"
