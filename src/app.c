@@ -851,7 +851,7 @@ static int w_grant(void *ctx, Err err) {
             gi.inc_type = n->inc_type;
             gi.inc_val = n->inc_val;
             gi.dur = n->dur;
-            if (!db_send_item_mail_ex(&g.db, &g.cur, "GM", "系统发放", &gi, err)) return 0;
+            if (!db_send_item_mail_ex(&g.db, &g.cur, "GM", "系统发放", &gi, 0, 0, err)) return 0;
         }
         return 1;
     }

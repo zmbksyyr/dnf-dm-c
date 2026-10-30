@@ -110,11 +110,11 @@ int db_send_item_mail(Db *d, const Charac *c, const char *sender, const char *te
     g.id = item_id;
     g.num = num;
     g.type = IT_STACK;
-    return db_send_item_mail_ex(d, c, sender, text, &g, err);
+    return db_send_item_mail_ex(d, c, sender, text, &g, 0, 0, err);
 }
 
 int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char *text,
-                         const GrantItem *g, Err err) {
+                         const GrantItem *g, int avata_flag, int creature_flag, Err err) {
     if (!db_send_text_mail(d, c, sender, text, err)) return 0;
     set_names(d, "latin1");
     char *es = mysql_escape(sender ? sender : "GM");
@@ -132,6 +132,39 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
         my_free(&r);
     }
     str_clear(&s);
+
+    // 附件落点：普通物品 add_info 存数量；时装/宠物要先建一行再取 ui_id 作为 add_info
+    u64 add_info = (u64)g->num;
+    if (avata_flag) {
+        char ts0[32];
+        now_str(ts0, sizeof(ts0), "%Y-%m-%d %H:%M:%S");
+        str_catf(&s,
+                 "INSERT INTO taiwan_cain_2nd.user_items "
+                 "(charac_no,it_id,expire_date,obtain_from,reg_date,stat) "
+                 "VALUES (%u,%u,'9999-12-31 23:59:59',1,'%s',2)",
+                 c->no, g->id, ts0);
+        if (!run(d, &s)) { snprintf(err, ERRBUF, "建时装行：%s", d->err); str_free(&s); free(es); set_names(d, "utf8"); return 0; }
+        str_clear(&s);
+        str_cat(&s, "SELECT LAST_INSERT_ID()");
+        if (select1(d, &s, &r)) add_info = my_u64(&r, 0, 0, 0);
+        my_free(&r);
+        str_clear(&s);
+    } else if (creature_flag) {
+        char ts0[32];
+        now_str(ts0, sizeof(ts0), "%Y-%m-%d %H:%M:%S");
+        str_catf(&s,
+                 "INSERT INTO taiwan_cain_2nd.creature_items "
+                 "(charac_no,it_id,expire_date,reg_date,stat,item_lock_key,creature_type,stomach) "
+                 "VALUES (%u,%u,'9999-12-31 23:59:59','%s',0,0,0,100)",
+                 c->no, g->id, ts0);
+        if (!run(d, &s)) { snprintf(err, ERRBUF, "建宠物行：%s", d->err); str_free(&s); free(es); set_names(d, "utf8"); return 0; }
+        str_clear(&s);
+        str_cat(&s, "SELECT LAST_INSERT_ID()");
+        if (select1(d, &s, &r)) add_info = my_u64(&r, 0, 0, 0);
+        my_free(&r);
+        str_clear(&s);
+    }
+
     char ts[32];
     now_str(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S");
     str_catf(&s,
@@ -139,13 +172,63 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
              "(occ_time,send_charac_no,send_charac_name,receive_charac_no,amplify_option,amplify_value,"
              "seperate_upgrade,seal_flag,item_id,add_info,upgrade,gold,letter_id,avata_flag,creature_flag,"
              "endurance,unlimit_flag) "
-             "VALUES ('%s',0,'%s',%u,%u,%u,%u,%u,%u,%u,%u,0,%llu,0,0,%u,1)",
-             ts, es, c->no, g->inc_type, g->inc_val, g->forge, g->seal, g->id, g->num, g->enhance,
-             (unsigned long long)letter_id, g->dur);
+             "VALUES ('%s',0,'%s',%u,%u,%u,%u,%u,%u,%llu,%u,0,%llu,%d,%d,%u,1)",
+             ts, es, c->no, g->inc_type, g->inc_val, g->forge, g->seal, g->id,
+             (unsigned long long)add_info, g->enhance,
+             (unsigned long long)letter_id, avata_flag, creature_flag, g->dur);
     free(es);
     int ok = run(d, &s);
     str_free(&s);
     set_names(d, "utf8");
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    return ok;
+}
+
+// 全服 / 在线批量发邮件：逐角色发一封（文本 + 可选附件）。在线模式只发给
+// login_account_3.login_status>=1 的账号下角色。item_id=0 时只发文本。
+int db_send_mail_bulk(Db *d, int online_only, const char *sender, const char *text,
+                      u32 item_id, u32 num, int avata_flag, int creature_flag, u32 *sent, Err err) {
+    if (sent) *sent = 0;
+    Str s = {0};
+    str_cat(&s, "SELECT charac_no FROM taiwan_cain.charac_info WHERE delete_flag=0");
+    if (online_only)
+        str_cat(&s, " AND m_id IN (SELECT m_id FROM taiwan_login.login_account_3 WHERE login_status>=1)");
+    str_cat(&s, " ORDER BY charac_no");
+    MyResult r = {0};
+    if (!select1(d, &s, &r)) { snprintf(err, ERRBUF, "%s", d->err); str_free(&s); return 0; }
+    str_free(&s);
+    u32 done = 0;
+    int fail = 0;
+    for (int i = 0; i < r.nrow; i++) {
+        u32 cno = (u32)my_u64(&r, i, 0, 0);
+        Charac c;
+        memset(&c, 0, sizeof(c));
+        c.no = cno;
+        int ok;
+        if (item_id) {
+            GrantItem g;
+            memset(&g, 0, sizeof(g));
+            g.id = item_id;
+            g.num = num ? num : 1;
+            g.type = IT_STACK;
+            ok = db_send_item_mail_ex(d, &c, sender, text, &g, avata_flag, creature_flag, err);
+        } else {
+            ok = db_send_text_mail(d, &c, sender, text, err);
+        }
+        if (ok) done++;
+        else { fail = 1; break; }
+    }
+    my_free(&r);
+    if (sent) *sent = done;
+    return fail ? 0 : 1;
+}
+
+// 全服软删所有邮件（delete_flag=1），用于「清服」类维护。
+int db_delete_all_mails_global(Db *d, Err err) {
+    Str s = {0};
+    str_cat(&s, "UPDATE taiwan_cain_2nd.postal SET delete_flag=1");
+    int ok = run(d, &s);
+    str_free(&s);
     if (!ok) snprintf(err, ERRBUF, "%s", d->err);
     return ok;
 }

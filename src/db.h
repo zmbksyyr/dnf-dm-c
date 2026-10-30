@@ -157,7 +157,13 @@ int  db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *t
 int  db_send_item_mail(Db *d, const Charac *c, const char *sender, const char *text,
                        u32 item_id, u32 num, Err err);
 int  db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char *text,
-                          const GrantItem *g, Err err);
+                          const GrantItem *g, int avata_flag, int creature_flag, Err err);
+// 全服 / 在线批量发邮件：online_only=1 仅发给在线账号下的角色；sent 带回成功数。
+// item_id=0 时只发文本（不带附件）。avata_flag/creature_flag 走宠物/时装邮件逻辑。
+int  db_send_mail_bulk(Db *d, int online_only, const char *sender, const char *text,
+                       u32 item_id, u32 num, int avata_flag, int creature_flag, u32 *sent, Err err);
+// 全服软删所有邮件（delete_flag=1），镜像 sqlManager2.delete_all_mail_cNo(-1)
+int  db_delete_all_mails_global(Db *d, Err err);
 
 // 宠物 / 时装
 int  db_list_pets(Db *d, const Charac *c, Vec *out, Err err);             // Vec<PetRow>

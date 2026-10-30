@@ -518,7 +518,7 @@ static int quest_work(void *ctx, Err err) {
     }
     if (c->kind == D_QSEND) {
         for (int i = 0; i < qsend_n; i++)
-            if (!db_send_item_mail_ex(&g.db, &g.cur, "GM", "任务材料补发", &qsend[i], err))
+            if (!db_send_item_mail_ex(&g.db, &g.cur, "GM", "任务材料补发", &qsend[i], 0, 0, err))
                 return 0;
         return 1;
     }
