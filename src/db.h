@@ -241,3 +241,9 @@ int  db_del_tab_orphan(Db *d, int avatar, u64 ui_id, Err err);
 // 角色备份 / 还原（.sql 文本，还原直接走 db_restore_sql）
 void db_backup_char_path(char *out, int cap, const Charac *c);
 int  db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *rows, Err err);
+
+// 角色克隆：把一个角色连同它的背包/装备/技能/任务等整份复制成一个新角色。
+// 全程在一个事务里，中途任何一步失败就整体回滚，不会留下半个角色。
+// out_name 回填新角色名（调用方拿去提示 / 刷新），out_no 回填新 charac_no。
+int  db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
+                   int *tables, u64 *rows, Err err);

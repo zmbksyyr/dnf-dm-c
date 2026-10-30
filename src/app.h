@@ -183,3 +183,6 @@ int  app_grant_send(int by_mail);
 void app_db_backup(const char *path);
 void app_db_backup_char(void);          // 只备份当前选中角色
 void app_db_restore(const char *path);
+
+// 角色克隆（后台执行，单个事务，失败整体回滚）
+void app_clone_char(void);

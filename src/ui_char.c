@@ -15,7 +15,7 @@ enum {
     G_NAME = PAGE_ID(PAGE_GM, 1), G_LEV, G_JOB, G_GROW, G_MONEY, G_COIN, G_CERA, G_POINT,
     G_ACCM, G_GRADE, G_WIN, G_PVP_POINT,
     G_SP, G_QP, G_NOWEIGHT, G_SLOT, G_UNLOCK, G_EXPERT, G_FATIGUE, G_DUNGEON, G_PUNISH, G_QCLR,
-    G_DUMP, G_RESTORE, G_CDUMP, G_UNLCREATE, G_SCANBAD,
+    G_DUMP, G_RESTORE, G_CDUMP, G_UNLCREATE, G_SCANBAD, G_CLONE,
     // 泡点：开关 / 间隔 / 目标人群 / 奖励(点券·D点·D币·物品) / 起止时间 / 应用 / 导出 / 状态行
     G_BON, G_BSEC, G_BTARGET, G_BTNO,
     G_BCOIN, G_BDP, G_BDC, G_BITEM, G_BINUM,
@@ -577,6 +577,7 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     if (id == G_RESTORE) { on_restore(); return 0; }
     if (id == G_CDUMP) { on_char_dump(); return 0; }
     if (id == G_SCANBAD) { on_scanbad(); return 0; }
+    if (id == G_CLONE) { app_clone_char(); return 0; }
     if (id == G_UNLCREATE) {
         if (!need_char()) return 0;
         if (!app_confirm(fmt_new("解除账号 mid=%u 的建角次数限制？", g.cur.mid))) return 0;
@@ -813,13 +814,13 @@ static void gm_layout(Page *p, int w, int h) {
     static const int kOnce[] = {G_SP, G_QP, G_NOWEIGHT, G_SLOT, G_UNLOCK,
                                 G_EXPERT, G_FATIGUE, G_DUNGEON, G_PUNISH, G_QCLR};
     static const int kAcct[] = {G_UNLCREATE};
-    static const int kMisc[] = {G_DUMP, G_CDUMP, G_RESTORE, G_SCANBAD};
+    static const int kMisc[] = {G_DUMP, G_CDUMP, G_RESTORE, G_SCANBAD, G_CLONE};
     int wL[3], wR[4];
     for (int i = 0; i < 3; i++) wL[i] = padY + 2 * natF;
     wL[1] = padY + 3 * natF;        // 资产组三行（多了 VIP），按行数给高才不会挤成一团
     wR[0] = padY + 5 * natB;        // 一键：10 个按钮，2 列 5 行
     wR[1] = padY + 1 * natB;        // 账号：解除建角限制
-    wR[2] = padY + 2 * natB;        // 维护：4 个按钮，2 列 2 行
+    wR[2] = padY + 3 * natB;        // 维护：5 个按钮，2 列 3 行
     // 泡点组：开关(24) + 目标行(49) + 间隔/起止行(49) + 点券/D点/D币行(49)
     //        + 物品行(51) + 应用/状态行(28) + 组内上边距(20) ≈ ui_scale(280)
     wR[3] = ui_scale(290);
@@ -902,6 +903,7 @@ static void gm_lock(Page *p) {
     ui_enable(GetDlgItem(p->wnd, G_RESTORE), g.db_ok);
     ui_enable(GetDlgItem(p->wnd, G_CDUMP), g.db_ok && g.char_ok);
     ui_enable(GetDlgItem(p->wnd, G_SCANBAD), g.db_ok);
+    ui_enable(GetDlgItem(p->wnd, G_CLONE), g.db_ok && g.char_ok);
 }
 
 static void gm_build(Page *p, HWND parent) {
@@ -952,6 +954,7 @@ static void gm_build(Page *p, HWND parent) {
     ui_button(parent, "备份角色", G_CDUMP);
     ui_button(parent, "还原备份", G_RESTORE);
     ui_button(parent, "全服清错误物品", G_SCANBAD);
+    ui_button(parent, "克隆角色", G_CLONE);
     ui_tip(parent, GetDlgItem(parent, G_DUMP), "导出整库 SQL 到 config/backup（只读，不动库里数据）");
     ui_tip(parent, GetDlgItem(parent, G_CDUMP), "只导出当前角色的 15 张表，可用于单角色回滚");
     ui_tip(parent, GetDlgItem(parent, G_RESTORE), "选一个 .sql 备份导入数据库（写库，建议先备份一次）");
@@ -959,6 +962,10 @@ static void gm_build(Page *p, HWND parent) {
     ui_tip(parent, GetDlgItem(parent, G_SCANBAD),
            "扫描全服所有角色的背包/穿戴/宠物栏/仓库/珠宝/账号金库/邮件/时装/宠物，"
            "列出错误物品并一键清除（容器写前自动备份）");
+    ui_tip(parent, GetDlgItem(parent, G_CLONE),
+           "把当前角色整份复制成一个新角色：背包/穿戴/仓库/技能/任务/时装宠物一起复制，"
+           "新角色自动取名（原名 + 数字后缀）。整个过程是一个事务，出错会整体回滚。"
+           "账号共享的账号金库不复制");
     // 字段都靠「点到别处」落库。最重要的一条写在最前面：角色在线时服务端会在
     // 登出/存档时把库里的值覆盖回去（工具这边看着是写成功了，进游戏又变回原样）。
     // 在线判定本身在有些端上不可靠（login_status 常为 0、member_play_info 无行），

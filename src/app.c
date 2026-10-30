@@ -975,6 +975,40 @@ void app_db_restore(const char *path) {
     app_act("还原数据库", w_db_restore, &g_dbc);
 }
 
+// ---------------- 角色克隆 ----------------
+typedef struct {
+    char name[64];
+} CloneCtx;
+static CloneCtx g_clc;
+
+static int w_clone_char(void *ctx, Err err) {
+    CloneCtx *c = (CloneCtx *)ctx;
+    char nm[64] = {0};
+    u32 no = 0;
+    int nt = 0;
+    u64 nr = 0;
+    if (!db_clone_char(&g.db, &g.cur, nm, sizeof(nm), &no, &nt, &nr, err)) return 0;
+    app_log("克隆角色 · %s → %s（charac_no=%u）· %d 张表 / %llu 行", g.cur.name, nm, no, nt,
+            (unsigned long long)nr);
+    snprintf(c->name, sizeof(c->name), "%s", nm);
+    g.lists_ready = 0;        // 新角色得进角色列表，下次轮询会重拉
+    return 1;
+}
+
+void app_clone_char(void) {
+    if (!g.db_ok) { app_info("请先连接数据库。"); return; }
+    if (!g.char_ok) { app_info("请先选择角色。"); return; }
+    if (!app_act_idle()) { app_info("上一个操作还在进行，等它完成再做"); return; }
+    if (!app_confirm(fmt_new(
+            "把「%s」完整复制一份？\n\n"
+            "新角色会自动取名（原名截到 18 字 + 数字后缀），\n"
+            "背包 / 穿戴 / 仓库 / 技能 / 任务 / 时装宠物全部一起复制。\n"
+            "整个过程是一个事务，中途出错会整体回滚。",
+            g.cur.name)))
+        return;
+    app_act("克隆角色", w_clone_char, &g_clc);
+}
+
 // ---------------- 生命周期 ----------------
 void app_init(void) {
     InitializeCriticalSection(&s_log_cs);

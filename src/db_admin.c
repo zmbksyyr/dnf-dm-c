@@ -758,6 +758,247 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
     return 1;
 }
 
+// ---------------- 角色克隆 ----------------
+// 和「备份 → 还原」不是一回事：不生成 SQL 文件，直接在库里把整份数据复制一份。
+// 做法是一条 INSERT ... SELECT，值全在服务端内部搬运，不经过客户端转码，
+// 顺带避开了 blob（背包 / 穿戴栏）在客户端往返一趟可能出的编码问题。
+//
+// 三个必须处理的点：
+// 1) 自增列要跳过。charac_info.charac_no、user_items.ui_id、creature_items.ui_id
+//    都是 AUTO_INCREMENT，照搬原值要么撞主键、要么把新行挂到旧角色名下。
+//    跳过后由服务端发号，新 charac_no 用 LAST_INSERT_ID() 取回。
+// 2) charac_name 是唯一键，必须改名。截断在服务端用 LEFT 做（按字符数，
+//    中文不会被砍半），写回和 db_set_name 一样走 latin1 连接，保持同一约定。
+// 3) 账号共享表（account_cargo / member_dungeon）不复制——它们按 m_id 归属，
+//    复制等于凭空多出一份账号金库。
+typedef struct {
+    const char *col;
+    const char *expr;    // 该列改用这段 SQL 表达式（已转义的常量），NULL 表示原样搬
+} CloneOvr;
+
+// 返回值：1 = 成功（*rows 为复制行数）；2 = 该表没有 keycol 这一列，跳过；
+//         0 = 出错（err 已填）
+static int clone_rows(Db *d, const char *dbn, const char *tb, const char *keycol,
+                      u32 src, const char *key_expr, const CloneOvr *ovr, int novr,
+                      u64 *rows, Err err) {
+    if (rows) *rows = 0;
+    Vec names, ais;
+    vec_init(&names, sizeof(Str));
+    vec_init(&ais, sizeof(int));
+    Str q = {0};
+    MyResult r = {0};
+    str_catf(&q, "SELECT COLUMN_NAME,EXTRA FROM information_schema.COLUMNS "
+                 "WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' ORDER BY ORDINAL_POSITION",
+             dbn, tb);
+    int ok = select1(d, &q, &r);
+    if (ok) {
+        for (int i = 0; i < r.nrow; i++) {
+            Str *a = VEC_ADD(&names, Str);
+            memset(a, 0, sizeof(*a));
+            str_set(a, my_text(&r, i, 0) ? my_text(&r, i, 0) : "");
+            const char *x = my_text(&r, i, 1);
+            *(int *)vec_add(&ais) = (x && strstr(x, "auto_increment")) ? 1 : 0;
+        }
+    } else {
+        snprintf(err, ERRBUF, "读 %s.%s 的列信息失败：%s", dbn, tb, d->err);
+    }
+    my_free(&r);
+    str_free(&q);
+    if (!ok || !names.n) {
+        if (ok) snprintf(err, ERRBUF, "表 %s.%s 不存在或没有列", dbn, tb);
+        vec_free_strs(&names);
+        vec_free(&ais);
+        return 0;
+    }
+
+    int have_key = 0;
+    for (int i = 0; i < names.n; i++)
+        if (!strcmp(str_c(VEC_AT(&names, Str, i)), keycol)) { have_key = 1; break; }
+    if (!have_key) {                       // 表里没这一列（skill 那类），跳过即可
+        vec_free_strs(&names);
+        vec_free(&ais);
+        return 2;
+    }
+
+    Str ins = {0}, sel = {0};
+    str_catf(&ins, "INSERT INTO `%s`.`%s` (", dbn, tb);
+    int first = 1;
+    for (int i = 0; i < names.n; i++) {
+        const char *cn = str_c(VEC_AT(&names, Str, i));
+        if (*(int *)vec_at(&ais, i)) continue;      // 自增列交给服务端发号
+        const char *ex = NULL;
+        for (int k = 0; k < novr; k++)
+            if (!strcmp(ovr[k].col, cn)) { ex = ovr[k].expr; break; }
+        if (!ex && !strcmp(cn, keycol)) ex = key_expr;
+        if (first) first = 0;
+        else { str_catc(&ins, ','); str_catc(&sel, ','); }
+        str_catf(&ins, "`%s`", cn);
+        if (ex) str_cat(&sel, ex);
+        else str_catf(&sel, "`%s`", cn);
+    }
+    str_cat(&ins, ") SELECT ");
+    str_cat(&ins, sel.p);
+    str_catf(&ins, " FROM `%s`.`%s` WHERE `%s`=%u", dbn, tb, keycol, src);
+    str_free(&sel);
+
+    u64 aff = 0;
+    ok = run_aff(d, &ins, &aff);
+    if (!ok) snprintf(err, ERRBUF, "复制 %s.%s 失败：%s", dbn, tb, d->err);
+    str_free(&ins);
+    vec_free_strs(&names);
+    vec_free(&ais);
+    if (rows) *rows = aff;
+    return ok ? 1 : 0;
+}
+
+int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
+                  int *tables, u64 *rows, Err err) {
+    if (tables) *tables = 0;
+    if (rows) *rows = 0;
+    if (out_no) *out_no = 0;
+    if (out_name && cap > 0) out_name[0] = 0;
+
+    // 源角色必须存在、且没被删
+    Str q = {0};
+    MyResult r = {0};
+    str_catf(&q, "SELECT delete_flag FROM taiwan_cain.charac_info WHERE charac_no=%u", c->no);
+    if (!select1(d, &q, &r)) {
+        snprintf(err, ERRBUF, "%s", d->err);
+        my_free(&r);
+        str_free(&q);
+        return 0;
+    }
+    if (!r.nrow) {
+        snprintf(err, ERRBUF, "源角色 charac_no=%u 不存在", c->no);
+        my_free(&r);
+        str_free(&q);
+        return 0;
+    }
+    int deleted = (int)my_u64(&r, 0, 0, 0);
+    my_free(&r);
+    if (deleted) {
+        str_free(&q);
+        snprintf(err, ERRBUF, "源角色已删除，不能克隆");
+        return 0;
+    }
+
+    // 新名字 = 原名截到 18 字符 + 数字后缀。charac_name 是 varchar(20)，
+    // 留两位给后缀；LEFT 在服务端按字符截，中文不会被砍成半个字。
+    str_clear(&q);
+    str_catf(&q, "SELECT LEFT(charac_name,18) FROM taiwan_cain.charac_info WHERE charac_no=%u",
+             c->no);
+    if (!select1(d, &q, &r) || !r.nrow) {
+        snprintf(err, ERRBUF, "读源角色名失败：%s", d->err);
+        my_free(&r);
+        str_free(&q);
+        return 0;
+    }
+    char base[64];
+    cp_text(base, sizeof(base), &r, 0, 0);
+    my_free(&r);
+    str_free(&q);
+    if (!base[0]) snprintf(base, sizeof(base), "Clone");
+
+    char cand[64];
+    int found = 0;
+    for (int k = 2; k <= 99; k++) {
+        snprintf(cand, sizeof(cand), "%s%d", base, k);
+        if (!db_name_taken(d, cand, 0)) { found = 1; break; }
+    }
+    if (!found) {
+        snprintf(err, ERRBUF, "「%s」加 2~99 的后缀都被占了，先改个名再克隆", base);
+        return 0;
+    }
+
+    Str s = {0};
+    str_cat(&s, "BEGIN");
+    if (!run(d, &s)) {
+        snprintf(err, ERRBUF, "开启事务失败：%s", d->err);
+        str_free(&s);
+        return 0;
+    }
+
+    int ok = 1;
+    int nt = 0;
+    u64 nr = 0;
+    u32 new_no = 0;
+
+    // 1) charac_info：charac_no 是自增列会被跳过，唯一要覆盖的就是 charac_name
+    {
+        set_names(d, "latin1");          // 与 db_set_name 同一约定：latin1 连接写 UTF-8 字节
+        char *e = mysql_escape(cand);
+        char expr[160];
+        snprintf(expr, sizeof(expr), "'%s'", e ? e : "");
+        free(e);
+        CloneOvr ovr[1] = {{"charac_name", expr}};
+        u64 aff = 0;
+        int ret = clone_rows(d, "taiwan_cain", "charac_info", "charac_no", c->no, NULL,
+                             ovr, 1, &aff, err);
+        set_names(d, "utf8");
+        if (ret != 1 || aff != 1) {
+            if (ret == 1)
+                snprintf(err, ERRBUF, "复制 charac_info 影响了 %llu 行（应为 1）",
+                         (unsigned long long)aff);
+            ok = 0;
+        } else {
+            nt = 1;
+            nr = aff;
+        }
+    }
+
+    // 2) 新 charac_no：自增列被跳过，只能靠 LAST_INSERT_ID() 拿
+    if (ok) {
+        MyResult r2 = {0};
+        str_clear(&s);
+        str_cat(&s, "SELECT LAST_INSERT_ID()");
+        if (select1(d, &s, &r2) && r2.nrow) new_no = (u32)my_u64(&r2, 0, 0, 0);
+        my_free(&r2);
+        if (!new_no) {
+            snprintf(err, ERRBUF, "取新 charac_no 失败：%s", d->err);
+            ok = 0;
+        }
+    }
+
+    // 3) 其余按 charac_no 归属的表，键直接换成新号
+    if (ok) {
+        char kexpr[32];
+        snprintf(kexpr, sizeof(kexpr), "%u", new_no);
+        for (int ti = 0; ti < COUNT_OF(kCharTabs) && ok; ti++) {
+            const CharTab *ct = &kCharTabs[ti];
+            if (ct->by_mid) continue;                        // 账号共享数据不复制
+            if (!strcmp(ct->tb, "charac_info")) continue;    // 已经处理过
+            u64 n2 = 0;
+            int ret = clone_rows(d, ct->db, ct->tb, "charac_no", c->no, kexpr, NULL, 0,
+                                 &n2, err);
+            if (ret == 0) { ok = 0; break; }
+            if (ret == 1 && n2) { nt++; nr += n2; }
+        }
+    }
+
+    str_clear(&s);
+    if (ok) {
+        str_cat(&s, "COMMIT");
+        if (!run(d, &s)) {
+            snprintf(err, ERRBUF, "提交事务失败：%s", d->err);
+            ok = 0;
+        }
+    }
+    if (!ok) {
+        str_clear(&s);
+        str_cat(&s, "ROLLBACK");
+        run(d, &s);
+    }
+    str_free(&s);
+    if (!ok) return 0;
+
+    if (out_no) *out_no = new_no;
+    if (out_name && cap > 0) snprintf(out_name, (size_t)cap, "%s", cand);
+    if (tables) *tables = nt;
+    if (rows) *rows = nr;
+    db_undo_flush(0);
+    return 1;
+}
+
 // ---------------- 全服错误物品扫描 ----------------
 // 覆盖一切能挂物品编号的地方：容器 blob（背包/穿戴/宠物栏/仓库/珠宝/账号金库）、
 // 邮件附件、时装/宠物表行。角色多时较慢，只在后台线程调用。
