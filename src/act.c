@@ -53,7 +53,7 @@ void act_free(void) {
 static int sync_after(int kind) {
     switch (kind) {
         case K_RENAME: case K_LEV: case K_JOB: case K_MONEY: case K_COIN: case K_CERA:
-        case K_ACCM: case K_SP: case K_QP: case K_PVP:
+        case K_ACCM: case K_SP: case K_QP: case K_PVP: case K_VIP:
             return 1;
         default:
             return 0;
@@ -112,6 +112,7 @@ static int char_do(void *ctx, Err err) {
         case K_EVDEL: return db_del_event(&g.db, (u64)c->u1, err);
         case K_RESETPWD: return db_reset_pwd(&g.db, c->mid, c->s, err);
         case K_UNLCREATE: return db_unlock_create(&g.db, c->mid, err);
+        case K_VIP: return db_set_vip(&g.db, c->mid, c->s, err);
     }
     return 0;
 }

@@ -20,12 +20,15 @@ enum {
     G_BON, G_BSEC, G_BTARGET, G_BTNO,
     G_BCOIN, G_BDP, G_BDC, G_BITEM, G_BINUM,
     G_BSTART, G_BEND, G_BAPPLY, G_BEXP, G_BINFO,
+    // VIP：独立号段。上面 G_SP..G_QCLR 是连续的（G_SP+i 批量置灰依赖这一点），
+    // 插进去会挪动整段编号，所以单独占一个号，不并进递增链。
+    G_VIP = PAGE_ID(PAGE_GM, 50),
     // 分组框：纯视觉容器，不参与 enable / 提交。ID 单独起一段，避开上面连续递增的控件号
     G_BOX_ROLE = PAGE_ID(PAGE_GM, 60), G_BOX_ASSET, G_BOX_PVP, G_BOX_ONCE, G_BOX_ACCT,
     G_BOX_MISC, G_BOX_BUB
 };
 
-static HWND c_name, c_lev, c_job, c_grow, c_money, c_coin, c_cera, c_point, c_accm;
+static HWND c_name, c_lev, c_job, c_grow, c_money, c_coin, c_cera, c_point, c_accm, c_vip;
 static HWND g_grade, g_win, g_point;
 // 泡点组：开关、间隔、目标人群、多奖励、起止时间、应用、导出、状态行
 static HWND c_bon, c_bsec, c_btarget, c_btno, c_bcoin, c_bdp, c_bdc, c_bitem, c_binum,
@@ -95,6 +98,7 @@ static const char *gm_what(int kind) {
         case K_COIN: return "设置复活币";
         case K_CERA: return "设置点券";
         case K_ACCM: return "设置账号金币";
+        case K_VIP: return "设置VIP";
         case K_JOB: return "设置职业";
         case K_PVP: return "设置 PVP";
         case K_RENAME: return "改名";
@@ -144,6 +148,7 @@ static void gm_apply(int kind, const Ctx *c) {
         case K_COIN: g.data.coin = c->u1; break;
         case K_CERA: g.data.cera = c->u1; g.data.cera_point = c->u2; break;
         case K_ACCM: g.data.account_money = c->u1; break;
+        case K_VIP: snprintf(g.data.vip, sizeof(g.data.vip), "%s", c->s); break;
         case K_PVP:
             g.data.pvp_grade = c->i1;
             g.data.pvp_win = c->i2;
@@ -206,6 +211,7 @@ static void gm_reload(Page *p) {
     ui_set_i64(c_cera, (i64)g.data.cera);
     ui_set_i64(c_point, (i64)g.data.cera_point);
     ui_set_i64(c_accm, (i64)g.data.account_money);
+    ui_text(c_vip, g.data.vip);
 
     int gr = g.data.pvp_grade;
     if (gr < 0) gr = 0;
@@ -485,6 +491,16 @@ static void gm_commit(int id) {
             gm_push(K_ACCM, &c);
             return;
         }
+        case G_VIP: {
+            // VIP 是文本，不能套数值那套 clamp；只去首尾空白，内容照原样写
+            char v[64];
+            ui_get(c_vip, v, sizeof(v));
+            str_trim(v);
+            if (!strcmp(v, g.data.vip)) return;
+            snprintf(c.s, sizeof(c.s), "%s", v);
+            gm_push(K_VIP, &c);
+            return;
+        }
         case G_JOB:
         case G_GROW: {
             int j = ui_combo_sel(c_job), gr = ui_combo_sel(c_grow);
@@ -639,13 +655,14 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
 // 2) 组框铺满整栏，内容在组内居中。GM 页的东西不算多，按自然高度排会在页面下半截
 //    留一大片空白；让组框吃掉剩余高度、内容在框内上下居中，页面就不会显得"没填满"。
 // 3) 一个组框只放一类东西。字段、一键、维护混在一起时，按钮和输入框的基线永远对不齐。
+// 一行 = 左列（标签 + 控件）与可选的右列（标签 + 控件）；lab2 为 NULL 时左列独占整行。
+// 原本还有个「右列拆成两个等宽框」的 twin 模式，只被点券/赠送点券那一行用过——
+// VIP 进来后资产组改成三个对称双列行，既然没人再用，就把这个模式连同字段一起删掉。
 typedef struct {
-    const char *lab;       // 左列标签（twin 行是合并标签，如"点券 / 赠送"）
+    const char *lab;       // 左列标签
     HWND        ctl;       // 左列控件
     const char *lab2;      // 右列标签（NULL = 这行只有一列）
     HWND        ctl2;      // 右列控件
-    HWND        ctl3;      // twin 行：右列拆两半时的第二个框
-    int         twin;      // 右列放两个等宽框（点券 + 赠送点券）
 } GmRow;
 
 typedef struct { int x, y, w, h; } GmRect;
@@ -667,16 +684,6 @@ static void gm_rows(HWND pw, const GmRect *b, const GmRow *r, int n) {
     for (int i = 0; i < n; i++) {
         const GmRow *q = &r[i];
         int ry = ytop + i * (nat + gapv);
-        if (q->twin) {                       // 右列两个框：点券 / 赠送
-            int bw = (half - ui_scale(6)) / 2;
-            int bx = b->x + inx + half + ui_scale(10);
-            ui_place(ui_lbl_at(pw, q->lab), b->x + inx, ry, half, lbh);
-            ui_place(q->ctl, b->x + inx, ry + lbh + lgap, half, rh);
-            ui_place(ui_lbl_at(pw, q->lab2), bx, ry, half, lbh);
-            ui_place(q->ctl2, bx, ry + lbh + lgap, bw, rh);
-            ui_place(q->ctl3, bx + bw + ui_scale(6), ry + lbh + lgap, bw, rh);
-            continue;
-        }
         int w1 = q->lab2 ? half : inner;
         ui_place(ui_lbl_at(pw, q->lab), b->x + inx, ry, w1, lbh);
         ui_place(q->ctl, b->x + inx, ry + lbh + lgap, w1, rh);
@@ -809,6 +816,7 @@ static void gm_layout(Page *p, int w, int h) {
     static const int kMisc[] = {G_DUMP, G_CDUMP, G_RESTORE, G_SCANBAD};
     int wL[3], wR[4];
     for (int i = 0; i < 3; i++) wL[i] = padY + 2 * natF;
+    wL[1] = padY + 3 * natF;        // 资产组三行（多了 VIP），按行数给高才不会挤成一团
     wR[0] = padY + 5 * natB;        // 一键：10 个按钮，2 列 5 行
     wR[1] = padY + 1 * natB;        // 账号：解除建角限制
     wR[2] = padY + 2 * natB;        // 维护：4 个按钮，2 列 2 行
@@ -819,7 +827,9 @@ static void gm_layout(Page *p, int w, int h) {
     // 铺满整栏，但有个上限：窗口很高时别把组框拉成空盒子——内容最多长到自然高的
     // 1.3 倍。顶部照常贴齐，多出来的空间留在页面下方，和左栏列表、其它页的贴顶版面一致。
     // 两栏共用同一个高度，底部才会齐平。
-    int natColL = 3 * wL[0] + 2 * gap;
+    // 逐项相加而不是用单一行高估算：资产组已经比另两组高一行，
+    // 再按同一数字乘三会低估左栏自然高度，算出来的上限会把内容框压矮。
+    int natColL = wL[0] + wL[1] + wL[2] + 2 * gap;
     int natColR = wR[0] + wR[1] + wR[2] + wR[3] + 3 * gap;
     int natMax = natColL > natColR ? natColL : natColR;
     int cap = natMax + natMax * 3 / 10;
@@ -836,19 +846,23 @@ static void gm_layout(Page *p, int w, int h) {
         ui_place(GetDlgItem(pw, kBoxR[i]), R[i].x, R[i].y, R[i].w, R[i].h);
 
     GmRow role[2] = {
-        {"角色名", c_name, "等级", c_lev, NULL, 0},
-        {"职业",   c_job,  "觉醒", c_grow, NULL, 0},
+        {"角色名", c_name, "等级", c_lev},
+        {"职业",   c_job,  "觉醒", c_grow},
     };
-    GmRow asset[2] = {
-        {"金币",     c_money, "复活币",       c_coin, NULL,   0},
-        {"账号金币", c_accm,  "点券 / 赠送",  c_cera, c_point, 1},
+    // VIP 单独占一行，点券与赠送点券拆成两个带标签的框：
+    // 原先两者挤在右半格共用一个「点券 / 赠送」标题，插进 VIP 后那半格就成了三个控件，
+    // 挤在一行里标签对不上框，不如让每行都是左框 / 右框的对称结构。
+    GmRow asset[3] = {
+        {"金币",     c_money, "复活币",   c_coin},
+        {"账号金币", c_accm,  "VIP",      c_vip},
+        {"点券",     c_cera,  "赠送点券", c_point},
     };
     GmRow pvp[2] = {
-        {"段位", g_grade, "胜场", g_win, NULL, 0},
-        {"分数", g_point, NULL,   NULL,  NULL, 0},
+        {"段位", g_grade, "胜场", g_win},
+        {"分数", g_point, NULL,   NULL},
     };
     gm_rows(pw, &L[0], role, 2);
-    gm_rows(pw, &L[1], asset, 2);
+    gm_rows(pw, &L[1], asset, 3);
     gm_rows(pw, &L[2], pvp, 2);
     gm_btns(pw, &R[0], kOnce, 10, 2);
     gm_btns(pw, &R[1], kAcct, 1, 1);
@@ -859,12 +873,12 @@ static void gm_lock(Page *p) {
     (void)p;
     int on = g.char_ok;
     int ids[16] = {G_NAME, G_LEV, G_JOB, G_GROW, G_MONEY, G_COIN, G_CERA, G_POINT, G_ACCM,
-                   G_GRADE, G_WIN, G_PVP_POINT};
+                   G_GRADE, G_WIN, G_PVP_POINT, G_VIP};
     // 表单是失焦即写，而角色在线时写完会被服务端回写覆盖（程序会拒绝提交）。
     // 与其让人改半天发现没生效，不如在线时把这些框置灰，并把条件写在组框标题上——
     // 灰掉的控件收不到悬停，提示只能写在旁边的文字里。一键按钮不受此限（它们直接改库）。
     int edit = g.char_ok && !g.cur.online;
-    for (int i = 0; i < 12; i++) ui_enable(GetDlgItem(p->wnd, ids[i]), edit);
+    for (int i = 0; i < 13; i++) ui_enable(GetDlgItem(p->wnd, ids[i]), edit);
     for (int i = 0; i < 10; i++) ui_enable(GetDlgItem(p->wnd, G_SP + i), on);
     static int s_edit = -1;
     if (edit != s_edit) {
@@ -909,10 +923,11 @@ static void gm_build(Page *p, HWND parent) {
     c_grow = ui_combo(parent, G_GROW, 1);
     ui_combo_fill(c_grow, kGrowList, COUNT_OF(kGrowList), 0);
     // 创建顺序就是 Tab 顺序：这几行必须和视觉上的行列一致
-    // （金币/复活币 → 账号金币/点券/赠送），建反了 Tab 会在同一行里左右乱跳
+    // （金币/复活币 → 账号金币/VIP → 点券/赠送点券），建反了 Tab 会在同一行里左右乱跳
     c_money = ui_edit(parent, "", G_MONEY, 0);
     c_coin = ui_edit(parent, "", G_COIN, 0);
     c_accm = ui_edit(parent, "", G_ACCM, 0);
+    c_vip = ui_edit(parent, "", G_VIP, 0);
     c_cera = ui_edit(parent, "", G_CERA, 0);
     c_point = ui_edit(parent, "", G_POINT, 0);
 
@@ -955,6 +970,10 @@ static void gm_build(Page *p, HWND parent) {
     ui_tip(parent, c_accm,
            "账号级金币，同账号所有角色共用；改完点到别处即写入库。"
            "账号金库记录不存在时会自动建一条（容量/物品为空）");
+    ui_tip(parent, c_vip,
+           "账号级 VIP 标记（d_taiwan.accounts.VIP），同账号所有角色共用。"
+           "服务端存的是文本而不是数字，按原始格式照实填（如 0 / 1 / 到期时间）；"
+           "改完点到别处即写入库。角色在线时改了会被服务端存档覆盖");
     ui_tip(parent, c_cera, "点券和赠送点券一起提交（同一条 UPDATE）。角色在线时改了会被服务端覆盖");
 
     // 泡点组：全服设置，跟选中哪个角色无关。创建顺序 = Tab 顺序。

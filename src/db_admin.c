@@ -247,6 +247,31 @@ int db_unlock_create(Db *d, u32 mid, Err err) {
     return ok;
 }
 
+// VIP 标记在 d_taiwan.accounts.VIP（varchar，本库是 utf8）。连接默认 utf8mb4 是其超集，
+// 直接读/转义写即可，不必切 charset。读不到行就留空，不让整次加载失败。
+int db_get_vip(Db *d, u32 mid, char *out, int cap, Err err) {
+    Str s = {0};
+    str_catf(&s, "SELECT VIP FROM d_taiwan.accounts WHERE UID=%u", mid);
+    MyResult r = {0};
+    int ok = select1(d, &s, &r);
+    if (ok && r.nrow) cp_text(out, cap, &r, 0, 0);
+    else if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    my_free(&r);
+    str_free(&s);
+    return ok;
+}
+
+int db_set_vip(Db *d, u32 mid, const char *vip, Err err) {
+    char *e = mysql_escape(vip ? vip : "0");
+    Str s = {0};
+    str_catf(&s, "UPDATE d_taiwan.accounts SET VIP='%s' WHERE UID=%u", e, mid);
+    free(e);
+    int ok = run(d, &s);
+    str_free(&s);
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    return ok;
+}
+
 int db_online_accounts(Db *d, Vec *out) {
     Str s = {0};
     str_cat(&s, "SELECT m_id FROM taiwan_login.login_account_3 WHERE login_status=1");

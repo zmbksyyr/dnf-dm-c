@@ -636,6 +636,14 @@ int db_load_data(Db *d, const Charac *c, CharData *out, Err err) {
     if (have_table(d, kJoinCera.table)) out->cera = my_u64(&r, 0, 19, 0);
     if (have_table(d, kJoinCeraPoint.table)) out->cera_point = my_u64(&r, 0, 20, 0);
 
+    // VIP 在另一个库 d_taiwan.accounts：单独一条查询带回来，不进上面的 JOIN。
+    // 失败不让整次加载挂掉——VIP 只是个标记字段，因为它读不出来就让整个角色页打不开不值得，
+    // 所以错误留在自己的缓冲里，不往上传。
+    {
+        Err e = {0};
+        db_get_vip(d, c->mid, out->vip, sizeof(out->vip), e);
+    }
+
     my_free(&r);
     out->loaded = 1;
     return out->inv.ok && out->equip.ok && out->creature.ok;
@@ -711,6 +719,11 @@ int db_read_state(Db *d, const Charac *c, CharData *out, Err err) {
     }
     if (have_table(d, kJoinCera.table)) out->cera = my_u64(&r, 0, 12, out->cera);
     if (have_table(d, kJoinCeraPoint.table)) out->cera_point = my_u64(&r, 0, 13, out->cera_point);
+    // VIP 同上：单独带回来（账号级，按文本处理），读失败维持原值
+    {
+        Err e = {0};
+        db_get_vip(d, c->mid, out->vip, sizeof(out->vip), e);
+    }
     my_free(&r);
     (void)err;
     return 1;

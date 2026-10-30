@@ -18,6 +18,7 @@ typedef struct {
     u64  money, coin, account_money, cera, cera_point;
     int  sp, sp2, tp, tp2, qp;
     int  pvp_grade, pvp_win, pvp_point;
+    char vip[64];        // 账号级 VIP 标记（accounts.VIP，varchar，按文本处理）
     int  loaded;
 } CharData;
 
@@ -201,6 +202,8 @@ int  db_find_mid(Db *d, const char *name, u32 *mid, Err err);
 int  db_online_accounts(Db *d, Vec *out);                                 // Vec<u32> mid
 int  db_reset_pwd(Db *d, u32 mid, const char *pwd, Err err);               // 密码按 md5 存
 int  db_unlock_create(Db *d, u32 mid, Err err);                            // 解除建角次数限制
+int  db_get_vip(Db *d, u32 mid, char *out, int cap, Err err);              // 读 accounts.VIP
+int  db_set_vip(Db *d, u32 mid, const char *vip, Err err);                 // 写 accounts.VIP
 
 // 整库备份 / 还原（.sql 文本）
 void db_dump_path(char *out, int cap);
