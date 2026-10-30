@@ -62,6 +62,7 @@ python tools\v_gmwrite.py
 | `v_align.py` | 量 PVF 标签与页签「物品」的左边缘差几像素 |
 | `v_selfcheck.py` | 临时把 `taiwan_cain_2nd.letter` 改名，验证启动自检能报出缺表（`finally` 里改回） |
 | `v_norow.py` | 造「表里没有这条记录」的场景，验证报错而不是报成功 |
+| `v_bubble.py` | 临时把账号置为在线，验证泡点按间隔加点、关掉就停（点数和在线状态都复原） |
 
 `pages.py` 是公共库：Win32 消息封装、截图、切页签、等主窗口、`db()` 连库。
 
@@ -69,5 +70,6 @@ python tools\v_gmwrite.py
 
 1. **会改库，但会复原**。`v_gmwrite` / `v_queue` / `v_stable` / `v_pollcard` 都记录原值并写回；`v_pollcard` 还会把等级改回去。跑完仍建议对一下 `money` / `coin` / `cera` / `lev`。
 2. **`v_selfcheck` 会临时改表名**。它把 `letter` 改成 `letter_selfcheck_bak` 再改回来，中途程序会报缺表——这是预期结果。异常退出时表可能留在改名状态，手动改回即可。
-3. **不要在 CI 里跑这些**。它们要真实 MySQL、要能创建窗口、而且会改业务数据，都跑在开发机上。
-4. **控件 ID 是硬编码的**（`PAGE_ID(page, n) = 1000 + page*100 + n`）。界面改了就跟着改，所以脚本天然短命——只有经得起反复用、改界面也愿意同步维护的才留在这个目录。
+3. **`v_bubble` 会临时把账号置为在线**，并在 `finally` 里把 `cera_point` 和 `login_status` 都改回测试前的值。它只认 `account=1`，换库要改脚本顶部的 `M_ID` / `ACC`。真有人在线时也能跑，但会短暂改动他的赠送点券。
+4. **不要在 CI 里跑这些**。它们要真实 MySQL、要能创建窗口、而且会改业务数据，都跑在开发机上。
+5. **控件 ID 是硬编码的**（`PAGE_ID(page, n) = 1000 + page*100 + n`）。界面改了就跟着改，所以脚本天然短命——只有经得起反复用、改界面也愿意同步维护的才留在这个目录。

@@ -16,13 +16,18 @@ enum {
     G_ACCM, G_GRADE, G_WIN, G_PVP_POINT,
     G_SP, G_QP, G_NOWEIGHT, G_SLOT, G_UNLOCK, G_EXPERT, G_FATIGUE, G_DUNGEON, G_PUNISH, G_QCLR,
     G_DUMP, G_RESTORE, G_CDUMP, G_UNLCREATE, G_SCANBAD,
+    // 泡点：开关 / 间隔 / 点数 / 应用 / 状态行
+    G_BON, G_BSEC, G_BVAL, G_BAPPLY, G_BINFO,
     // 分组框：纯视觉容器，不参与 enable / 提交。ID 单独起一段，避开上面连续递增的控件号
     G_BOX_ROLE = PAGE_ID(PAGE_GM, 60), G_BOX_ASSET, G_BOX_PVP, G_BOX_ONCE, G_BOX_ACCT,
-    G_BOX_MISC
+    G_BOX_MISC, G_BOX_BUB
 };
 
 static HWND c_name, c_lev, c_job, c_grow, c_money, c_coin, c_cera, c_point, c_accm;
 static HWND g_grade, g_win, g_point;
+// 泡点组：开关、间隔秒、每次点数、状态行
+static HWND c_bon, c_bsec, c_bval, c_binfo;
+static char s_binfo_last[192];   // 状态行只在文字变了才写，SetWindowText 会重绘
 
 // 全服清错误物品的状态（实现在本文件后面）
 static Vec  s_scan;
@@ -102,11 +107,24 @@ static void gm_kick(void) {
     app_act(gm_what(s_gm_run.kind), char_work, &s_gm_run);
 }
 
+// 泡点状态行：每 tick 会被问一次，文字没变就不写（SetWindowText 会触发重绘）
+static void gm_bubble_status_sync(void) {
+    if (!c_binfo) return;
+    char buf[192];
+    app_bubble_status(buf, sizeof(buf));
+    if (!strcmp(buf, s_binfo_last)) return;
+    snprintf(s_binfo_last, sizeof(s_binfo_last), "%s", buf);
+    ui_text(c_binfo, buf);
+}
+
 // 队列的推进挂在这里，而不是挂在 gm_reload 上。
 // 挂在 reload 上意味着"页面不刷新 → 队列不发"，于是隐藏页也必须跟着刷，
 // 刷新就从"让界面跟上"变成了写入流程的一环——这条耦合正是各种刷新打架的根源。
 // 现在每 tick 推进一次，与页面可见性无关；reload 只管显示。
-void page_gm_pump(void) { gm_kick(); }
+void page_gm_pump(void) {
+    gm_kick();
+    gm_bubble_status_sync();       // 倒计时和上次结算结果都在这行里
+}
 
 static void gm_refill(void);          // 实现见下（gm_push 队列满时要回滚界面）
 
@@ -548,6 +566,13 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         app_act("解除建角限制", char_work, &kc);
         return 0;
     }
+    if (id == G_BAPPLY) {
+        // 泡点是账号级/全服设置，不依赖当前选中角色，所以放在 need_char 之前
+        int on = (int)SendMessageW(c_bon, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        app_bubble_apply(on, (int)ui_i64(c_bsec), (int)ui_i64(c_bval));
+        gm_bubble_status_sync();
+        return 0;
+    }
     if (!need_char()) return 0;
     switch (id) {
         case G_SP: kc.kind = K_SP; kc.i1 = 90000; kc.i2 = 90000; break;
@@ -650,6 +675,30 @@ static void gm_btns(HWND pw, const GmRect *b, const int *ids, int n, int cols) {
     }
 }
 
+// 泡点组：开关一行、两个字段一行、应用 + 状态一行。
+// 高度按「一行开关 + 一行字段 + 一行按钮」给权重，见 gm_layout 里的 wR[3]。
+static void gm_bubble(HWND pw, const GmRect *b) {
+    const int inx = ui_scale(12), iny = ui_scale(22);
+    const int lbh = ui_scale(15), lgap = ui_scale(4), rh = ui_scale(24);
+    const int inner = b->w - inx * 2;
+    const int half = (inner - ui_scale(10)) / 2;
+
+    int ry = b->y + iny;
+    ui_place(c_bon, b->x + inx, ry, inner, rh);
+    ry += rh + ui_scale(8);
+
+    ui_place(ui_lbl_at(pw, "间隔（秒）"), b->x + inx, ry, half, lbh);
+    ui_place(c_bsec, b->x + inx, ry + lbh + lgap, half, rh);
+    int bx = b->x + inx + half + ui_scale(10);
+    ui_place(ui_lbl_at(pw, "每次加（点）"), bx, ry, half, lbh);
+    ui_place(c_bval, bx, ry + lbh + lgap, half, rh);
+    ry += lbh + lgap + rh + ui_scale(8);
+
+    ui_place(GetDlgItem(pw, G_BAPPLY), b->x + inx, ry, ui_scale(72), ui_scale(28));
+    ui_place(c_binfo, b->x + inx + ui_scale(80), ry + ui_scale(5), inner - ui_scale(80),
+             ui_scale(20));
+}
+
 // 一栏纵向分 n 个组框：按组高权重 wgt 分配，铺满整栏
 static void gm_lane(int x, int w, int y, int h, int gap, const int *wgt, int n, GmRect *out) {
     int total = 0;
@@ -678,35 +727,36 @@ static void gm_layout(Page *p, int w, int h) {
     const int natB = ui_scale(30) + ui_scale(4);                  // 按钮行
 
     static const int kBoxL[3] = {G_BOX_ROLE, G_BOX_ASSET, G_BOX_PVP};
-    static const int kBoxR[3] = {G_BOX_ONCE, G_BOX_ACCT, G_BOX_MISC};
+    static const int kBoxR[4] = {G_BOX_ONCE, G_BOX_ACCT, G_BOX_MISC, G_BOX_BUB};
     static const int kOnce[] = {G_SP, G_QP, G_NOWEIGHT, G_SLOT, G_UNLOCK,
                                 G_EXPERT, G_FATIGUE, G_DUNGEON, G_PUNISH, G_QCLR};
     static const int kAcct[] = {G_UNLCREATE};
     static const int kMisc[] = {G_DUMP, G_CDUMP, G_RESTORE, G_SCANBAD};
-    int wL[3], wR[3];
+    int wL[3], wR[4];
     for (int i = 0; i < 3; i++) wL[i] = padY + 2 * natF;
     wR[0] = padY + 5 * natB;        // 一键：10 个按钮，2 列 5 行
     wR[1] = padY + 1 * natB;        // 账号：解除建角限制
     wR[2] = padY + 2 * natB;        // 维护：4 个按钮，2 列 2 行
+    wR[3] = padY + natB + natF + ui_scale(26);   // 泡点：开关 + 字段行 + 应用行
 
     // 铺满整栏，但有个上限：窗口很高时别把组框拉成空盒子——内容最多长到自然高的
     // 1.3 倍。顶部照常贴齐，多出来的空间留在页面下方，和左栏列表、其它页的贴顶版面一致。
     // 两栏共用同一个高度，底部才会齐平。
     int natColL = 3 * wL[0] + 2 * gap;
-    int natColR = wR[0] + wR[1] + wR[2] + 2 * gap;
+    int natColR = wR[0] + wR[1] + wR[2] + wR[3] + 3 * gap;
     int natMax = natColL > natColR ? natColL : natColR;
     int cap = natMax + natMax * 3 / 10;
     int ch = h - pad * 2;
     if (ch > cap) ch = cap;
     int y0 = pad;
 
-    GmRect L[3], R[3];
+    GmRect L[3], R[4];
     gm_lane(x0, cw, y0, ch, gap, wL, 3, L);
-    gm_lane(x1, cw, y0, ch, gap, wR, 3, R);
-    for (int i = 0; i < 3; i++) {
+    gm_lane(x1, cw, y0, ch, gap, wR, 4, R);
+    for (int i = 0; i < 3; i++)
         ui_place(GetDlgItem(pw, kBoxL[i]), L[i].x, L[i].y, L[i].w, L[i].h);
+    for (int i = 0; i < 4; i++)
         ui_place(GetDlgItem(pw, kBoxR[i]), R[i].x, R[i].y, R[i].w, R[i].h);
-    }
 
     GmRow role[2] = {
         {"角色名", c_name, "等级", c_lev, NULL, 0},
@@ -726,6 +776,7 @@ static void gm_layout(Page *p, int w, int h) {
     gm_btns(pw, &R[0], kOnce, 10, 2);
     gm_btns(pw, &R[1], kAcct, 1, 1);
     gm_btns(pw, &R[2], kMisc, 4, 2);
+    gm_bubble(pw, &R[3]);
 }
 static void gm_lock(Page *p) {
     (void)p;
@@ -749,6 +800,7 @@ static void gm_build(Page *p, HWND parent) {
     ui_group(parent, "一键操作", G_BOX_ONCE);
     ui_group(parent, "账号", G_BOX_ACCT);
     ui_group(parent, "数据库维护", G_BOX_MISC);
+    ui_group(parent, "泡点", G_BOX_BUB);
 
     c_name = ui_edit(parent, "", G_NAME, 0);
     c_lev = ui_edit(parent, "", G_LEV, 0);
@@ -801,9 +853,27 @@ static void gm_build(Page *p, HWND parent) {
     ui_tip(parent, c_coin, "改完点到别处即写入库");
     ui_tip(parent, c_accm, "账号级金币，同账号所有角色共用；改完点到别处即写入库");
     ui_tip(parent, c_cera, "点券和赠送点券一起提交（同一条 UPDATE）");
+
+    // 泡点组：全服设置，跟选中哪个角色无关。开关 → 间隔/点数 → 应用，
+    // 创建顺序就是 Tab 顺序，所以按这个次序建。
+    c_bon = ui_check(parent, "启用泡点", G_BON, 0);
+    c_bsec = ui_edit(parent, "", G_BSEC, 0);
+    c_bval = ui_edit(parent, "", G_BVAL, 0);
+    ui_button(parent, "应用", G_BAPPLY);
+    c_binfo = ui_label(parent, "", G_BINFO);
+    ui_tip(parent, c_bon, "开启后每隔一段时间给每个在线账号加赠送点券；只在工具开着时结算，关掉不补算");
+    ui_tip(parent, c_bsec, "结算间隔，单位秒，下限 5");
+    ui_tip(parent, c_bval, "每次给每个在线账号加多少赠送点券");
+    ui_tip(parent, GetDlgItem(parent, G_BAPPLY),
+           "把开关/间隔/点数写进 settings.ini，立即生效并重新计时");
     // PVP 默认值：最高段位 + 胜场/分数 999（选中角色后由 gm_reload 覆盖为实际值）
     ui_set_int(g_win, 999);
     ui_set_int(g_point, 999);
+    // 泡点初值来自 settings.ini；ui_check/ui_edit 建的时候留空，在这里一次设好
+    if (g.cfg.bubble_on) SendMessageW(c_bon, BM_SETCHECK, BST_CHECKED, 0);
+    ui_set_int(c_bsec, g.cfg.bubble_sec);
+    ui_set_int(c_bval, g.cfg.bubble_val);
+    gm_bubble_status_sync();
     (void)p;
 }
 

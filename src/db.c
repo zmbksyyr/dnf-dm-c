@@ -914,6 +914,30 @@ fail:
     return 0;
 }
 
+// 泡点：给每个在线账号的赠送点券加 val。
+// 一条 UPDATE ... JOIN 写完，要么全加要么一个不加，不需要事务。
+// 不走 db_exec：那里把「命中 0 行」当失败，而这里没人上线是正常结果。
+int db_bubble_tick(Db *d, int val, u32 *paid, Err err) {
+    if (val <= 0) {
+        if (paid) *paid = 0;
+        return 1;
+    }
+    Str s = {0};
+    u64 aff = 0;
+    // account 是 varchar(30)。拿它跟 int 的 m_id 直接比会把列转成数字、索引失效；
+    // 反过来把 m_id 转成字符，两边都是字符串，索引还在。
+    str_catf(&s,
+             "UPDATE taiwan_billing.cash_cera_point p"
+             " JOIN (SELECT DISTINCT m_id FROM taiwan_login.login_account_3"
+             " WHERE login_status>=1) l ON p.account=CAST(l.m_id AS CHAR)"
+             " SET p.cera_point=p.cera_point+%d, p.mod_date=NOW()", val);
+    int ok = run_aff(d, &s, &aff);
+    if (!ok) snprintf(err, ERRBUF, "泡点结算：%s", d->err);
+    else if (paid) *paid = (u32)aff;
+    str_free(&s);
+    return ok;
+}
+
 int db_set_delete_flag(Db *d, const Charac *c, int deleted, Err err) {
     return db_exec(d, deleted ? "标记删除" : "取消删除", "taiwan_cain.charac_info", "charac_no",
                    c->no, err,

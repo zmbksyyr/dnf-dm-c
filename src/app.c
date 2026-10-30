@@ -209,7 +209,8 @@ int job_poll(Job *j, Err err) {
 // 只互斥 app_act 是不够的——轮询/载入撞上写库会在同一连接上交错收发，包就串了
 static int db_busy(void) {
     return job_running(&g.job_conn) || job_running(&g.job_load) ||
-           job_running(&g.job_act) || job_running(&g.job_poll);
+           job_running(&g.job_act) || job_running(&g.job_poll) ||
+           job_running(&g.job_bubble);
 }
 
 void job_stop(Job *j) {
@@ -926,6 +927,61 @@ void app_shutdown(void) {
     if (g.db_ok) db_close(&g.db);
 }
 
+// ---------------- 泡点 ----------------
+// 每 bubble_sec 秒给「在线账号」的赠送点券加 bubble_val 点（账在账号维度，
+// 所以一个账号挂多个角色也只发一份）。只算本工具开着的时间：关掉就停、重开从零
+// 计时，不补算——补算要给每个账号记上次结算时刻，等于把服务端的账本搬到 GM 台上。
+static u64 s_bubble_next;      // 下次结算时刻（0 = 还没开始计时）
+static u32 s_bubble_paid;      // 上次命中的账号数
+static u32 s_bubble_runs;      // 已结算次数
+
+typedef struct {
+    int val;
+} BubbleCtx;
+
+static int w_bubble(void *ctx, Err err) {
+    u32 n = 0;
+    if (!db_bubble_tick(&g.db, ((BubbleCtx *)ctx)->val, &n, err)) return 0;
+    s_bubble_paid = n;
+    s_bubble_runs++;
+    return 1;
+}
+
+void app_bubble_apply(int on, int sec, int val) {
+    if (sec < 5) sec = 5;             // 下限 5 秒：再快就是拿一条连接刷库
+    if (sec > 86400) sec = 86400;
+    if (val < 1) val = 1;
+    if (val > 1000000) val = 1000000;
+    g.cfg.bubble_on = on ? 1 : 0;
+    g.cfg.bubble_sec = sec;
+    g.cfg.bubble_val = val;
+    s_bubble_next = 0;                // 从改的这一刻重新计时，别沿用旧时刻
+    cfg_save(&g.cfg, g.cfg_path);
+    app_status("泡点：%s · 每 %d 秒 +%d 点", on ? "已启用" : "已停用", sec, val);
+    app_log("泡点：%s · 每 %d 秒 +%d 点（赠送点券，只算在线账号）",
+            on ? "已启用" : "已停用", sec, val);
+}
+
+void app_bubble_status(char *out, int cap) {
+    if (!g.cfg.bubble_on) {
+        snprintf(out, cap, "未启用");
+        return;
+    }
+    if (!g.db_ok) {
+        snprintf(out, cap, "已启用 · 等数据库连接后开始计时");
+        return;
+    }
+    u64 now = now_ms();
+    int left = s_bubble_next > now ? (int)((s_bubble_next - now) / 1000) : 0;
+    if (!s_bubble_runs)
+        snprintf(out, cap, "已启用 · %d 秒后首次结算", left);
+    else if (s_bubble_paid)
+        snprintf(out, cap, "已启用 · 上次 %u 个账号各 +%d 点 · %d 秒后下次",
+                 s_bubble_paid, g.cfg.bubble_val, left);
+    else
+        snprintf(out, cap, "已启用 · 上次没有在线账号 · %d 秒后下次", left);
+}
+
 // ---------------- 周期轮询 ----------------
 void app_tick(void) {
     Err err;
@@ -1021,6 +1077,30 @@ void app_tick(void) {
     if (s_reload_later) {
         s_reload_later = 0;
         app_reload();
+    }
+
+    // 泡点：到点才发，而且必须连接空闲、队列里也没人的操作 —— 不跟人抢那条连接。
+    // 没连库或没启用就把计时清零，下次连上从整段间隔重新开始。
+    if (!g.db_ok || !g.cfg.bubble_on) {
+        s_bubble_next = 0;
+    } else if (!db_busy() && !g_pq_n) {
+        u64 now = now_ms();
+        u64 step = (u64)g.cfg.bubble_sec * 1000;
+        if (!s_bubble_next) {
+            s_bubble_next = now + step;
+        } else if (now >= s_bubble_next) {
+            s_bubble_next = now + step;
+            BubbleCtx bc = {g.cfg.bubble_val};
+            job_start(&g.job_bubble, w_bubble, &bc);
+        }
+    }
+    if (job_poll(&g.job_bubble, err)) {
+        if (err[0]) {
+            app_log("泡点结算失败：%s", err);
+        } else if (s_bubble_paid) {
+            app_log("泡点结算：%u 个在线账号各 +%d 点（赠送点券）", s_bubble_paid,
+                    g.cfg.bubble_val);
+        }
     }
 
     // 连接空出来了：先把排队的动作发完，再补载入。

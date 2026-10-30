@@ -71,7 +71,7 @@ typedef struct {
     int    pvf_pct;
     char   pvf_stage[64];
 
-    Job    job_conn, job_load, job_pvf, job_poll, job_act, job_grab;
+    Job    job_conn, job_load, job_pvf, job_poll, job_act, job_grab, job_bubble;
     char   act_what[64];
 
     GrabHit grab;          // 最近一次取码结果
@@ -154,6 +154,11 @@ void app_money_text(u64 v, char *buf, int cap);
 int  app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz);
 int  app_act_idle(void);                 // 连接空闲且没有排队动作：能直接发
 #define app_act(what, fn, ctx) app_act_n((what), (fn), (void *)(ctx), (int)sizeof(*(ctx)))
+
+// 泡点：开关 / 间隔秒 / 每次点数。改完立即写回 settings.ini，计时从改的那一刻重来。
+// 结算由 app_tick 驱动，只在本工具开着、且连库期间发生（关掉不补算）。
+void app_bubble_apply(int on, int sec, int val);
+void app_bubble_status(char *out, int cap);   // 一行人话，给 GM 页底部标签用
 
 // 发放
 void app_grant_add(u32 id);

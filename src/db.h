@@ -115,6 +115,10 @@ int  db_set_money(Db *d, const Charac *c, u64 money, Err err);
 int  db_set_coin(Db *d, const Charac *c, u64 coin, Err err);
 int  db_set_account_money(Db *d, const Charac *c, u64 money, Err err);
 int  db_set_cera(Db *d, const Charac *c, u64 cera, u64 point, Err err);
+
+// 泡点结算：给每个在线账号的赠送点券加 val，paid 带回命中账号数。
+// 0 行是正常结果（没人在线），不是失败。
+int  db_bubble_tick(Db *d, int val, u32 *paid, Err err);
 int  db_set_delete_flag(Db *d, const Charac *c, int deleted, Err err);
 
 // GM 一键

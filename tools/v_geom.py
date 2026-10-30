@@ -18,7 +18,8 @@ u.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
 u.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
 u.GetWindowLongW.argtypes = [wt.HWND, ctypes.c_int]
 
-BOX = {1860: "角色", 1861: "资产", 1862: "PVP", 1863: "一键操作", 1864: "账号", 1865: "维护"}
+BOX = {1860: "角色", 1861: "资产", 1862: "PVP", 1863: "一键操作", 1864: "账号", 1865: "维护",
+       1866: "泡点"}
 
 
 def kids(hwnd):
