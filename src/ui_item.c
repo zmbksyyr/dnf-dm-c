@@ -766,16 +766,14 @@ static void query_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, Q_ALL, "全部加入"), ui_scale(80));
     ui_add(&r, q_info, -1);
 
-    // 第二行：四个「加载常用」+ 五个「浏览」，九样东西排一行。宽度按页面可用宽度
+    // 第二行：四个「加载常用」+ 五个分类，九样东西排一行。宽度按页面可用宽度
     // 整体缩放 —— 窗口拉窄时不缩会把最右边那几个顶出界外。
-    // 「浏览」两个字的标签是两组的分界：左边填结果列表，右边开独立窗口挑。
     int y2 = pad + rowh + g;
     struct { HWND h; int w; } b2[] = {
         {ui_btn_at(p->wnd, Q_MAT, "加载常用材料"),  ui_scale(100)},
         {ui_btn_at(p->wnd, Q_EQU, "加载常用装备"),  ui_scale(100)},
         {ui_btn_at(p->wnd, Q_AVA, "加载常用时装"),  ui_scale(100)},
         {ui_btn_at(p->wnd, Q_TASK, "加载任务材料"), ui_scale(100)},
-        {ui_lbl_at(p->wnd, "浏览"),                ui_scale(38)},
         {ui_btn_at(p->wnd, Q_BMAT, "材料"),        ui_scale(60)},
         {ui_btn_at(p->wnd, Q_BSTK, "消耗品"),      ui_scale(64)},
         {ui_btn_at(p->wnd, Q_BEQU, "装备"),        ui_scale(60)},
