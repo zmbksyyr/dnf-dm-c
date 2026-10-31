@@ -45,6 +45,9 @@ HINSTANCE ui_inst(void);
 void      ui_font_reload(int pt);
 HFONT     ui_font(void);
 HFONT     ui_font_bold(void);
+// 用当前界面字体量一行文字的像素宽。布局要「按钮右端对齐到某段文字右端」时
+// 必须靠它：label 控件宽度可以随便给，但文字只占前面一段，按控件宽算会差几十像素。
+int       ui_text_w(const char *s);
 
 // ---- 配色 ----
 // 全界面只有三层颜色：底色（页面与组框内）、白（可编辑区/卡片）、一条浅灰线。

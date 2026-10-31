@@ -40,6 +40,22 @@ int       ui_scale(int px) { return MulDiv(px, g_dpi, 96); }
 HFONT     ui_font(void) { return g_f; }
 HFONT     ui_font_bold(void) { return g_fb ? g_fb : g_f; }
 
+// 量一行文字的宽（用界面字体）。STATIC 控件本身可以拉得很宽，文字仍然只占前面
+// 那一段，所以「让按钮右端和上面那句提示的右端对齐」时不能拿控件宽度当文字宽度。
+int ui_text_w(const char *s) {
+    if (!s || !s[0]) return 0;
+    WCHAR w[512];
+    utf16(s, w, COUNT_OF(w));
+    HDC dc = GetDC(NULL);
+    if (!dc) return 0;
+    HFONT old = (HFONT)SelectObject(dc, ui_font());
+    SIZE sz = {0, 0};
+    GetTextExtentPoint32W(dc, w, (int)wcslen(w), &sz);
+    SelectObject(dc, old);
+    ReleaseDC(NULL, dc);
+    return sz.cx;
+}
+
 // ---------------- 配色 ----------------
 // 系统默认的 BS_GROUPBOX 是「凹陷灰坑 + 内部比页面略亮」，满屏六个就是一堆色块。
 // 这里统一成：页面底色做底，组框只留一条 1px 浅灰线，标题骑在顶边上。
@@ -68,12 +84,29 @@ HBRUSH ui_card_brush(void) {
 
 // 主窗口 / 页 / 对话框共用：标签跟页面同色（否则每个 STATIC 都留一块 3DFACE 灰印），
 // 只读 EDIT 用白底（日志、路径这类"内容区"应该像张白纸，不是又一块灰）
+// 禁用控件的底色。只 EnableWindow(FALSE) 不改颜色的话，EDIT 还是白底黑字，
+// 看上去跟能编辑的一模一样 —— 「该灰的没灰」用户根本看不出这个框不能填。
+// 固定一个比正常输入框明显深一点的灰。不能用 GetSysColorBrush(COLOR_BTNFACE)：
+// 开了视觉主题时它返回的是主题刷，颜色跟白底差不了两三度，禁用等于没标出来。
+static HBRUSH g_dis_brush;
+static HBRUSH dis_brush(void) {
+    if (!g_dis_brush) g_dis_brush = CreateSolidBrush(RGB(0xE2, 0xE2, 0xE2));
+    return g_dis_brush;
+}
+
 LRESULT ui_ctl_color(WPARAM wp, LPARAM lp) {
     wchar_t cls[32] = L"";
-    GetClassNameW((HWND)lp, cls, (int)COUNT_OF(cls));
+    HWND w = (HWND)lp;
+    GetClassNameW(w, cls, (int)COUNT_OF(cls));
     int is_edit = !lstrcmpiW(cls, L"Edit");
     HDC dc = (HDC)wp;
     if (is_edit) {
+        if (!IsWindowEnabled(w)) {
+            SetBkMode(dc, OPAQUE);
+            SetBkColor(dc, RGB(0xE2, 0xE2, 0xE2));
+            SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+            return (LRESULT)dis_brush();
+        }
         SetBkMode(dc, OPAQUE);
         SetBkColor(dc, RGB(0xFF, 0xFF, 0xFF));
         return (LRESULT)ui_card_brush();
@@ -160,13 +193,49 @@ HWND ui_label_b(HWND parent, const char *text, int id) {
     return mktext(parent, text, id, g_fb ? g_fb : g_f, SS_LEFT | SS_CENTERIMAGE);
 }
 
+// 禁用的输入框自己画：带视觉样式的 EDIT 即使 disabled 也还是白底，
+// 跟能填的一模一样 —— 现场看到的就是"该灰的没灰"。父窗口的 WM_CTLCOLOR
+// 在这台机器上也没落下来（禁用/正常两种底色完全一致），所以干脆在
+// WM_PAINT 里铺一层灰底、再用灰字重画内容。
+static LRESULT CALLBACK edit_proc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR ref) {
+    (void)id;
+    (void)ref;
+    if (!IsWindowEnabled(h) && (m == WM_PAINT || m == WM_ERASEBKGND)) {
+        HDC dc;
+        PAINTSTRUCT ps;
+        int own = (m == WM_PAINT);
+        dc = own ? BeginPaint(h, &ps) : (HDC)wp;
+        RECT rc;
+        GetClientRect(h, &rc);
+        FillRect(dc, &rc, dis_brush());
+        if (!own) return 1;
+        wchar_t t[512] = L"";
+        GetWindowTextW(h, t, (int)COUNT_OF(t));
+        if (t[0]) {
+            RECT tr = rc;
+            tr.left += 4;
+            tr.right -= 2;
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+            HGDIOBJ of = SelectObject(dc, (HGDIOBJ)SendMessageW(h, WM_GETFONT, 0, 0));
+            DrawTextW(dc, t, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(dc, of);
+        }
+        EndPaint(h, &ps);
+        return 0;
+    }
+    return DefSubclassProc(h, m, wp, lp);
+}
+
 HWND ui_edit(HWND parent, const char *text, int id, int ro) {
     WCHAR w[1024];
     utf16(text, w, COUNT_OF(w));
     // 可编辑的框必须带 WS_TABSTOP：不加的话 Tab 键会把它整个跳过去。
     // 以前这里没有，GM 页 14 个输入框全都不在 Tab 序列里，只能靠鼠标点。
     DWORD st = WS_BORDER | ES_AUTOHSCROLL | (ro ? ES_READONLY : WS_TABSTOP);
-    return ui_make(parent, L"EDIT", w, st, 0, id);
+    HWND h = ui_make(parent, L"EDIT", w, st, 0, id);
+    if (h) SetWindowSubclass(h, edit_proc, 1, 0);
+    return h;
 }
 
 HWND ui_button(HWND parent, const char *text, int id) {
@@ -339,7 +408,10 @@ void ui_set_i64(HWND w, i64 v) {
 }
 
 void ui_enable(HWND w, int on) {
-    if (w) EnableWindow(w, on ? TRUE : FALSE);
+    if (!w) return;
+    EnableWindow(w, on ? TRUE : FALSE);
+    // 禁用的 EDIT 由 edit_proc 自己画灰底，状态一变就得重绘
+    InvalidateRect(w, NULL, TRUE);
 }
 
 void ui_show(HWND w, int on) {
@@ -540,7 +612,10 @@ static LRESULT CALLBACK page_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         LRESULT r = p->on(p, m, wp, lp);
         if (r != -1) return r;
     }
-    if (m == WM_CTLCOLORSTATIC || m == WM_CTLCOLORBTN) return ui_ctl_color(wp, lp);
+    // EDIT 走 WM_CTLCOLOREDIT，不是 STATIC：漏了这条，禁用状态永远是系统白底，
+    // SetTextColor 也落不下去（置灰后看着和可编辑的一样）。
+    if (m == WM_CTLCOLORSTATIC || m == WM_CTLCOLORBTN || m == WM_CTLCOLOREDIT)
+        return ui_ctl_color(wp, lp);
     return DefWindowProcW(h, m, wp, lp);
 }
 
