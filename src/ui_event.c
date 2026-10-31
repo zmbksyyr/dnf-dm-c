@@ -198,8 +198,18 @@ static void ev_layout(Page *p, int w, int h) {
     int pad = ui_scale(8), rowh = ui_scale(23), g = ui_scale(8);
     int x0 = pad, cw = rc.right - pad * 2;
     int ix = x0 + ui_scale(12), iw = cw - ui_scale(24);
+    (void)iw;
     int y = pad;
     URow r;
+
+    // 三行 + 新增定义那一行共用一个右边界：取第二行末尾「持续天数填 0 = 永久，无时限」
+    // 这段文字的右端。第一行的活动下拉对齐到这里就不再一横到底——下拉撑满整行时，
+    // 上面一行长、下面两行短，右边缘参差，看着像两套版面拼起来的。
+    // 说明列固定起点（第二行「启用活动」按钮右端再往右 10px），各行的说明文字才能左对齐。
+    const char *tip_days = "持续天数填 0 = 永久，无时限";
+    const int note_x = ix + ui_scale(500);
+    int right = note_x + ui_text_w(tip_days);
+    if (right > ix + cw - ui_scale(20)) right = ix + cw - ui_scale(20);
 
     // ---- 组一：启用活动 ----
     // 三行各有分工，不再把 7 个控件全塞在一行：活动下拉独占一行（长活动名才读得全），
@@ -208,11 +218,13 @@ static void ev_layout(Page *p, int w, int h) {
     ui_place(GetDlgItem(p->wnd, E_GRP1), x0, y, cw, g1h);
 
     int iy = y + ui_scale(24);
-    // 行 1：活动下拉。这里不能用 -1 —— ui_add(-1) 是按「页面客户区」撑到右边，
-    // 而组框比页面窄一圈（左右各 12），结果下拉会顶穿组框边框。按组框内宽算。
+    // 行 1：活动下拉。宽度算到整页右边界为止，不用 -1 —— ui_add(-1) 是按「页面客户区」
+    // 撑到右边，而组框比页面窄一圈（左右各 12），结果下拉会顶穿组框边框。
     ui_row(&r, p->wnd, ix, iy, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "活动"), ui_scale(34));
-    ui_add(&r, e_combo, iw - ui_scale(42));      // 34 标签 + 两个 4px 间距
+    int cw1 = right - r.x - r.gap;
+    if (cw1 < ui_scale(160)) cw1 = ui_scale(160);
+    ui_add(&r, e_combo, cw1);
 
     // 行 2：参数 / 持续天数 / 启用
     iy += rowh + g;
@@ -227,8 +239,8 @@ static void ev_layout(Page *p, int w, int h) {
     ui_add(&r, e_days, ui_scale(60));
     ui_gap(&r, ui_scale(10));
     ui_add(&r, ui_btn_at(p->wnd, E_ADD, "启用活动"), ui_scale(88));
-    ui_gap(&r, ui_scale(10));
-    ui_add(&r, ui_lbl_at(p->wnd, "持续天数填 0 = 永久，无时限"), iw - ui_scale(490));
+    r.x = note_x;                              // 说明列固定起点
+    ui_add(&r, ui_lbl_at(p->wnd, tip_days), right - note_x);
 
     // 行 3：按编号启用（下拉里翻不到时走这条）
     iy += rowh + g;
@@ -237,8 +249,8 @@ static void ev_layout(Page *p, int w, int h) {
     ui_add(&r, e_eid, ui_scale(70));
     ui_gap(&r, ui_scale(10));
     ui_add(&r, ui_btn_at(p->wnd, E_EIDADD, "按编号启用"), ui_scale(96));
-    ui_gap(&r, ui_scale(10));
-    ui_add(&r, ui_lbl_at(p->wnd, "不知道编号时用上面的下拉选，长下拉里能按名字认"), iw - ui_scale(262));
+    r.x = note_x;
+    ui_add(&r, ui_lbl_at(p->wnd, "下拉里翻不到时用这行"), right - note_x);
 
     // ---- 组二：新增活动定义 ----
     y += g1h + g;
@@ -253,17 +265,13 @@ static void ev_layout(Page *p, int w, int h) {
     ui_add(&r, e_dname, ui_scale(150));
     ui_gap(&r, ui_scale(8));
     ui_add(&r, ui_lbl_at(p->wnd, "说明"), ui_scale(34));
-    // 说明框吃掉剩余宽度，按钮跟在最后贴右。
-    // 不能用 -1：ui_add(-1) 是「撑到右边界」，后面再加就出去了，按钮会被排到组框外；
-    // 也别忘了 ui_add 每加一个控件自带 4px 间距 —— 7 个控件就是 28px，漏算就把按钮顶出框。
-    int fixed = ui_scale(34) + ui_scale(64) + ui_scale(34) + ui_scale(150) +
-                ui_scale(34) + ui_scale(88);
-    int gaps = ui_scale(4) * 7 + ui_scale(8) * 2 + ui_scale(10);
-    int dw = iw - fixed - gaps;
-    if (dw < ui_scale(120)) dw = ui_scale(120);
+    // 说明框原来吃掉剩余宽度（四百多像素），一行说明用不了那么长。缩到和上面同一
+    // 个右边界为止，「新增定义」按钮落在 right 上，四行的右端是一条线。
+    const int bw = ui_scale(88);
+    int dw = right - r.x - r.gap - bw;
+    if (dw < ui_scale(100)) dw = ui_scale(100);
     ui_add(&r, e_dexp, dw);
-    ui_gap(&r, ui_scale(10));
-    ui_add(&r, ui_btn_at(p->wnd, E_ADDICT, "新增定义"), ui_scale(88));
+    ui_add(&r, ui_btn_at(p->wnd, E_ADDICT, "新增定义"), bw);
 
     // ---- 组三：当前启用的活动 ----
     // 「清空活动」从组一挪到这里：它清的是这张列表，和「停用所选」是一类操作，
