@@ -936,6 +936,10 @@ int db_set_job(Db *d, const Charac *c, int job, int grow, Err err) {
 // 免得 PVF 没加载时把人家的经验清零。
 // 三句写在一个事务里：等级改了经验没改，是最难解释的一种中间态。
 int db_set_lev(Db *d, const Charac *c, int lev, i64 exp, Err err) {
+    // charac_stat.exp 是 int(11)：PVF 里 94 级往上的经验就超过 2^31 了，
+    // 原样写会被非严格模式静默截成 2147483647、严格模式直接报错。
+    // 夹到列上限，至少写进去的是个确定值。
+    if (exp > 2147483647LL) exp = 2147483647LL;
     if (!db_tx_begin(d, err)) return 0;
     if (!db_exec(d, "改等级", "taiwan_cain.charac_info", "charac_no", c->no, err,
                  "UPDATE taiwan_cain.charac_info SET lev=%d WHERE charac_no=%u", lev, c->no))
