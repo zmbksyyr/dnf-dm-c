@@ -136,6 +136,7 @@ static void tab_show(void) {
     t_list = ui_list(d, 6300);
     ui_cols(t_list, (const char *const[]){"表", "角色编号", "角色", "实例ID", "物品", "原因"},
             (const int[]){56, 80, 120, 110, 170, 60}, 6);
+    ui_idtip_bind(t_list, 4);          // 「物品」列放的是 it_id
     ui_place(t_list, pad, pad + rowh + g2, 640 - pad * 2, ui_scale(280));
 
     int y = pad + rowh + g2 + ui_scale(280) + g2;
@@ -298,6 +299,7 @@ static void pet_build(Page *p, HWND parent) {
     p_name = ui_edit(parent, "", P_NAME, 0);
     ui_cols(p_list, (const char *const[]){"实例ID", "物品", "编号", "宠物名", "饱食", "到期"},
             (const int[]){80, 180, 70, 140, 50, 130}, 6);
+    ui_idtip_bind(p_list, 2);
     ui_button(parent, "刷新", P_REFRESH);
     ui_button(parent, "满饱食", P_FULL);
     ui_button(parent, "续期", P_EXPIRE);
@@ -441,6 +443,7 @@ static void ava_build(Page *p, HWND parent) {
     a_info = ui_label(parent, "请先选择角色", A_INFO);
     ui_cols(a_list, (const char *const[]){"实例ID", "时装", "编号", "状态"},
             (const int[]){80, 260, 80, 80}, 4);
+    ui_idtip_bind(a_list, 2);
     ui_button(parent, "刷新", A_REFRESH);
     ui_button(parent, "显示/隐藏", A_HIDE);
     ui_button(parent, "续期", A_EXPIRE);
@@ -686,6 +689,7 @@ static void quest_build(Page *p, HWND parent) {
     q_info = ui_label(parent, "请先选择角色", Q_INFO);
     ui_cols(q_list, (const char *const[]){"槽位", "编号", "任务名", "需求物品", "状态"},
             (const int[]){48, 64, 200, 220, 72}, 5);
+    ui_idtip_bind(q_list, 1);
     ui_button(parent, "刷新", Q_REFRESH);
     ui_button(parent, "清空任务", Q_CLEAR);
     ui_button(parent, "放弃所选", Q_DROP);
@@ -731,7 +735,10 @@ static void log_load(void) {
     Str s = {0};
     for (int k = ln.n - 1; k >= 0; k--) {
         size_t at = *(size_t *)VEC_AT(&ln, size_t, k);
-        size_t to = (size_t)(k + 1 < ln.n ? *(size_t *)VEC_AT(&ln, size_t, k + 1) - 1 : b.n);
+        size_t to = (size_t)(k + 1 < ln.n ? *(size_t *)VEC_AT(&ln, size_t, k + 1) : b.n);
+        // 行尾的 \r\n 都剥掉再统一补 \r\n —— 只减 1 会把上一行的 \r 留在
+        // 行尾，编辑框里就冒出 \r\r\n 和空行（踩过：日志页行距忽宽忽窄）
+        while (to > at && (b.p[to - 1] == '\r' || b.p[to - 1] == '\n')) to--;
         if (to > at) str_catn(&s, (const char *)b.p + at, (int)(to - at));
         str_cat(&s, "\r\n");
     }

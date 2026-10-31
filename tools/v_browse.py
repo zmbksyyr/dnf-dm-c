@@ -16,7 +16,7 @@ import os, sys, time, subprocess, ctypes, ctypes.wintypes as wt
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-from pages import wait_main, grab, OUT as SHOTS  # noqa: E402
+from pages import wait_main, grab, OUT as SHOTS, EXE  # noqa: E402
 from pages import enabled, rows, set_text as set_txt, txt
 
 u = ctypes.windll.user32
@@ -129,7 +129,7 @@ def close_dlg(d):
 
 
 def main():
-    p = subprocess.Popen([os.path.join(ROOT, "DNF_GM.exe")], cwd=ROOT)
+    p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
     mw = wait_main(p)
     u.PostMessageW(P(mw), 0x0111, IDC_CONN, 0)     # 连库（宠物清单靠它）
     time.sleep(8.0)

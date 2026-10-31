@@ -309,6 +309,7 @@ static void item_bad_clear(void) {
     HWND lv = ui_list(d, 5001);
     ui_cols(lv, (const char *const[]){"容器", "槽位", "编号", "名称", "原因"},
             (const int[]){86, 50, 90, 170, 118}, 5);
+    ui_idtip_bind(lv, 2);
     ui_place(lv, ui_scale(12), ui_scale(34), ui_scale(536), ui_scale(316));
     for (int i = 0; i < rows.n; i++) {
         BadRow *r = VEC_AT(&rows, BadRow, i);
@@ -516,6 +517,7 @@ static void item_build(Page *p, HWND parent) {
             (const char *const[]){"槽位", "物品", "编号", "类型", "数量/耐久", "强化", "增幅", "封印",
                                   "锻造", "状态"},
             (const int[]){40, 160, 84, 68, 78, 44, 70, 56, 44, 56}, 10);
+    ui_idtip_bind(s_list, 2);          // 编号列：悬停看物品详情 + 图标
     ui_button(parent, "编辑", I_EDIT);
     ui_button(parent, "清空所选", I_CLR);
     ui_button(parent, "整页清空", I_CLRALL);
@@ -809,6 +811,7 @@ static void query_build(Page *p, HWND parent) {
     q_sep = ui_hline(parent);
     ui_cols(q_list, (const char *const[]){"编号", "名称", "数量", "说明"},
             (const int[]){80, 300, 60, 520}, 4);
+    ui_idtip_bind(q_list, 0);
     ui_button(parent, "搜索", Q_GO);
     ui_button(parent, "加入发放", Q_ADD);
     ui_button(parent, "全部加入", Q_ALL);
@@ -1387,6 +1390,7 @@ static void grant_build(Page *p, HWND parent) {
     g_list = ui_list(parent, G_LIST);
     ui_cols(g_list, (const char *const[]){"物品名", "编号", "数量", "强化", "增幅", "锻造", "封装", "耐久"},
             (const int[]){240, 84, 60, 50, 90, 50, 70, 56}, 8);
+    ui_idtip_bind(g_list, 1);
     ui_button(parent, "邮件发放", G_MAIL);
     ui_button(parent, "直接入包", G_INV);
     // 按钮名短，含义挂在悬浮提示上

@@ -4,11 +4,15 @@
 #include <commctrl.h>
 
 // ---- 主窗口控件 ----
+// 编号是隐式连续的，新控件一律贴到尾部：插在中间会把后面所有编号顶走，
+// 而验证脚本和 ui.h 里的常量是写死的（角色列表 = 113 之类），一挪就全错。
 enum {
     IDC_HOST = 100, IDC_PORT, IDC_USER, IDC_PWD, IDC_CONN, IDC_DISC,
-    IDC_PVFB, IDC_PVFS, IDC_KW, IDC_KWGO, IDC_KWCLR, IDC_SAVE, IDC_DISCARD,
+    IDC_PVFB, IDC_PVFS,
+    IDC_KW, IDC_KWGO, IDC_KWCLR, IDC_SAVE, IDC_DISCARD,
     IDC_CHLIST, IDC_ONLINE,
     IDC_GRP_CHARS, IDC_GRP_CARD,
+    IDC_IMGB, IDC_IMGS,          // 贴图包目录（后加，放尾部）
     IDC_TAB = 190, IDC_STATUS,
 };
 
@@ -88,6 +92,13 @@ void ui_place(HWND w, int x, int y, int cw, int ch);
 
 // 悬浮提示：host 每个窗口共用一个 tooltip，ctl 上悬停时显示说明
 void ui_tip(HWND host, HWND ctl, const char *text);
+
+// 编号悬浮卡：鼠标停在列表 id_col 列所在行的任一格上 ~0.4s，浮出物品详情 + 图标。
+// 详情查 PVF、图标查贴图包，两者谁没就绪就退化成只显示编号。
+// 页面/对话框建好列表后调一次即可；列表销毁后绑定在 tick 里自动回收。
+void ui_idtip_bind(HWND lv, int id_col);                 // 编号从该列文本里读
+void ui_idtip_bind_ex(HWND lv, int col, u32 (*get)(int row));  // 虚拟列表：格子文本读不出来
+void ui_idtip_tick(void);           // 主窗口定时器里调（~100ms 一次）
 
 // 一条分隔线：用来把「表单区」和「列表区」断开，省得整页糊成一片。
 // 高度固定 2px（SS_ETCHEDHORZ 就是上下两条 1px 的凹线），宽度交给 ui_place

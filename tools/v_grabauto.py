@@ -363,8 +363,17 @@ try:
     # 5) 无命中时段：队列必须不动，日志不许暴涨（失败不写日志，同一件只记一条）
     clear_hover("用例 5：保证这 8 秒没有悬停")
     n0 = u.SendMessageW(g_list, 0x1004, 0, 0)                 # LVM_GETITEMCOUNT
-    l0 = log_lines()
-    slot = probe_slot()
+    slot = probe_slot()     # 探测会另起一个 --grab-probe 实例，日志多 4 行启动退出，必须放在取基线之前
+    # 日志在程序里攒着、1 秒一轮才落盘，前面用例的行可能还压在内存里。
+    # 先等文件连续 1 秒不涨再取基线，不然 8 秒窗口里冒出来的其实是旧行。
+    prev = log_lines()
+    for _ in range(10):
+        time.sleep(1.0)
+        cur = log_lines()
+        if cur == prev:
+            break
+        prev = cur
+    l0 = prev
     ok_quiet = None
     if slot:
         # 探到槽里有物品：人正在游戏里操作。这条用例的前提不成立，跳过而不是判错

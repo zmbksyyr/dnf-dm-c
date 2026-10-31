@@ -142,8 +142,10 @@ def execsql(sql):
         return False
 
 
+# 左栏角色列表按 charac_no 倒序（见 pages.first_char_no），第一行是编号最大的；
+# 下面点第一行选中的就是它，校验对象必须同一个人，否则「没生效」全是假警报
 cur.execute("SELECT charac_no, charac_name, m_id, lev FROM taiwan_cain.charac_info "
-            "WHERE delete_flag=0 ORDER BY charac_no LIMIT 1")
+            "WHERE delete_flag=0 ORDER BY charac_no DESC LIMIT 1")
 NO, NAME, MID, LEV = cur.fetchone()
 cur.execute("SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%s", (MID,))
 ONLINE = (cur.fetchone() or [0])[0]

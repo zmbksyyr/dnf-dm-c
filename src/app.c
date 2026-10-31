@@ -45,6 +45,7 @@ static void cfg_load(Config *c, const char *path) {
     c->charset = ini_int(L"db", L"charset", 33, w);
 
     ini_str(L"pvf", L"path", c->pvf, sizeof(c->pvf), w);
+    ini_str(L"pvf", L"img", c->img_dir, sizeof(c->img_dir), w);
     // 等级上限默认 85：多数端在这个版本封顶 85，之前写死 100 会把等级写到超出范围
     c->lev_max = ini_int(L"gm", L"lev_max", 85, w);
     if (c->lev_max < 1 || c->lev_max > 255) c->lev_max = 85;
@@ -93,6 +94,7 @@ static void cfg_save(const Config *c, const char *path) {
     ini_set(L"db", L"pwd", c->pwd, w);
     ini_set(L"db", L"charset", fmt_new("%d", c->charset), w);
     ini_set(L"pvf", L"path", c->pvf, w);
+    ini_set(L"pvf", L"img", c->img_dir, w);
     ini_set(L"gm", L"lev_max", fmt_new("%d", c->lev_max), w);
     ini_set(L"ui", L"font", fmt_new("%d", c->font), w);
     ini_set(L"ui", L"poll_sec", fmt_new("%d", c->poll_sec), w);
@@ -592,6 +594,59 @@ static int w_pvf(void *ctx, Err err) {
     return pvf_open(&g.pvf, c->path, prog);
 }
 
+// ---------------- 贴图包（编号悬浮卡的图标来源） ----------------
+static int w_npk(void *ctx, Err err) {
+    (void)ctx;
+    (void)err;
+    return npk_build(&g.npk, g.cfg.img_dir, &g.npk_pct, g.npk_stage, (int)sizeof(g.npk_stage));
+}
+
+void app_load_npk(const char *dir) {
+    if (!dir || !*dir) return;
+    snprintf(g.cfg.img_dir, sizeof(g.cfg.img_dir), "%s", dir);
+    cfg_save(&g.cfg, g.cfg_path);
+    // 收尾都在 UI 线程做：npk_build 只管往 g.npk 里填，不负责释放上一轮的数据；
+    // 图标缓存也是 UI 线程在取，放后台清会和悬浮卡取图撞车
+    npk_free(&g.npk);
+    npk_cache_clear();
+    g.npk_ok = 0;                 // 扫描期间悬浮卡不放图标，避免和重建打架
+    g.npk_pct = 0;
+    snprintf(g.npk_stage, sizeof(g.npk_stage), "准备中");
+    app_status("正在扫描贴图包…");
+    job_start(&g.job_npk, w_npk, NULL);
+}
+
+void app_npk_tick(void) {
+    Err err;
+    if (job_poll(&g.job_npk, err)) {
+        g.npk_ok = 1;
+        if (g.npk.nents)
+            app_log("贴图包索引就绪 · %d 个包 %d 张图", g.npk.nfiles, g.npk.nents);
+        else
+            app_status("贴图包目录里没有可用的 npk：%s", g.cfg.img_dir);
+    }
+}
+
+// 悬浮卡：详情文本（多行 UTF-8）+ 图标
+void app_item_tip(u32 id, Str *out) {
+    str_clear(out);
+    if (g.pvf_ok && pvf_item_detail(&g.pvf, id, out)) return;
+    char buf[128];
+    app_item_name(id, buf, sizeof(buf));
+    str_set(out, buf);
+    str_cat(out, g.pvf_ok ? "\n（PVF 里查不到这个编号）" : "\n（未加载 PVF，无法显示详情）");
+}
+
+HBITMAP app_item_icon(u32 id, int *w, int *h) {
+    if (w) *w = 0;
+    if (h) *h = 0;
+    if (!g.npk_ok || job_running(&g.job_npk) || !g.pvf_ok) return NULL;
+    char img[MAX_PATH];
+    int fr = 0;
+    if (!pvf_item_icon(&g.pvf, id, img, sizeof(img), &fr)) return NULL;
+    return npk_icon(&g.npk, img, fr, w, h);
+}
+
 void app_load_pvf(const char *path) {
     if (job_running(&g.job_pvf)) return;
     snprintf(g_pvf_ctx.path, sizeof(g_pvf_ctx.path), "%s", path);
@@ -600,6 +655,23 @@ void app_load_pvf(const char *path) {
     snprintf(g.pvf_stage, sizeof(g.pvf_stage), "准备中");
     app_status("正在加载 PVF…");
     job_start(&g.job_pvf, w_pvf, &g_pvf_ctx);
+    // 贴图包目录没配就从 PVF 旁边猜：绝大多数客户端 ImagePacks2 就躺在 Script.pvf 旁边。
+    // ImagePacks2 是目录，得用 dir_exists —— file_exists 只认文件。
+    if (!g.cfg.img_dir[0]) {
+        char dir[MAX_PATH], sub[MAX_PATH];
+        snprintf(dir, sizeof(dir), "%s", path);
+        char *slash = strrchr(dir, '\\');
+        if (!slash) slash = strrchr(dir, '/');
+        if (slash) {
+            *slash = 0;
+            path_join(sub, sizeof(sub), dir, "ImagePacks2");
+            if (dir_exists(sub)) {
+                snprintf(g.cfg.img_dir, sizeof(g.cfg.img_dir), "%s", sub);
+                cfg_save(&g.cfg, g.cfg_path);
+                app_load_npk(sub);
+            }
+        }
+    }
 }
 
 // ---------------- 连续取码 ----------------
@@ -1165,6 +1237,8 @@ void app_init(void) {
     art_prune(logs, "log-", 7);       // 日志只留最近 7 天
     // 上次用过的 PVF 仍在就自动加载，省得每次重选
     if (g.cfg.pvf[0] && file_exists(g.cfg.pvf)) app_load_pvf(g.cfg.pvf);
+    // 贴图包目录只在配置里写了才启动扫描；没写的话等 PVF 加载时按路径猜
+    if (g.cfg.img_dir[0]) app_load_npk(g.cfg.img_dir);
     grab_bind(g.cfg.grab_proc, app_item_name);
 }
 
@@ -1177,10 +1251,12 @@ void app_shutdown(void) {
     job_stop(&g.job_act);
     job_stop(&g.job_grab);
     job_stop(&g.job_bubble);
+    job_stop(&g.job_npk);
     db_undo_flush(1);                 // 本会话的写前快照落盘
     app_log("退出");
     app_log_flush();
     pvf_close(&g.pvf);
+    npk_free(&g.npk);
     db_free_data(&g.data);
     db_free_data(&g_load_ctx.d);
     act_free();                              // 列表暂存 Vec
@@ -1371,6 +1447,7 @@ void app_tick(void) {
     Err err;
     static u64 last_poll = 0;
 
+    app_npk_tick();                   // 贴图包扫描完成的收尾
     if (job_poll(&g.job_conn, err)) {
         if (err[0]) {
             snprintf(g.db_err, sizeof(g.db_err), "%s", err);

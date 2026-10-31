@@ -300,6 +300,7 @@ static void mail_build(Page *p, HWND parent) {
     mail_type_sync();            // 建好就写上「普通物品」，不等用户输入 ID
     ui_cols(m_list, (const char *const[]){"邮件ID", "物品", "编号", "数量", "类型", "时间"},
             (const int[]){110, 200, 70, 56, 60, 130}, 6);
+    ui_idtip_bind(m_list, 2);
     ui_button(parent, "刷新", M_REFRESH);
     ui_button(parent, "删除所选", M_DEL);
     ui_button(parent, "全部删除", M_DELALL);

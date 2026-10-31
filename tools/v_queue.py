@@ -9,7 +9,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pages import u, EXE, wait_main, switch, db as open_db, PID, start
-from pages import click_at as click, ctl, txt as gettext, set_text as settext
+from pages import click_at as click, ctl, txt as gettext, set_text as settext, first_char_no
 
 
 G_MONEY, G_COIN, G_CERA, G_LEV = PID(8, 5), PID(8, 6), PID(8, 7), PID(8, 2)
@@ -17,15 +17,17 @@ G_MONEY, G_COIN, G_CERA, G_LEV = PID(8, 5), PID(8, 6), PID(8, 7), PID(8, 2)
 
 db = open_db()
 cur = db.cursor()
-cur.execute("SELECT money, coin FROM taiwan_cain_2nd.inventory WHERE charac_no=1")
+# 列表第一行是 charac_no 最大的角色（见 pages.first_char_no），别写死 1
+CNO = first_char_no(cur)
+cur.execute("SELECT money, coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%d" % CNO)
 m0, c0 = cur.fetchone()
 cur.execute("SELECT cera FROM taiwan_billing.cash_cera WHERE account=1")
 ce0 = cur.fetchone()
 cur.execute("SELECT cera_point FROM taiwan_billing.cash_cera_point WHERE account=1")
 pt0 = cur.fetchone()[0]
-cur.execute("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=1")
+cur.execute("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%d" % CNO)
 a0 = cur.fetchone()[0]
-cur.execute("SELECT exp FROM taiwan_cain.charac_stat WHERE charac_no=1")
+cur.execute("SELECT exp FROM taiwan_cain.charac_stat WHERE charac_no=%d" % CNO)
 e0 = cur.fetchone()[0]
 print("原值 money=%s coin=%s cera=%s lev=%s" % (m0, c0, ce0[0], a0))
 
@@ -43,13 +45,14 @@ for cid, val in ((G_MONEY, "111111"), (G_COIN, "2222"), (G_CERA, "3333"), (G_LEV
     time.sleep(0.08)
 
 time.sleep(6.0)
-cur.execute("SELECT money, coin FROM taiwan_cain_2nd.inventory WHERE charac_no=1")
+
+cur.execute("SELECT money, coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%d" % CNO)
 m1, c1 = cur.fetchone()
 cur.execute("SELECT cera FROM taiwan_billing.cash_cera WHERE account=1")
 ce1 = cur.fetchone()
 cur.execute("SELECT cera_point FROM taiwan_billing.cash_cera_point WHERE account=1")
 pt1 = cur.fetchone()[0]
-cur.execute("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=1")
+cur.execute("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%d" % CNO)
 a1 = cur.fetchone()[0]
 print("写后 money=%s coin=%s cera=%s lev=%s" % (m1, c1, ce1[0], a1))
 
@@ -57,12 +60,12 @@ ok = (m1 == 111111 and c1 == 2222 and ce1[0] == 3333 and a1 == 60)
 print("四个字段全部落地:", "OK" if ok else "FAIL")
 
 # 复原
-cur.execute("UPDATE taiwan_cain_2nd.inventory SET money=%s, coin=%s WHERE charac_no=1", (m0, c0))
+cur.execute("UPDATE taiwan_cain_2nd.inventory SET money=%s, coin=%s WHERE charac_no=%s", (m0, c0, CNO))
 cur.execute("UPDATE taiwan_billing.cash_cera SET cera=%s WHERE account=1", (ce0[0],))
 cur.execute("UPDATE taiwan_billing.cash_cera_point SET cera_point=%s WHERE account=1", (pt0,))
-cur.execute("UPDATE taiwan_cain.charac_info SET lev=%s WHERE charac_no=1", (a0,))
-cur.execute("UPDATE taiwan_cain.charac_stat SET exp=%s WHERE charac_no=1", (e0,))
-cur.execute("SELECT money, coin FROM taiwan_cain_2nd.inventory WHERE charac_no=1")
+cur.execute("UPDATE taiwan_cain.charac_info SET lev=%s WHERE charac_no=%s", (a0, CNO))
+cur.execute("UPDATE taiwan_cain.charac_stat SET exp=%s WHERE charac_no=%s", (e0, CNO))
+cur.execute("SELECT money, coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%d" % CNO)
 print("复原:", cur.fetchone())
 p.kill()
 db.close()

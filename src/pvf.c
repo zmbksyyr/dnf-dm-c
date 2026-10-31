@@ -943,7 +943,9 @@ void pvf_close(Pvf *p) {
     stab_free(&p->strings);
     idtab_free(&p->items);
     free(p->kind);
+    free(p->ileaf);
     p->kind = NULL;
+    p->ileaf = NULL;
     idtab_free(&p->cre);
     idtab_free(&p->jobs);
     stab_free(&p->seals);
@@ -1025,6 +1027,186 @@ u32 pvf_item_at(const Pvf *p, int i, const char **name) {
     }
     if (name) *name = stab_get(&p->items.names, (int)p->items.stroff[i]);
     return p->items.key[i];
+}
+
+// ---------------- 物品路径 / 图标 / 详情（悬浮卡片用） ----------------
+// lst 是「编号 → 文件相对路径」的对照表。建索引时只留了名字没留路径，
+// 这里懒建一张平行表：第一次要用路径时把两张 lst 各扫一遍，之后 O(1)。
+static void item_leafs(Pvf *p) {
+    if (p->ileaf) return;
+    int n = p->items.n;
+    p->ileaf = (int *)xalloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
+    for (int i = 0; i < n; i++) p->ileaf[i] = -1;
+    static const char *lsts[] = {"equipment/equipment.lst", "stackable/stackable.lst"};
+    for (int li = 0; li < 2; li++) {
+        const Leaf *lf = pvf_find(p, lsts[li]);
+        if (!lf) continue;
+        Buf data = {0};
+        if (!pvf_read(p, lf, &data)) continue;
+        if (data.n >= 7) {
+            size_t cnt = (data.n - 2) / 5;
+            u32 pending = 0;
+            int has = 0;
+            for (size_t i = 0; i < cnt; i++) {
+                u8 t = data.p[2 + i * 5];
+                u32 v = rd32(data.p + 2 + i * 5 + 1);
+                if (t == 2) { pending = v; has = 1; continue; }
+                if (t != 7 || !has) continue;
+                has = 0;
+                const char *s = stab_get(&p->strings, (int)v);
+                if (!*s) continue;
+                int ti = key_index(&p->items, pending);
+                if (ti < 0 || p->ileaf[ti] >= 0) continue;
+                char path[MAX_PATH * 2];
+                const char *base = li == 0 ? "equipment" : "stackable";
+                snprintf(path, sizeof(path), "%s/%s", base, s);
+                for (char *q = path; *q; q++)
+                    if (*q >= 'A' && *q <= 'Z') *q = (char)(*q - 'A' + 'a');
+                const Leaf *sub = pvf_find(p, path);
+                if (sub) p->ileaf[ti] = (int)(sub - p->leafs);
+            }
+        }
+        buf_free(&data);
+    }
+}
+
+const char *pvf_item_path(const Pvf *p, u32 id, char *out, int cap) {
+    out[0] = 0;
+    if (!p || !p->opened) return out;
+    item_leafs((Pvf *)p);
+    int i = key_index(&p->items, id);
+    if (i < 0 || p->ileaf[i] < 0) return out;
+    snprintf(out, (size_t)cap, "%s", p->leafs[p->ileaf[i]].path);
+    return out;
+}
+
+// [icon] 段：一个字符串（img 路径）+ 一个数（帧号）。别的段不管。
+int pvf_item_icon(const Pvf *p, u32 id, char *img, int cap, int *frame) {
+    img[0] = 0;
+    if (frame) *frame = 0;
+    if (!p || !p->opened) return 0;
+    char path[MAX_PATH * 2];
+    pvf_item_path(p, id, path, sizeof(path));
+    if (!path[0]) return 0;
+    const Leaf *lf = pvf_find(p, path);
+    if (!lf) return 0;
+    Buf c = {0};
+    if (!pvf_read(p, lf, &c)) return 0;
+    int ok = 0;
+    if (c.n >= 7) {
+        size_t n = (c.n - 2) / 5;
+        int in_want = 0;
+        for (size_t i = 0; i < n; i++) {
+            u8 t = c.p[2 + i * 5];
+            u32 v = rd32(c.p + 2 + i * 5 + 1);
+            const char *sv = (t >= 5 && t <= 8) ? stab_get(&p->strings, (int)v) : NULL;
+            if (sv && is_seg_name(sv)) {
+                in_want = strcmp(sv, "[icon]") == 0;
+                continue;
+            }
+            if (!in_want) continue;
+            if (t >= 5 && t <= 8) {
+                if (!ok && sv && *sv) {
+                    snprintf(img, (size_t)cap, "%s", sv);
+                    ok = 1;
+                }
+            } else if (ok && (t == 2 || t == 3)) {
+                if (frame) *frame = (int)v;
+                break;
+            }
+        }
+    }
+    buf_free(&c);
+    return ok;
+}
+
+// 取一个段的「值」，拼成文本：数字带空格连排，字符串原样（引用串会顺着 n_string 解）。
+// [type] 这类「段名当枚举值」的写法（[seeking] 等）跳过。
+static void stk_seg_text(Pvf *p, const Buf *c, const char *want, Str *out) {
+    str_clear(out);
+    if (c->n < 7) return;
+    size_t n = (c->n - 2) / 5;
+    int in_want = 0;
+    Str tmp = {0};
+    for (size_t i = 0; i < n; i++) {
+        u8 t = c->p[2 + i * 5];
+        u32 v = rd32(c->p + 2 + i * 5 + 1);
+        const char *sv;
+        if (t >= 5 && t <= 8) {
+            sv = stab_get(&p->strings, (int)v);
+        } else if (t == 9) {
+            if (i + 1 >= n) break;
+            u32 k = rd32(c->p + 2 + (i + 1) * 5 + 1);
+            i++;
+            const char *key = stab_get(&p->strings, (int)k);
+            if (!*key) continue;
+            sv = nstr_value(p, v, key, &tmp);
+        } else {
+            if (in_want && (t == 2 || t == 3)) str_catf(out, "%u ", v);
+            else if (in_want && t == 4) {
+                float f;
+                memcpy(&f, &v, 4);
+                str_catf(out, "%g ", (double)f);
+            }
+            continue;
+        }
+        if (!sv || !*sv) continue;
+        if (is_seg_name(sv)) {
+            if (in_want) break;        // 下一段开始，本段结束
+            in_want = strcmp(sv, want) == 0;
+            continue;
+        }
+        if (in_want) str_catf(out, "%s ", sv);
+    }
+    str_free(&tmp);
+    // 掉尾部空格
+    while (out->n && out->p[out->n - 1] == ' ') out->p[--out->n] = 0;
+}
+
+int pvf_item_detail(const Pvf *p, u32 id, Str *out) {
+    str_clear(out);
+    if (!p || !p->opened) return 0;
+    const char *name = pvf_item_name(p, id);
+    if (!*name) return 0;
+    int kind = pvf_item_kind(p, id);
+
+    char path[MAX_PATH * 2];
+    pvf_item_path(p, id, path, sizeof(path));
+    if (!path[0]) return 0;
+    const Leaf *lf = pvf_find(p, path);
+    if (!lf) return 0;
+    Buf c = {0};
+    if (!pvf_read(p, lf, &c)) return 0;
+
+    str_catf(out, "%s  ·  %s  ·  编号 %u\n", name, pvf_kind_name(kind), id);
+    Str v = {0};
+    stk_seg_text((Pvf *)p, &c, "[minimum level]", &v);
+    if (v.n) str_catf(out, "等级 %s 以上", str_c(&v));
+    int show_rarity = kind == PK_EQUIP || kind == PK_AVATAR;
+    if (show_rarity) {
+        stk_seg_text((Pvf *)p, &c, "[rarity]", &v);
+        if (v.n) {
+            static const char *rar[] = {"普通", "高级", "稀有", "神器", "传说"};
+            int r = atoi(str_c(&v));
+            str_catf(out, " · %s", r >= 0 && r < 5 ? rar[r] : str_c(&v));
+        }
+    }
+    stk_seg_text((Pvf *)p, &c, "[price]", &v);
+    if (v.n) str_catf(out, "%s价格 %s", out->n ? " · " : "", str_c(&v));
+    stk_seg_text((Pvf *)p, &c, "[weight]", &v);
+    if (v.n) str_catf(out, " · 重量 %s", str_c(&v));
+    if (out->n) str_catc(out, '\n');
+    if (kind == PK_EQUIP) {
+        stk_seg_text((Pvf *)p, &c, "[durability]", &v);
+        if (v.n) str_catf(out, "耐久 %s", str_c(&v));
+    }
+    stk_seg_text((Pvf *)p, &c, "[explain]", &v);
+    if (v.n) str_catf(out, "%s说明：%s", out->n ? " · " : "", str_c(&v));
+    if (out->n) str_catc(out, '\n');
+    str_catf(out, "文件：%s", path);
+    str_free(&v);
+    buf_free(&c);
+    return 1;
 }
 
 void pvf_stk_text(const Pvf *p, const void *c, size_t n, Str *out) {

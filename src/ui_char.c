@@ -399,26 +399,6 @@ static LRESULT scan_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
     if (m == WM_DESTROY) { KillTimer(d, 1); s_slv = s_sinfo = NULL; return 0; }
     if (m == WM_COMMAND) {
         switch (LOWORD(wp)) {
-        case 6001: {                             // 导出 CSV
-            char path[MAX_PATH], dir[MAX_PATH], ts[32];
-            art_dir("export", dir, sizeof(dir));
-            art_stamp(ts, sizeof(ts));
-            snprintf(path, sizeof(path), "%s\\badscan-%s.csv", dir, ts);
-            Str o = {0};
-            str_cat(&o, "\xEF\xBB\xBF角色,账号,角色编号,容器,槽位,物品编号,物品名,原因\r\n");
-            for (int i = 0; i < s_scan.n; i++) {
-                ScanRow *r = VEC_AT(&s_scan, ScanRow, i);
-                char nm[96];
-                str_catf(&o, "%s,%s,%u,%s,%d,%u,%s,%s\r\n", r->name, r->acc, r->cno, r->cont,
-                         r->slot, r->id, app_item_name(r->id, nm, sizeof(nm)), r->why);
-            }
-            file_write(path, o.p, (size_t)o.n);
-            str_free(&o);
-            art_prune(dir, "badscan-", 5);
-            app_log("导出全服扫描结果 %d 行 → %s", s_scan.n, path);
-            app_info(fmt_new("已导出到\n%s", path));
-            return 0;
-        }
         case 6002:                               // 清除全部
             if (s_scan_busy) return 0;
             if (!s_scan.n) { app_info("没有需要清除的记录。"); return 0; }
@@ -450,10 +430,10 @@ static void scan_show(void) {
     s_slv = ui_list(d, 6000);
     ui_cols(s_slv, (const char *const[]){"角色", "账号", "容器", "槽位", "物品编号", "名称", "原因"},
             (const int[]){100, 96, 64, 44, 80, 180, 130}, 7);
+    ui_idtip_bind(s_slv, 4);           // 「物品编号」列
     ui_place(s_slv, ui_scale(12), ui_scale(34), ui_scale(756), ui_scale(360));
 
-    ui_place(ui_button(d, "清除全部", 6002), ui_scale(400), ui_scale(402), ui_scale(88), ui_scale(26));
-    ui_place(ui_button(d, "导出 CSV", 6001), ui_scale(496), ui_scale(402), ui_scale(88), ui_scale(26));
+    ui_place(ui_button(d, "清除全部", 6002), ui_scale(496), ui_scale(402), ui_scale(88), ui_scale(26));
     ui_place(ui_button(d, "重新扫描", 6003), ui_scale(592), ui_scale(402), ui_scale(88), ui_scale(26));
     ui_place(ui_button(d, "关闭", IDCANCEL), ui_scale(688), ui_scale(402), ui_scale(80), ui_scale(26));
     ui_tip(d, s_slv, "下面是扫出来的错误物品，一行一处");

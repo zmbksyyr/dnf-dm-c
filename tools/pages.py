@@ -171,6 +171,17 @@ def wait_until(fn, timeout=30.0, step=0.5):
     return False
 
 
+def first_char_no(cur):
+    """点列表第一行会选中哪个角色 —— 列表按 charac_no DESC 排，就是编号最大的那个。
+
+    库里只有一个角色时它就是 1，于是早先的用例直接写死 CNO=1。后来库里又建了角色，
+    点的是新号、比的还是 1 号，症状一律是「写入没生效」（其实写到别人身上了，
+    查库能查到）。要用编号做比对的用例，先拿这个问一句。
+    """
+    cur.execute("SELECT MAX(charac_no) FROM taiwan_cain.charac_info WHERE delete_flag=0")
+    return cur.fetchone()[0]
+
+
 def check(tag, got, want):
     good = got == want
     print("%s %s（得到 %r，期望 %r）" % ("OK " if good else "!! ", tag, got, want))

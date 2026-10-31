@@ -11,7 +11,7 @@
 import ctypes, subprocess, time, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pages import u, grab, EXE, OUT, switch, wait_main, db as open_db, PID as PAGE_ID, start
-from pages import click_at as click, ctl, txt as gettext
+from pages import click_at as click, ctl, txt as gettext, first_char_no
 
 
 PAGE_ITEM, PAGE_GM = 0, 8
@@ -38,7 +38,9 @@ def statics(main):
 
 db = open_db()
 cur = db.cursor()
-cur.execute("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=1")
+# 列表第一行是 charac_no 最大的角色（见 pages.first_char_no），别写死 1
+CNO = first_char_no(cur)
+cur.execute("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%d" % CNO)
 lev0 = int(cur.fetchone()[0])
 print("db lev =", lev0)
 
@@ -62,7 +64,7 @@ levw = ctl(main, G_LEV)
 print("gm lev before =", gettext(levw))
 print("card before   =", [s for s in statics(main) if s.startswith("Lv.")])
 
-cur.execute(f"UPDATE taiwan_cain.charac_info SET lev={lev0 + 1} WHERE charac_no=1")
+cur.execute(f"UPDATE taiwan_cain.charac_info SET lev={lev0 + 1} WHERE charac_no={CNO}")
 print("db lev ->", lev0 + 1, "，等轮询…")
 time.sleep(9.0)
 
@@ -70,7 +72,9 @@ cards = [s for s in statics(main) if s.startswith("Lv.")]
 print("gm lev after  =", gettext(levw))
 print("card after    =", cards)
 ok1 = f"Lv.{lev0 + 1}" in cards                    # 左栏跟着库变了
-ok2 = gettext(levw) == str(lev0)                   # 表单快照没被冲掉
+# GM 数值框现在一律是 0（只收「这次设成多少」，当前值看左栏），所以「没被
+# 轮询冲掉」的判据是它仍是 0 —— 要是被填成了库里的等级，那才是被冲了
+ok2 = gettext(levw) == "0"
 switch(main, PAGE_ITEM)
 time.sleep(0.8)
 sel1 = u.SendMessageW(il, LVM_GETNEXTITEM, -1, LVNI_SELECTED)
@@ -82,7 +86,7 @@ switch(main, PAGE_GM)
 time.sleep(0.5)
 grab(main, os.path.join(OUT, "v14_pollcard.png"))
 
-cur.execute(f"UPDATE taiwan_cain.charac_info SET lev={int(lev0)} WHERE charac_no=1")
+cur.execute(f"UPDATE taiwan_cain.charac_info SET lev={int(lev0)} WHERE charac_no={CNO}")
 print("lev 恢复 =", lev0)
 p.kill()
 db.close()

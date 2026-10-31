@@ -3,6 +3,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
+#include <shlobj.h>
 
 HWND g_main;
 
@@ -13,6 +14,7 @@ static HWND g_lhost, g_host, g_lport, g_port, g_luser, g_user, g_lpwd, g_pwd;
 static HWND g_conn, g_disc;
 static HWND g_lkw, g_kw, g_kwgo, g_kwclr, g_chlist, g_chinfo, g_online;
 static HWND g_lpvf, g_pvf, g_pvfbtn;
+static HWND g_limg, g_img, g_imgbtn;      // ImagePacks2 目录（悬浮卡图标来源）
 
 // 地址预设：Python 版 GM 工具 config.json 里的 saved_servers / 默认 DB_IP。
 // 本机自架的服最常见，127.0.0.1 排第一；其余是人家现成配过的机器。
@@ -471,6 +473,13 @@ static void select_page(int i) {
 
 static void tick(void) {
     app_tick();
+    ui_idtip_tick();     // 编号悬浮卡的悬停计时/显隐
+    // PVF 刚就绪时贴图包目录可能是自动猜出来的，把输入框内容对齐一次
+    static int s_img_synced;
+    if (g.pvf_ok && !s_img_synced) {
+        s_img_synced = 1;
+        if (g.cfg.img_dir[0]) ui_text(g_img, g.cfg.img_dir);
+    }
     // 连续取码开着而发放页还没建过：采到的东西没地方放。这里只改页签的选中项，
     // 真正的切页交给下面那段页签轮询去完成——直接调 select_page 的话，
     // tab 的选中项还是旧页，下一 tick 又会被打回去。
@@ -602,12 +611,22 @@ static void do_layout(void) {
     // 窗口太窄时搜索段可能已经越过这条线，那就保持原位（不重叠优先于对齐）。
     int pvf_x = pad + leftw + pad + ui_scale(6);
     if (r.x < pvf_x) r.x = pvf_x;
-    ui_add(&r, g_lpvf, ui_scale(30));
-    int bw = ui_scale(64);
-    int rest = (w - pad - bw - gap) - r.x;
-    if (rest < ui_scale(80)) rest = ui_scale(80);
-    ui_add(&r, g_pvf, rest);
-    ui_add(&r, g_pvfbtn, bw);
+    // 目录框两个并列：PVF 与贴图包挤同一行，各自缩短一些，省下的高度留给页签。
+    // PVF 是主用项，剩下的宽度按 6:4 分；中间空一段当分组间隔（不加竖线，
+    // 标签本身就是分隔）。窗口拉窄时两个框一起缩，不顶出右边界。
+    int lp = ui_scale(30), bp = ui_scale(64), li = ui_scale(30), bi = ui_scale(60);
+    int sp = ui_scale(14);
+    int avail = (w - pad) - r.x;
+    int editw = avail - lp - bp - li - bi - sp - gap * 2;
+    if (editw < ui_scale(150)) editw = ui_scale(150);
+    int e1 = editw * 6 / 10, e2 = editw - e1;
+    ui_add(&r, g_lpvf, lp);
+    ui_add(&r, g_pvf, e1);
+    ui_add(&r, g_pvfbtn, bp);
+    ui_gap(&r, sp);
+    ui_add(&r, g_limg, li);
+    ui_add(&r, g_img, e2);
+    ui_add(&r, g_imgbtn, bi);
 
     // 页签区
     int top = y + rowh + gap + ui_scale(6);   // 和上面那行留一口气，页签不贴控件
@@ -665,6 +684,25 @@ static void on_pick_pvf(void) {
     }
 }
 
+// ImagePacks2 是个目录，用系统的文件夹选择框
+static void on_pick_img(void) {
+    WCHAR dir[MAX_PATH] = L"";
+    BROWSEINFOW bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.hwndOwner = g_main;
+    bi.lpszTitle = L"选择客户端的 ImagePacks2 目录";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) return;
+    int ok = SHGetPathFromIDListW(pidl, dir);
+    CoTaskMemFree(pidl);
+    if (!ok || !dir[0]) return;
+    char path[MAX_PATH];
+    utf8(dir, path, sizeof(path));
+    ui_text(g_img, path);
+    app_load_npk(path);
+}
+
 static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
         case WM_CREATE: {
@@ -708,6 +746,11 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             g_lpvf = ui_label(h, "PVF", 0);
             g_pvf = ui_edit(h, g.cfg.pvf, IDC_PVFB, 1);
             g_pvfbtn = ui_button(h, "选择 PVF", IDC_PVFS);
+            g_limg = ui_label(h, "贴图", 0);
+            g_img = ui_edit(h, g.cfg.img_dir, IDC_IMGB, 1);
+            g_imgbtn = ui_button(h, "选贴图包", IDC_IMGS);
+            ui_tip(h, g_img, "ImagePacks2 目录：编号悬浮卡上的物品图标从这里取。"
+                   "通常选完 PVF 会自动填好；没填上就手动指到客户端的 ImagePacks2 目录");
 
             card_build(h);
 
@@ -799,6 +842,14 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (id == IDC_CONN) { on_connect(); return 0; }
             if (id == IDC_DISC) { app_disconnect(); buttons_refresh(); return 0; }
             if (id == IDC_PVFS) { on_pick_pvf(); return 0; }
+            if (id == IDC_IMGS) { on_pick_img(); return 0; }
+            if (id == IDC_IMGB && code == EN_KILLFOCUS) {   // 手敲路径，失焦生效
+                char path[MAX_PATH];
+                ui_get(g_img, path, sizeof(path));
+                str_trim(path);
+                if (path[0] && str_ieq(path, g.cfg.img_dir) == 0) app_load_npk(path);
+                return 0;
+            }
             if (id == IDC_KWGO) {         // 只过滤已拉到的角色，不重查库，选择不会丢
                 chars_fill();
                 return 0;

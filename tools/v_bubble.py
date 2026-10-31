@@ -22,17 +22,22 @@ from pages import u, EXE, wait_main, switch, db, PID, start
 from pages import click_at as click, press as click_btn, ctl, txt as gettext, set_text as settext
 
 
-G_BON = PID(8, 28)        # 启用泡点（复选框）
-G_BSEC = PID(8, 29)       # 间隔（秒）
-G_BTARGET = PID(8, 30)    # 目标人群（下拉）
-G_BTNO = PID(8, 31)       # 指定 ID
-G_BCOIN = PID(8, 32)      # 赠送点券
-G_BDP = PID(8, 33)        # D点
-G_BDC = PID(8, 34)        # D币
-G_BITEM = PID(8, 35)      # 物品 ID
-G_BINUM = PID(8, 36)      # 数量
-G_BAPPLY = PID(8, 39)     # 应用
-G_BINFO = PID(8, 41)      # 状态行
+# 泡点在 f245318 起独立成页（PAGE_BUBBLE = 9），控件号按 ui_bubble.c 的
+# BUB_* 枚举来：BUB_BOX=1 BOX_RW=2 BOX_PLAN=3 ON=4 SEC=5 TARGET=6 TNO=7
+# HOURS=8 COIN=9 DP=10 DC=11 ITEM=12 NUM=13 APPLY=14 EXP=15 INFO=16
+BUB = 9
+G_BON = PID(BUB, 4)       # 启用泡点（复选框）
+G_BSEC = PID(BUB, 5)      # 间隔（秒）
+G_BTARGET = PID(BUB, 6)   # 目标人群（下拉）
+G_BTNO = PID(BUB, 7)      # 指定 ID
+G_BHOURS = PID(BUB, 8)    # 生效时长（小时，0=持续）
+G_BCOIN = PID(BUB, 9)     # 赠送点券
+G_BDP = PID(BUB, 10)      # D点
+G_BDC = PID(BUB, 11)      # D币
+G_BITEM = PID(BUB, 12)    # 物品 ID
+G_BINUM = PID(BUB, 13)    # 数量
+G_BAPPLY = PID(BUB, 14)   # 应用
+G_BINFO = PID(BUB, 16)    # 状态行
 
 M_ID = 1
 ACC = "1"
@@ -44,6 +49,8 @@ WM_SETTEXT = 0x000C
 
 def setcombo(h, idx):
     u.SendMessageW(h, CB_SETCURSEL, idx, 0)
+    # 让父窗口收到选择变更（目标 ID 框的启停、联动都靠它）
+    u.SendMessageW(u.GetParent(h), 0x0111, (0x0001 << 16) | u.GetDlgCtrlID(h), h)
 
 
 def q1(sql, args=()):
@@ -134,7 +141,7 @@ try:
     p, main = start()
     click(u.GetDlgItem(main, 113), 40, 12)                     # 选中第一个角色（仅为了连库就绪）
     time.sleep(3.0)
-    switch(main, 8)                                            # 切到 GM 页
+    switch(main, BUB)                                          # 切到泡点页
     time.sleep(1.0)
 
     bon = ctl(main, G_BON)
@@ -191,10 +198,18 @@ try:
         cn1 = CN0; ml1 = ML0
 
     # ---- 关闭 ----
-    if u.SendMessageW(bon, 0x00F1, 0, 0) & 0x0001:
-        click_btn(bon)
+    # 勾选状态可能被页面回填动过，只信一次 BM_GETCHECK 会漏关 —— 而漏关就是
+    # 挂着个每 5 秒发奖励的定时器，把后面跑的测试全污染。关完读状态行确认，
+    # 没停就再补一轮。
+    for _ in range(3):
+        if u.SendMessageW(bon, 0x00F1, 0, 0) & 0x0001:
+            click_btn(bon)
+            time.sleep(0.3)
         click_btn(bap)
-        time.sleep(0.8)
+        time.sleep(1.0)
+        info = gettext(binfo)
+        if "已停用" in info or "未启用" in info:
+            break
     pa = dcoin() or 0
     time.sleep(9.0)
     pb = dcoin() or 0
@@ -213,6 +228,17 @@ try:
 finally:
     if p:
         p.kill()
+    # 双保险：就算上面没关成，也不能把「每 5 秒发奖励」留给下一个测试
+    try:
+        ini = os.path.join(os.path.dirname(EXE), "config", "settings.ini")
+        if os.path.exists(ini):
+            t = open(ini, encoding="utf-8", errors="replace").read()
+            t2 = t.replace("on=1", "on=0", 1) if "[bubble]" in t else t
+            if t2 != t:
+                open(ini, "w", encoding="utf-8").write(t2)
+                print("（settings.ini 里的泡点开关已兜底置 0）")
+    except OSError as e:
+        print("（settings.ini 兜底失败：%s）" % e)
     # 逐项复原
     set_dcoin(DC0)
     set_dpoint(DP0)

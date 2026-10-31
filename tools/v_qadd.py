@@ -14,7 +14,8 @@ import time
 from ctypes import wintypes as wt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, EXE, OUT, wait_main, switch, grab, db as open_db, PID, start
+from pages import (u, EXE, OUT, wait_main, switch, grab, db as open_db, PID, start,
+                     first_char_no)
 
 
 G_LEV, G_MONEY, G_COIN = PID(8, 2), PID(8, 5), PID(8, 6)
@@ -51,7 +52,8 @@ _cp.read(os.path.join(os.path.dirname(EXE), "config", "settings.ini"), encoding=
 LEV_MAX = _cp.getint("gm", "lev_max", fallback=85)
 print("等级上限（配置）= %d" % LEV_MAX)
 
-CNO = 1
+# 列表第一行是 charac_no 最大的角色（见 pages.first_char_no），别写死 1
+CNO = first_char_no(cur)
 m0, c0 = db_money(CNO)
 l0_orig = db_lev(CNO)
 e0 = db_exp(CNO)

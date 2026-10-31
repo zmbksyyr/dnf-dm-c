@@ -1060,3 +1060,265 @@ int ui_dlg_run(HWND dlg, HWND owner) {
     DestroyWindow(dlg);
     return g_dlg_ok;
 }
+
+
+// ---------------- 编号悬浮卡 ----------------
+// 列表的编号列上悬停片刻，浮出一张「图标 + 详情」的小卡片。
+// 图标来自贴图包（npk），详情来自 PVF；两边谁没就绪就退化成只显示编号。
+// 悬停检测放在主窗口定时器里轮询，不用子类化列表，也不用管列表在哪个页/对话框里。
+
+#define IDTIP_MAX 24
+#define IDTIP_DELAY 400      // 悬停多久后浮出（ms）
+typedef struct {
+    HWND lv;
+    int  col;
+    u32 (*get)(int row);   // 虚拟列表读不出格子文本，改由调用方直接给编号
+} IdTipBind;
+static IdTipBind g_binds[IDTIP_MAX];
+static int       g_nbinds;
+
+static struct {
+    HWND     wnd;          // 卡片窗口（惰性建）
+    HWND     lv;
+    int      row, col;
+    u32      id;
+    u64      since;        // 鼠标落到这个格子的时刻
+    int      showing;
+    HBITMAP  bmp;          // 展示中卡片的图标（npk 缓存所有，这里只借用）
+    int      bw, bh;
+    Str      text;         // 展示中卡片的文本
+} s_tip;
+
+static void tip_hide(void) {
+    s_tip.showing = 0;
+    s_tip.id = 0;
+    s_tip.since = 0;
+    if (s_tip.wnd) ShowWindow(s_tip.wnd, SW_HIDE);
+}
+
+
+static HBRUSH line_brush(void) {
+    static HBRUSH b;
+    if (!b) b = CreateSolidBrush(ui_line_color());
+    return b;
+}
+
+static void frame_rect(HDC dc, RECT rc) {
+    // 1px 线框：四条填色，不用 DrawEdge（它带 3D 凹凸，跟这套平面风格不搭）
+    RECT t = rc;
+    t.bottom = rc.top + 1;
+    FillRect(dc, &t, line_brush());
+    t = rc; t.top = rc.bottom - 1;
+    FillRect(dc, &t, line_brush());
+    t = rc; t.right = rc.left + 1;
+    FillRect(dc, &t, line_brush());
+    t = rc; t.left = rc.right - 1;
+    FillRect(dc, &t, line_brush());
+}
+
+// 卡片内容画在给定 DC 上。WM_PAINT 和 WM_PRINTCLIENT（PrintWindow 截图走这条）
+// 共用一份，不然截图工具拍到的浮层就是一块黑。
+static void tip_paint(HDC dc, RECT rc) {
+    FillRect(dc, &rc, ui_card_brush());
+    frame_rect(dc, rc);
+    int pad = ui_scale(8);
+    if (s_tip.bmp) {
+        // 图标画在左边一块小方格里，原图太小（28px）就放大一倍，看得清
+        int box = ui_scale(60);
+        int bw = s_tip.bw * 2, bh = s_tip.bh * 2;
+        if (bw > box - pad) bw = box - pad;
+        if (bh > box - pad) bh = box - pad;
+        int ix = pad + (box - pad - bw) / 2, iy = pad + (box - pad - bh) / 2;
+        HDC mdc = CreateCompatibleDC(dc);
+        HGDIOBJ om = SelectObject(mdc, s_tip.bmp);
+        BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+        AlphaBlend(dc, ix, iy, bw, bh, mdc, 0, 0, s_tip.bw, s_tip.bh, bf);
+        SelectObject(mdc, om);
+        DeleteDC(mdc);
+    }
+    // 文本
+    RECT tr = rc;
+    if (s_tip.bmp) tr.left += ui_scale(60) + pad;
+    tr.left += pad;
+    tr.top += pad;
+    tr.right -= pad;
+    tr.bottom -= pad;
+    WCHAR wt[1024];
+    utf16(str_c(&s_tip.text), wt, COUNT_OF(wt));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, ui_text_ink());
+    SelectObject(dc, ui_font());
+    DrawTextW(dc, wt, -1, &tr, DT_NOPREFIX | DT_WORDBREAK | DT_EDITCONTROL);
+}
+
+static LRESULT CALLBACK tip_proc(HWND w, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(w, &ps);
+        RECT rc;
+        GetClientRect(w, &rc);
+        tip_paint(dc, rc);
+        EndPaint(w, &ps);
+        return 0;
+    }
+    case WM_PRINTCLIENT: {
+        RECT rc;
+        GetClientRect(w, &rc);
+        tip_paint((HDC)wp, rc);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProcW(w, m, wp, lp);
+}
+
+void ui_idtip_bind_ex(HWND lv, int col, u32 (*get)(int row)) {
+    if (!lv) return;
+    for (int i = 0; i < g_nbinds; i++)
+        if (g_binds[i].lv == lv) { g_binds[i].col = col; g_binds[i].get = get; return; }
+    if (g_nbinds == IDTIP_MAX) {
+        // 挤掉最老的一个（列表销毁本来就会在 tick 里回收，这里只是保底）
+        memmove(&g_binds[0], &g_binds[1], sizeof(IdTipBind) * (size_t)(IDTIP_MAX - 1));
+        g_nbinds--;
+    }
+    g_binds[g_nbinds].lv = lv;
+    g_binds[g_nbinds].col = col;
+    g_binds[g_nbinds].get = get;
+    g_nbinds++;
+}
+
+void ui_idtip_bind(HWND lv, int id_col) { ui_idtip_bind_ex(lv, id_col, NULL); }
+
+// 编号列的格子读出来是个纯数字才算数；名字列 /「—」之类直接跳过
+static u32 cell_id(HWND lv, int row, int col) {
+    char buf[64];
+    LVITEMW it;
+    memset(&it, 0, sizeof(it));
+    WCHAR w[64] = L"";
+    it.iSubItem = col;
+    it.pszText = w;
+    it.cchTextMax = COUNT_OF(w);
+    SendMessageW(lv, LVM_GETITEMTEXTW, (WPARAM)row, (LPARAM)&it);
+    utf8(w, buf, sizeof(buf));
+    str_trim(buf);
+    if (!buf[0]) return 0;
+    for (char *q = buf; *q; q++)
+        if (*q < '0' || *q > '9') return 0;
+    return (u32)strtoul(buf, NULL, 10);
+}
+
+// 卡片内容：图标 + 详情文本，按内容定窗口大小
+static void tip_show(u32 id) {
+    if (!s_tip.wnd) {
+        WNDCLASSW wc;
+        memset(&wc, 0, sizeof(wc));
+        wc.lpfnWndProc = tip_proc;
+        wc.hInstance = ui_inst();
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.lpszClassName = L"DnfIdTip";
+        RegisterClassW(&wc);
+        s_tip.wnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"DnfIdTip", L"",
+                                    WS_POPUP, 0, 0, 0, 0, NULL, NULL, ui_inst(), NULL);
+        if (!s_tip.wnd) return;
+    }
+    str_clear(&s_tip.text);
+    app_item_tip(id, &s_tip.text);
+    s_tip.bmp = app_item_icon(id, &s_tip.bw, &s_tip.bh);
+
+    // 文本区域宽高：宽度固定上限，高度按实际折行算
+    int maxw = ui_scale(300);
+    int pad = ui_scale(8);
+    int tw = maxw - pad * 2 - (s_tip.bmp ? ui_scale(60) + pad : 0);
+    WCHAR wt[1024];
+    utf16(str_c(&s_tip.text), wt, COUNT_OF(wt));
+    HDC dc = GetDC(s_tip.wnd);
+    HFONT of = (HFONT)SelectObject(dc, ui_font());
+    RECT tr = {0, 0, tw, 0};
+    DrawTextW(dc, wt, -1, &tr, DT_NOPREFIX | DT_WORDBREAK | DT_EDITCONTROL | DT_CALCRECT);
+    SelectObject(dc, of);
+    ReleaseDC(s_tip.wnd, dc);
+    int iw = s_tip.bmp ? ui_scale(60) : 0;
+    int w = pad * 2 + iw + (tr.right - tr.left);
+    int h = pad * 2 + (s_tip.bmp ? ui_scale(60) : 0);
+    if (h < tr.bottom + pad * 2) h = tr.bottom + pad * 2;
+    if (w < ui_scale(120)) w = ui_scale(120);
+    if (w > ui_scale(360)) w = ui_scale(360);
+
+    POINT pt;
+    GetCursorPos(&pt);
+    RECT wa;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    // 说明写得长的物品（[explain] 一大段）卡片高度跟着涨，别高过工作区
+    int maxh = (wa.bottom - wa.top) - ui_scale(8);
+    if (h > maxh) h = maxh;
+    int x = pt.x + ui_scale(18), y = pt.y + ui_scale(20);
+    if (x + w > wa.right) x = pt.x - w - ui_scale(8);
+    if (y + h > wa.bottom) y = pt.y - h - ui_scale(8);
+    if (x < wa.left) x = wa.left;
+    if (y < wa.top) y = wa.top;
+    SetWindowPos(s_tip.wnd, HWND_TOPMOST, x, y, w, h,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    s_tip.showing = 1;
+    s_tip.id = id;
+    InvalidateRect(s_tip.wnd, NULL, TRUE);
+}
+
+void ui_idtip_tick(void) {
+    // 回收已销毁列表的绑定（页面对话框是动态建删的）
+    for (int i = g_nbinds - 1; i >= 0; i--)
+        if (!IsWindow(g_binds[i].lv)) {
+            memmove(&g_binds[i], &g_binds[i + 1],
+                    sizeof(IdTipBind) * (size_t)(g_nbinds - i - 1));
+            g_nbinds--;
+        }
+    if (!g_nbinds) {
+        if (s_tip.showing) tip_hide();
+        return;
+    }
+
+    POINT pt;
+    GetCursorPos(&pt);
+    HWND hit = NULL;
+    int row = -1, col = 0;
+    for (int i = 0; i < g_nbinds && !hit; i++) {
+        // 只有可见的列表才接（页签没切过去时窗口是隐藏的）
+        if (!IsWindowVisible(g_binds[i].lv)) continue;
+        RECT rc;
+        GetWindowRect(g_binds[i].lv, &rc);
+        if (pt.x < rc.left || pt.x >= rc.right || pt.y < rc.top || pt.y >= rc.bottom) continue;
+        LVHITTESTINFO ht;
+        memset(&ht, 0, sizeof(ht));
+        ScreenToClient(g_binds[i].lv, &pt);
+        ht.pt = pt;
+        SendMessageW(g_binds[i].lv, LVM_SUBITEMHITTEST, 0, (LPARAM)&ht);
+        // 行上任意一列都算：编号从绑定的那一列取，别的列悬停也能看到这张卡
+        if (ht.iItem >= 0 && (ht.flags & LVHT_ONITEM)) {
+            hit = g_binds[i].lv;
+            row = ht.iItem;
+            col = g_binds[i].col;
+        }
+        break;
+    }
+    if (!hit) { tip_hide(); return; }
+    u32 id = 0;
+    for (int i = 0; i < g_nbinds; i++)
+        if (g_binds[i].lv == hit) {
+            id = g_binds[i].get ? g_binds[i].get(row) : cell_id(hit, row, g_binds[i].col);
+            break;
+        }
+    if (!id) { tip_hide(); return; }
+    if (s_tip.id != id || s_tip.lv != hit || s_tip.row != row) {
+        // 换了格子：重新计时
+        s_tip.lv = hit;
+        s_tip.row = row;
+        s_tip.col = col;
+        s_tip.id = id;
+        s_tip.since = now_ms();
+        if (s_tip.showing) tip_hide();
+        return;
+    }
+    if (!s_tip.showing && s_tip.since && now_ms() - s_tip.since >= IDTIP_DELAY)
+        tip_show(id);
+}

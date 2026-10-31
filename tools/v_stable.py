@@ -48,6 +48,16 @@ def lv_select(lv, i):
 
 p, main = start()
 lv = u.GetDlgItem(main, 113)
+
+# 库这边先记下原值：断言和还原都以库为准，角色取列表第一行会选中的那个
+from pages import db as open_db, first_char_no
+dbc = open_db()
+dcur = dbc.cursor()
+CNO = first_char_no(dcur)
+dcur.execute("SELECT money, coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%d" % CNO)
+m0, c0 = dcur.fetchone()
+print("角色 %d 原值 money=%s coin=%s" % (CNO, m0, c0))
+
 click(lv, 40, 12)
 time.sleep(3.0)
 
@@ -89,7 +99,8 @@ print("before:", old_money, "/", old_coin)
 
 settext(money, "54321")
 u.SendMessageW(money, WM_KILLFOCUS, 0, 0)
-# 写库还没落地时连灌几次 tick：修复前这里会拿 g.data 的旧值把框顶回去
+# 写库还没落地时连灌几次 tick：修复前这里会拿 g.data 的旧值把框顶回去。
+# 「不被顶掉」看的是这一下 —— 框不该在中途回跳成快照里的旧值（0）。
 for _ in range(6):
     u.PostMessageW(main, WM_TIMER, 1, 0)
     time.sleep(0.03)
@@ -103,17 +114,19 @@ for _ in range(6):
     time.sleep(0.03)
 time.sleep(2.5)
 
-print("after:", gettext(money), "/", gettext(coin))
-print("2) 两个字段都写进去了:", "OK" if gettext(money) == "54321" and gettext(coin) == "7" else "FAIL")
+# 写没写进去以库为准：框是「这次要设成多少」，交完按设计清回 0，
+# 早年拿框里的残留值当断言，框一清就误报失败。
+dcur.execute("SELECT money, coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%d" % CNO)
+m1, c1 = dcur.fetchone()
+print("after: 库里 money=%s coin=%s" % (m1, c1))
+print("2) 两个字段都写进去了:", "OK" if (m1, c1) == (54321, 7) else "FAIL")
 grab(main, os.path.join(OUT, "v13_stable.png"))
 
-# 左栏角色卡里的金币应同步成 54,321
+# ---- 恢复原值（直接写库，别再走框：框填 0 提交等于没写） ----
 print("---- 恢复原值 ----")
-settext(money, old_money or "0")
-u.SendMessageW(money, WM_KILLFOCUS, 0, 0)
-time.sleep(1.2)
-settext(coin, old_coin or "0")
-u.SendMessageW(coin, WM_KILLFOCUS, 0, 0)
-time.sleep(2.0)
-print("restored:", gettext(money), "/", gettext(coin))
+dcur.execute("UPDATE taiwan_cain_2nd.inventory SET money=%s, coin=%s WHERE charac_no=%d"
+             % (m0, c0, CNO))
+dbc.commit()
+dcur.execute("SELECT money, coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%d" % CNO)
+print("restored:", dcur.fetchone())
 p.kill()

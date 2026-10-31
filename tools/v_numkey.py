@@ -17,7 +17,7 @@ from ctypes import wintypes as wt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pages import u, EXE, OUT, wait_main, switch, grab, db as open_db, PID, start
-from pages import check, ctl, set_text, txt as text
+from pages import check, ctl, set_text, txt as text, first_char_no
 
 
 G_MONEY = PID(8, 5)
@@ -40,7 +40,7 @@ def key(h, ch):
 
 db = open_db()
 cur = db.cursor()
-CNO = 1
+CNO = first_char_no(cur)   # 列表第一行是编号最大的角色（见 pages.first_char_no）
 cur.execute("SELECT money FROM taiwan_cain_2nd.inventory WHERE charac_no=%d" % CNO)
 m0 = cur.fetchone()[0]
 print("金币原值 %d" % m0)

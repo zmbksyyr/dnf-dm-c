@@ -115,6 +115,7 @@ int  file_read(const char *path, Buf *out);
 int  file_write(const char *path, const void *d, size_t n);
 int  file_append(const char *path, const char *text, int n);
 int  file_exists(const char *path);
+int  dir_exists(const char *path);
 u64  file_size(const char *path);
 int  dir_make(const char *path);
 int  file_copy(const char *from, const char *to);

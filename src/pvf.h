@@ -61,6 +61,7 @@ typedef struct {
     StrTab avatar_hidden;
     IdTab  nstr;         // n_string id → .str 路径
     u8    *kind;         // 与 items.key 平行：物品在 PVF 里属于哪类（PK_*）
+    int   *ileaf;         // 与 items.key 平行：物品文件在 leafs 里的下标（懒建，-1=没有）
     IdTab  cre;          // creature/pet 表：宠物编号（只用来认「这个编号是宠物」）
 
     unsigned str_cp;     // stringtable 解码代码页（936/950）
@@ -100,6 +101,12 @@ int         pvf_item_kind(const Pvf *p, u32 id);
 const char *pvf_kind_name(int kind);
 
 const char *pvf_item_name(const Pvf *p, u32 id);
+// 物品文件路径（如 equipment/character/.../xxx.equ）。没有返回空串。
+const char *pvf_item_path(const Pvf *p, u32 id, char *out, int cap);
+// [icon] 段：img 路径（如 Item/IconMaterial2.img）+ 帧号。没有返回 0。
+int  pvf_item_icon(const Pvf *p, u32 id, char *img, int cap, int *frame);
+// 物品详情（人类可读多行 UTF-8，供悬浮卡片用）。名字查 PVF，PVF 没有的编号返回 0。
+int  pvf_item_detail(const Pvf *p, u32 id, Str *out);
 int         pvf_quest_info(Pvf *p, u32 id, QuestInfo *out);
 
 // 任务材料（收集类任务要的东西）。同一件材料按「单个任务最多要多少个」记，

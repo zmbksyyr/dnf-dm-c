@@ -9,7 +9,7 @@ import os, sys, time, subprocess, ctypes, ctypes.wintypes as wt
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-from pages import wait_main, db  # noqa: E402
+from pages import wait_main, db, EXE  # noqa: E402
 from pages import txt
 
 u = ctypes.windll.user32
@@ -100,7 +100,7 @@ def sample_ids():
 
 
 def main():
-    p = subprocess.Popen([os.path.join(ROOT, "DNF_GM.exe")], cwd=ROOT)
+    p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
     mw = ctypes.c_void_p(wait_main(p))
     u.PostMessageW(mw, 0x0111, IDC_CONN, 0)  # 连库
     time.sleep(7.0)
@@ -114,7 +114,7 @@ def main():
     print("  类型框只读：", readonly(h, G_TYPE))
     for v, label in cases:
         set_txt(h, G_ID, v)
-        print("  编号 %-12s -> 类型 [%s]   (%s)" % (v, txt(h, G_TYPE), label))
+        print("  编号 %-12s -> 类型 [%s]   (%s)" % (v, txt(h[G_TYPE]), label))
 
     print("== 邮件页 ==")
     switch(mw, 3)
@@ -123,7 +123,7 @@ def main():
     for v, label in cases:
         set_txt(h, M_AID, v)
         print("  附件 %-12s -> 类型 [%s] · 标签 [%s]   (%s)"
-              % (v, txt(h, M_ATYPE), txt(h, M_HINT), label))
+              % (v, txt(h[M_ATYPE]), txt(h[M_HINT]), label))
 
     p.terminate()
 

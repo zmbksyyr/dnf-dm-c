@@ -322,6 +322,7 @@ static void ev_build(Page *p, HWND parent) {
     e_info = ui_label(parent, "请先连接数据库", E_INFO);
     ui_cols(e_list, (const char *const[]){"日志号", "活动", "编号", "参数1", "参数2", "内部名"},
             (const int[]){64, 220, 56, 64, 64, 200}, 6);
+    ui_idtip_bind(e_list, 2);          // 编号列：活动里的物品编号
     ui_button(parent, "启用活动", E_ADD);
     ui_button(parent, "按编号启用", E_EIDADD);
     ui_button(parent, "停用所选", E_DEL);

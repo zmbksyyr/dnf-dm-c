@@ -36,6 +36,14 @@ typedef struct {
     int      init;
 } BrCtx;
 
+// 悬浮卡要按行取编号：弹窗运行期间只有这一个实例在跑，指针指到当前上下文即可
+static BrCtx *s_ctx;
+
+static u32 br_id_at(int row) {
+    if (!s_ctx || row < 0 || row >= s_ctx->rows.n) return 0;
+    return ((const BrRow *)VEC_AT(&s_ctx->rows, BrRow, row))->id;
+}
+
 // ---------------------------------------------------------------- 数据
 
 static const char *cat_name(int cat) {
@@ -269,10 +277,11 @@ void ui_browse_open(HWND owner, int cat) {
     memset(&c, 0, sizeof(c));
     c.cat = cat;
     vec_init(&c.rows, sizeof(BrRow));
+    s_ctx = &c;                       // 悬浮卡回调的取值来源
 
     HWND d = ui_dlg_new(owner, fmt_new("浏览%s · 挑好直接进发放队列", cat_name(cat)),
                         720, 520, br_proc, &c);
-    if (!d) { vec_free(&c.rows); return; }
+    if (!d) { vec_free(&c.rows); s_ctx = NULL; return; }
 
     int pad = ui_scale(12), h = ui_scale(24), gap = ui_scale(6);
     URow r;
@@ -297,6 +306,8 @@ void ui_browse_open(HWND owner, int cat) {
         ListView_SetExtendedListViewStyle(c.lv, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
                                                     LVS_EX_GRIDLINES | LVS_EX_LABELTIP);
         ui_cols(c.lv, (const char *const[]){"编号", "名称"}, (const int[]){100, 520}, 2);
+        // 虚拟列表没有格子文本（没挂 LVN_GETDISPINFO），编号让回调直接给
+        ui_idtip_bind_ex(c.lv, 0, br_id_at);
     }
     // 底部一行：说明在左，按钮从右往左码回去（ui_add 撑满只认最后一个，所以这里手动排）
     int by = ui_scale(520) - pad - h;
@@ -323,6 +334,7 @@ void ui_browse_open(HWND owner, int cat) {
     SetFocus(c.kw);
 
     ui_dlg_run(d, owner);
+    s_ctx = NULL;                     // 窗口关了，回调不能再取数据
     // 关窗口就把这批索引放掉，免得占着几 MB 不放；下次打开重扫一遍也就几十毫秒
     vec_clear(&c.rows);
     vec_free(&c.rows);

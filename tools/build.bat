@@ -14,7 +14,7 @@ rem  Override the output dir with the DNF_GM_BUILD environment variable.
 rem
 rem  ASCII only: a .bat with UTF-8 Chinese text is mangled by the OEM codepage.
 rem ===========================================================================
-setlocal
+setlocal enabledelayedexpansion
 
 for %%I in ("%~dp0..") do set "ROOT=%%~fI"
 for %%I in ("%ROOT%\..\_build\DNF_GM_C") do set "OUT=%%~fI"
@@ -32,11 +32,10 @@ set "CFLAGS=%TARGET% -std=c11 -O2 -DNDEBUG -DUNICODE -D_UNICODE"
 rem Accumulate on separate lines rather than with a trailing caret: inside
 rem double quotes cmd treats ^ as a literal, so the continuation silently
 rem breaks and the later files never get compiled (undefined symbols at link).
+rem 跟 CI 一样按目录取 src\*.c —— 新增 .c 不用再来改这份清单
 set "SRC="
-set "SRC=%SRC% src\main.c src\ui_common.c src\ui_item.c src\ui_mail.c src\ui_char.c src\ui_data.c"
-set "SRC=%SRC% src\ui_ban.c src\ui_event.c src\act.c"
-set "SRC=%SRC% src\app.c src\util.c src\item.c src\zlib.c src\mysql.c src\db.c src\db_mail.c src\db_admin.c src\pvf.c src\grab.c"
-set "LIBS=-lcomctl32 -lcomdlg32 -lshell32 -luser32 -lgdi32 -lole32 -lws2_32 -ladvapi32"
+for %%F in ("%ROOT%\src\*.c") do set "SRC=!SRC! "%%F""
+set "LIBS=-lcomctl32 -lcomdlg32 -lshell32 -luser32 -lgdi32 -lole32 -lws2_32 -ladvapi32 -lmsimg32"
 
 cd /d "%ROOT%" || goto :fail
 if not exist "%OUT%" mkdir "%OUT%" 2>nul

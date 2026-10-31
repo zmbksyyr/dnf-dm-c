@@ -330,6 +330,16 @@ int file_exists(const char *path) {
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+// 只看「是个目录」：file_exists 特意把目录排除在外（调用方要的是文件），
+// 判断贴图包这种目录得单独一个。
+int dir_exists(const char *path) {
+    if (!path || !*path) return 0;
+    WCHAR w[MAX_PATH * 2];
+    utf16(path, w, MAX_PATH * 2);
+    DWORD a = GetFileAttributesW(w);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
 u64 file_size(const char *path) {
     WCHAR w[MAX_PATH * 2];
     utf16(path, w, MAX_PATH * 2);

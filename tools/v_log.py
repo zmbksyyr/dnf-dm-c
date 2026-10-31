@@ -4,8 +4,8 @@ import os, sys, time, subprocess, ctypes, ctypes.wintypes as wt
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-from pages import wait_main  # noqa: E402
-from pages import txt
+from pages import wait_main, BUILD  # noqa: E402
+from pages import txt, EXE
 
 u = ctypes.windll.user32
 u.GetDlgCtrlID.restype = ctypes.c_int
@@ -50,7 +50,7 @@ def switch(main, idx):
 
 def main():
     # 先造几条带序号的日志，倒序一眼就能看出来对不对
-    p = subprocess.Popen([os.path.join(ROOT, "DNF_GM.exe")], cwd=ROOT)
+    p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
     mw = ctypes.c_void_p(wait_main(p))
     time.sleep(3.0)
     h = {}
@@ -59,10 +59,13 @@ def main():
     time.sleep(1.0)
     index_pages(mw, h)
 
-    log = os.path.join(ROOT, "config", "logs", time.strftime("log-%Y%m%d.txt"))
+    # 日志按 exe 目录落（art_dir 取 exe 旁边），仓库根那份是老 exe 留下的
+    log = os.path.join(BUILD, "config", "logs", time.strftime("log-%Y%m%d.txt"))
     raw = open(log, encoding="utf-8", errors="replace").read() if os.path.exists(log) else ""
     flines = [l for l in raw.replace("\r\n", "\n").split("\n") if l.strip()]
-    box = txt(h[L_TEXT]).replace("\r\n", "\n").split("\n")
+    # 日志文件可能上千行，默认 256 字符的读长会把编辑框内容截断，
+    # 页面最后一行就永远是第 7 行而不是文件第一行
+    box = txt(h[L_TEXT], 1 << 20).replace("\r\n", "\n").split("\n")
     box = [l for l in box if l.strip()]
 
     print("文件行数：%d   页面行数：%d" % (len(flines), len(box)))

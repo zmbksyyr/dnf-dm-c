@@ -3,6 +3,7 @@
 #include "db.h"
 #include "grab.h"
 #include "pvf.h"
+#include "npk.h"
 
 typedef struct {
     char host[64];
@@ -11,6 +12,7 @@ typedef struct {
     char pwd[64];
     int  charset;
     char pvf[MAX_PATH];
+    char img_dir[MAX_PATH]; // ImagePacks2 目录（编号悬浮卡的图标来源）。空 = 自动猜
     int  font;          // 字号（pt）
     int  poll_sec;
     int  lev_max;       // 等级上限（GM 页「设成几级」和 +10 的封顶）。默认 85 —— 各端
@@ -85,7 +87,12 @@ typedef struct {
     int    pvf_pct;
     char   pvf_stage[64];
 
-    Job    job_conn, job_load, job_pvf, job_poll, job_act, job_grab, job_bubble;
+    Npk    npk;            // 贴图包索引（后台建，建好前悬浮卡没有图标）
+    int    npk_ok;
+    int    npk_pct;
+    char   npk_stage[64];
+
+    Job    job_conn, job_load, job_pvf, job_poll, job_act, job_grab, job_bubble, job_npk;
     char   act_what[64];
 
     GrabHit grab;          // 最近一次取码结果
@@ -148,6 +155,10 @@ int  app_sync_char(void);          // 写后校验（job 线程）：结果暂�
 void app_sync_apply(void);         // UI 线程：把暂存的校验结果搬到 g.*（job_poll 后调）
 void app_row_sync(void);           // 把 g.cur 的名字/等级/职业写回左栏那一行
 void app_load_pvf(const char *path);
+void app_load_npk(const char *dir);        // ImagePacks2 目录（悬浮卡图标）
+void app_npk_tick(void);                   // app_tick 里轮询贴图包扫描作业
+void app_item_tip(u32 id, Str *out);       // 悬浮卡详情文本
+HBITMAP app_item_icon(u32 id, int *w, int *h);   // 悬浮卡图标（调用方勿删）
 void app_grab_fast_once(void);     // 连续取码一轮：只走特征码快路径，不回退扫堆
 void app_grab_auto(int on);        // 连续取码总开关（复选框与热键共用，改完即写 settings.ini）
 
