@@ -194,7 +194,8 @@ static void gm_reload(Page *p) {
     ui_set_i64(c_cera, (i64)g.data.cera);
     ui_set_i64(c_point, (i64)g.data.cera_point);
     ui_set_i64(c_accm, (i64)g.data.account_money);
-    ui_text(c_vip, g.data.vip);
+    SendMessageW(c_vip, BM_SETCHECK,
+                 (g.data.vip[0] && strcmp(g.data.vip, "0")) ? BST_CHECKED : BST_UNCHECKED, 0);
 
     int gr = g.data.pvp_grade;
     if (gr < 0) gr = 0;
@@ -519,10 +520,9 @@ static void gm_commit(int id) {
             return;
         }
         case G_VIP: {
-            // VIP 是文本，不能套数值那套 clamp；只去首尾空白，内容照原样写
-            char v[64];
-            ui_get(c_vip, v, sizeof(v));
-            str_trim(v);
+            // 勾上写 "1"，取消写 "0"。两条路都要有：原来只能设不能撤，
+            // 想取消只能自己去库里改。
+            const char *v = (SendMessageW(c_vip, BM_GETCHECK, 0, 0) == BST_CHECKED) ? "1" : "0";
             if (!strcmp(v, g.data.vip)) return;
             snprintf(c.s, sizeof(c.s), "%s", v);
             gm_push(K_VIP, &c);
@@ -597,6 +597,12 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     }
     // 下拉框：选完（SELENDOK）就落库；键盘上下改完再点别处（KILLFOCUS）也兜一次
     if (code == CBN_SELENDOK || code == CBN_KILLFOCUS) {
+        gm_commit(id);
+        return 0;
+    }
+    // 勾选框不属于输入框，收不到 EN_KILLFOCUS，勾了要自己接一手：BN_CLICKED 就提交。
+    // 漏了这一条的表现是「勾上去像是生效了，库里一点没动」——只有勾选框会这样。
+    if (code == BN_CLICKED && id == G_VIP) {
         gm_commit(id);
         return 0;
     }
@@ -878,7 +884,9 @@ static void gm_build(Page *p, HWND parent) {
     c_money = ui_edit(parent, "", G_MONEY, 0);
     c_coin = ui_edit(parent, "", G_COIN, 0);
     c_accm = ui_edit(parent, "", G_ACCM, 0);
-    c_vip = ui_edit(parent, "", G_VIP, 0);
+    // VIP 是 0/1 标记，不是让人手填的文本：勾上 = 开通，取消勾选 = 关掉。
+    // 原来是个自由输入框，用户不知道该填什么（填 0？1？日期？），而且只能设不能撤。
+    c_vip = ui_check(parent, "已开通", G_VIP, 0);
     c_cera = ui_edit(parent, "", G_CERA, 0);
     c_point = ui_edit(parent, "", G_POINT, 0);
 
@@ -939,8 +947,8 @@ static void gm_build(Page *p, HWND parent) {
            "账号金库记录不存在时会自动建一条（容量/物品为空）");
     ui_tip(parent, c_vip,
            "账号级 VIP 标记（d_taiwan.accounts.VIP），同账号所有角色共用。"
-           "服务端存的是文本而不是数字，按原始格式照实填（如 0 / 1 / 到期时间）；"
-           "改完点到别处即写入库。角色在线时改了会被服务端存档覆盖");
+           "勾上写 1，取消勾选写 0 —— 不用自己填。"
+           "角色在线时改了会被服务端存档覆盖");
     ui_tip(parent, c_cera, "点券和赠送点券一起提交（同一条 UPDATE）。角色在线时改了会被服务端覆盖");
 
     // PVP 默认值：最高段位 + 胜场/分数 999（选中角色后由 gm_reload 覆盖为实际值）
