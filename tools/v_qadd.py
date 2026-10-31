@@ -100,6 +100,18 @@ print("框里：金币=%s 复活币=%s 等级=%s"
 grab(main, os.path.join(OUT, "gm_qadd.png"))
 
 
+def check(tag, got, want):
+    print("%s %s（得到 %s，期望 %s）" % ("OK " if got == want else "!! ", tag, got, want))
+    return got == want
+
+
+ok = True
+# 框里是「设成多少」：进页面就该显示库里的当前值，不是 0
+ok &= check("金币框=库值", text(ctl(main, G_MONEY)), str(m0))
+ok &= check("复活币框=库值", text(ctl(main, G_COIN)), str(c0))
+ok &= check("等级框=库值", text(ctl(main, G_LEV)), str(l0))
+
+
 def press(idx, name, waitdb=1.6):
     b = ctl(main, G_QADD + idx)
     u.SendMessageW(b, 0x00F5, 0, 0)            # BM_CLICK
@@ -107,14 +119,15 @@ def press(idx, name, waitdb=1.6):
     print("点 %s → 金币框里 %r" % (name, text(ctl(main, G_MONEY))))
 
 
-def check(tag, got, want):
-    print("%s %s（得到 %s，期望 %s）" % ("OK " if got == want else "!! ", tag, got, want))
-    return got == want
+def set_text(h, s):
+    b = ctypes.create_unicode_buffer(s)
+    u.SendMessageW(h, 0x000C, 0, ctypes.addressof(b))     # WM_SETTEXT
 
 
-ok = True
 press(1, "+1000万")
 ok &= check("金币库值", db_money(CNO)[0], m0 + 10000000)
+# + 是「在现有值上加」：结果要写回框，框和库是同一条数
+ok &= check("金币框跟上", text(ctl(main, G_MONEY)), str(m0 + 10000000))
 
 press(2, "复活币+100")
 ok &= check("复活币库值", db_money(CNO)[1], c0 + 100)
@@ -138,15 +151,47 @@ time.sleep(1.5)
 ok &= check("连点三次金币", db_money(CNO)[0], m0 + 40000000)
 grab(main, os.path.join(OUT, "gm_qadd_after.png"))
 
-# 手输增量：框里只填「加多少」，失焦后加到当前值上，框自己回 0
+# 手输绝对值：框是「设成多少」，失焦按这个数写库，框不回 0
 e = ctl(main, G_MONEY)
-b = ctypes.create_unicode_buffer("500")
-u.SendMessageW(e, 0x000C, 0, ctypes.addressof(b))     # WM_SETTEXT
+set_text(e, "30000")
 u.SendMessageW(e, 0x0008, 0, 0)                       # WM_KILLFOCUS → 触发提交
 time.sleep(1.8)
-print("手输 500 后：框里 %r" % text(ctl(main, G_MONEY)))
-ok &= check("手输 500 加到库里", db_money(CNO)[0], m0 + 40000000 + 500)
-ok &= check("框回 0", text(ctl(main, G_MONEY)), "0")
+print("手输 30000 后：框里 %r" % text(ctl(main, G_MONEY)))
+ok &= check("手输 30000 设为库值", db_money(CNO)[0], 30000)
+ok &= check("框保持 30000", text(ctl(main, G_MONEY)), "30000")
+
+# 非法输入不接受：字母串会被 ui_num 在失焦时规范成 0，不会原样落到库里
+set_text(e, "abc")
+u.SendMessageW(e, 0x0008, 0, 0)
+time.sleep(1.6)
+ok &= check("字母串被规范化", text(ctl(main, G_MONEY)), "0")
+ok &= check("库里不是 abc", db_money(CNO)[0], 0)
+
+# 超上限：失焦时夹到 4294967295，写成别的数就说明截断了
+set_text(e, "99999999999")
+u.SendMessageW(e, 0x0008, 0, 0)
+time.sleep(1.6)
+ok &= check("超上限夹住", text(ctl(main, G_MONEY)), "4294967295")
+ok &= check("库值=上限", db_money(CNO)[0], 4294967295)
+
+# 清空后失焦：框兜回上一次的值，不把「清空重打」当成 0 写进库
+set_text(e, "")
+u.SendMessageW(e, 0x0008, 0, 0)
+time.sleep(1.5)
+ok &= check("空框兜回原值", text(ctl(main, G_MONEY)), "4294967295")
+ok &= check("空框不动库", db_money(CNO)[0], 4294967295)
+
+# 等级框填 0（越界）：ui_num 先夹到 1，再按 1 级提交
+le = ctl(main, G_LEV)
+set_text(le, "0")
+u.SendMessageW(le, 0x0008, 0, 0)
+time.sleep(1.6)
+ok &= check("等级 0 夹到 1", db_lev(CNO), 1)
+
+# 输入框照原样写回，别把测试污染留在库里
+set_text(e, str(m0))
+u.SendMessageW(e, 0x0008, 0, 0)
+time.sleep(1.5)
 
 # 还原
 cur.execute("UPDATE taiwan_cain_2nd.inventory SET money=%d, coin=%d WHERE charac_no=%d"

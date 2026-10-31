@@ -79,6 +79,9 @@ int  ui_int(HWND w);
 void ui_set_int(HWND w, int v);
 i64  ui_i64(HWND w);
 void ui_set_i64(HWND w, i64 v);
+// 把输入框限制成「只能填 [lo, hi] 的整数」：非数字键、超范围粘贴都进不来，
+// 失焦时把值夹回范围并规范化（空框按 lo）。所有数值框建完都要套一遍。
+void ui_num(HWND e, i64 lo, i64 hi);
 void ui_enable(HWND w, int on);
 void ui_show(HWND w, int on);
 void ui_place(HWND w, int x, int y, int cw, int ch);

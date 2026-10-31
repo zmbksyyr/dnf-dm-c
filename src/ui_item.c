@@ -200,6 +200,22 @@ static int item_edit(HWND owner, const Item *in, Item *out) {
         y += h + ui_scale(2);
     }
 
+    // 数值框统一按「写回二进制时的字段宽度」限制：这个对话框的框本来就窄，
+    // 手打一个超范围的值只会被 cast 截成另一个数，看起来像是工具算错了。
+    ui_num(e.id, 1, 4294967295LL);
+    ui_num(e.num, 0, 4294967295LL);
+    ui_num(e.dur, 0, 65535);
+    ui_num(e.enh, 0, 31);
+    ui_num(e.forge, 0, 255);
+    ui_num(e.seal_cnt, 0, 7);
+    ui_num(e.inc_val, 0, 65535);
+    ui_num(e.orb, 0, 4294967295LL);
+    ui_num(e.ow, 0, 65535);
+    for (int i = 0; i < 4; i++) {
+        ui_num(e.sid[i], 0, 255);
+        ui_num(e.slv[i], 0, 65535);
+    }
+
     ui_place(ui_label(d, "原始数据（未解释字节原样回写）", 0), ui_scale(12), y + ui_scale(6), ui_scale(300), h);
     e.hex = ui_edit(d, "", 4040, 1);
     ui_place(e.hex, ui_scale(12), y + ui_scale(6) + h, ui_scale(430), ui_scale(40));
@@ -1295,6 +1311,15 @@ static void grant_build(Page *p, HWND parent) {
     g_forge = ui_edit(parent, "0", G_FORGE, 0);
     g_seal = ui_check(parent, "封装", G_SEAL, 0);
     g_sealc = ui_edit(parent, "0", G_SEALC, 0);
+    // 每个字段按它写回物品结构时的宽度收窄：强化只有 5 位、封印次数 3 位，
+    // 多填的部分原本会被 & 0x1F 悄悄截掉，用户以为设成了 50。
+    ui_num(g_id, 1, 4294967295LL);
+    ui_num(g_num, 1, 4294967295LL);
+    ui_num(g_dur, 0, 65535);
+    ui_num(g_enh, 0, 31);
+    ui_num(g_incv, 0, 65535);
+    ui_num(g_forge, 0, 255);
+    ui_num(g_sealc, 0, 7);
     g_info = ui_label(parent, "请先选择角色", G_INFO);
     g_sep = ui_hline(parent);
     ui_button(parent, "加入队列", G_ADD);

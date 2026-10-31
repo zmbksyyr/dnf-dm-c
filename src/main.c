@@ -35,9 +35,11 @@ static void host_sync(void) {
 }
 
 // ---- 角色卡 ----
-enum { CARD_N = 13 };
-static const char *kCardKey[CARD_N] = {"名称", "等级", "职业",   "状态",   "金币",     "点券", "复活币",
-                                       "账号金币", "SP / TP", "QP", "PVP", "物品栏", "装备 / 仓库"};
+// SP 和 TP 各占一行：挤成「SP a / b · TP c / d」一行时，满额（90000/90000）
+// 这串字在卡片里放不下，末尾会被卡片边裁掉一半。
+enum { CARD_N = 14 };
+static const char *kCardKey[CARD_N] = {"名称", "等级",   "职业", "状态",     "金币", "点券", "复活币",
+                                       "账号金币", "SP", "TP", "QP", "PVP", "物品栏", "装备 / 仓库"};
 static HWND g_grp_chars, g_grp_card;
 static HWND g_ck[CARD_N], g_cv[CARD_N];
 
@@ -92,24 +94,26 @@ static void card_refresh(void) {
     app_money_text(d->account_money, t1, sizeof(t1));
     card_put(7, t1);
 
-    fmt(b, sizeof(b), "SP %d / %d · TP %d / %d", d->sp, d->sp2, d->tp, d->tp2);
+    fmt(b, sizeof(b), "SP %d / %d", d->sp, d->sp2);
     card_put(8, b);
-    fmt(b, sizeof(b), "QP %d", d->qp);
+    fmt(b, sizeof(b), "TP %d / %d", d->tp, d->tp2);
     card_put(9, b);
-    fmt(b, sizeof(b), "%s · %d 胜 · %d 分", app_pvp_text(d->pvp_grade), d->pvp_win, d->pvp_point);
+    fmt(b, sizeof(b), "QP %d", d->qp);
     card_put(10, b);
+    fmt(b, sizeof(b), "%s · %d 胜 · %d 分", app_pvp_text(d->pvp_grade), d->pvp_win, d->pvp_point);
+    card_put(11, b);
 
     int used = 0;
     for (int i = 0; i < d->inv.n; i++)
         if (!item_empty(&d->inv.items[i])) used++;
     fmt(b, sizeof(b), "%d / %u 格", used, d->inv_cap ? d->inv_cap : (u32)d->inv.n);
-    card_put(11, b);
+    card_put(12, b);
 
     int eq = 0;
     for (int i = 0; i < d->equip.n; i++)
         if (!item_empty(&d->equip.items[i])) eq++;
     fmt(b, sizeof(b), "%d 件 / 仓库 %u 格", eq, d->cargo_cap ? d->cargo_cap : (u32)d->cargo.n);
-    card_put(12, b);
+    card_put(13, b);
     s_card_init = 1;
 }
 
@@ -162,9 +166,17 @@ static void left_layout(int x, int y0, int w, int h) {
     }
 
     ui_place(g_grp_card, x, g2y, w, g2h);
-    // 标签列宽按最长的那个标签量：「装备 / 仓库」比「账号金币」还宽一格，
-    // 原来写死 56，最后那个「库」字会被值那一列盖掉
-    int kw = ui_scale(72);
+    // 标签列宽按最长的那条量，不写死像素：写死 56 时「装备 / 仓库」的「库」、
+    // 72 时「SP / TP」后面那个值又换成被裁，换字号/DPI 还得再调一次。
+    static int s_kw;
+    if (s_kw <= 0) {
+        for (int i = 0; i < CARD_N; i++) {
+            int tw = ui_text_w(kCardKey[i]);
+            if (tw > s_kw) s_kw = tw;
+        }
+        s_kw += ui_scale(10);           // 留一点缝，别让标签贴住值
+    }
+    int kw = s_kw;
     int yy = g2y + th;
     for (int i = 0; i < CARD_N; i++) {
         ui_place(g_ck[i], x + padx, yy, kw, crh);
@@ -673,6 +685,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             host_sync();
             g_lport = ui_label(h, "端口", 0);
             g_port = ui_edit(h, "", IDC_PORT, 0);
+            ui_num(g_port, 1, 65535);          // 端口越界连接时会被系统截成别的端口
             ui_set_int(g_port, g.cfg.port);
             g_luser = ui_label(h, "用户", 0);
             g_user = ui_edit(h, g.cfg.user, IDC_USER, 0);

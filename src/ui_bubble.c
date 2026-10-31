@@ -219,6 +219,18 @@ static void bub_build(Page *p, HWND parent) {
     b_dc = ui_edit(parent, "", BUB_DC, 0);
     b_item = ui_edit(parent, "", BUB_ITEM, 0);
     b_num = ui_edit(parent, "", BUB_NUM, 0);
+    // 数量类字段全部只在合法范围内可输入：越界会在写库时被 MySQL 截成别的数，
+    // 看上去像「设置生效了但数值不对」，比直接拒绝输入更难查。
+    ui_num(b_sec, 5, 86400);                 // 间隔下限 5 秒（结算线程的最小步长）
+    ui_num(b_tno, 0, 4294967295LL);          // charac_no / m_id
+    ui_num(b_coin, 0, 4294967295LL);
+    ui_num(b_dp, 0, 4294967295LL);
+    ui_num(b_dc, 0, 4294967295LL);
+    ui_num(b_item, 0, 4294967295LL);
+    ui_num(b_num, 1, 200);                   // 一次邮件最多 200 个
+    // 「生效时长」是可编辑下拉，输入区是 combo 内部的 EDIT，同样套一层
+    HWND he = GetWindow(b_hours, GW_CHILD);
+    if (he) ui_num(he, 0, 8760);
     b_plan = ui_list(parent, BUB_PLAN);
     ui_cols(b_plan, (const char *const[]){"时间", "目标", "内容", "状态"},
             (const int[]){78, 90, 520, 96}, 4);

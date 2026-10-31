@@ -238,6 +238,126 @@ HWND ui_edit(HWND parent, const char *text, int id, int ro) {
     return h;
 }
 
+// ---------------- 只许填数字的输入框 ----------------
+// 光靠提交时校验不够：填「12abc」提交出来是 12，填 999999999999 转成 u32 又变成
+// 另一个数，用户看到的却始终是自己敲的那串字符。所以输入这一层就掐死：
+// 非数字键吞掉，粘贴先过检查，失焦时把值夹进 [lo, hi] 再把规范化的数字写回框。
+typedef struct {
+    i64  lo, hi;
+    char last[24];          // 上一次的合法文本：空框被清空时用它兜回去
+} NumRange;
+
+// 把 ins 插到选区位置后的完整值是否还在上限内
+static int num_fit(HWND h, const char *ins, i64 hi) {
+    char t[48];
+    ui_get(h, t, sizeof(t));
+    DWORD sel = (DWORD)SendMessageW(h, EM_GETSEL, 0, 0);
+    int a = (int)LOWORD(sel), b = (int)HIWORD(sel), n = (int)strlen(t);
+    if (a > n) a = n;
+    if (b > n) b = n;
+    if (b < a) b = a;
+    char cand[96];
+    int k = 0;
+    for (int i = 0; i < a && k < 90; i++) cand[k++] = t[i];
+    for (const char *q = ins; q && *q && k < 90; q++) cand[k++] = *q;
+    for (int i = b; i < n && k < 90; i++) cand[k++] = t[i];
+    cand[k] = 0;
+    return strtoll(cand, NULL, 10) <= hi;
+}
+
+static LRESULT CALLBACK num_proc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR ref) {
+    (void)id;
+    NumRange *rg = (NumRange *)ref;
+    if (!rg) return DefSubclassProc(h, m, wp, lp);
+    switch (m) {
+    case WM_CHAR: {
+        if (wp < 32 || wp == 127) break;            // 退格、方向键、Ctrl 组合照常走
+        if (wp < '0' || wp > '9') return 0;         // 字母/负号/小数点一律不收
+        char one[2] = {(char)wp, 0};
+        if (!num_fit(h, one, rg->hi)) return 0;     // 会让值超上限：这一下不进去
+        break;
+    }
+    case WM_IME_CHAR: {
+        // 中文输入法上屏走的是 WM_IME_CHAR，不经过 WM_CHAR：这里再挡一道，
+        // 否则在数字框里打汉字能塞进去，失焦时才被规范化成 0。
+        if (wp < '0' || wp > '9') return 0;
+        char one[2] = {(char)wp, 0};
+        if (!num_fit(h, one, rg->hi)) return 0;
+        break;
+    }
+    case WM_PASTE: {
+        int good = 0;
+        char add[48] = "";
+        if (OpenClipboard(h)) {
+            HANDLE hd = GetClipboardData(CF_UNICODETEXT);
+            if (hd) {
+                const WCHAR *s = (const WCHAR *)GlobalLock(hd);
+                if (s) {
+                    char a[48];
+                    utf8(s, a, sizeof(a));
+                    GlobalUnlock(hd);
+                    int k = 0;
+                    good = 1;
+                    for (const char *q = a; *q; q++) {
+                        if (*q < '0' || *q > '9') { good = 0; break; }
+                        if (k < (int)sizeof(add) - 1) add[k++] = *q;
+                    }
+                    add[k] = 0;
+                }
+            }
+            CloseClipboard();
+        }
+        if (!good || !add[0] || !num_fit(h, add, rg->hi)) return 0;
+        break;
+    }
+    case WM_SETTEXT: {
+        // 程序设值（ui_set_int / ui_set_i64 / 页面回填）和用户输入都走这里，
+        // 顺手记下来：框被清空时不至于把「清空重打」当成 0 落到库里。
+        // 只在非空时记 —— 清空动作本身不能把历史值擦掉。
+        LRESULT r = DefSubclassProc(h, m, wp, lp);
+        char now[48];
+        ui_get(h, now, sizeof(now));
+        if (now[0]) snprintf(rg->last, sizeof(rg->last), "%s", now);
+        return r;
+    }
+    case WM_KILLFOCUS: {
+        // 空框先兜回上一次的值（什么都不改），没历史才按最小值落定；
+        // 超范围的夹回上限。先规范化再让 EN_KILLFOCUS 出去，父窗口读到的就是能用的数字。
+        char t[48];
+        ui_get(h, t, sizeof(t));
+        if (!t[0] && rg->last[0]) {
+            ui_set_i64(h, strtoll(rg->last, NULL, 10));
+            break;
+        }
+        i64 v = t[0] ? strtoll(t, NULL, 10) : rg->lo;
+        if (v < rg->lo) v = rg->lo;
+        if (v > rg->hi) v = rg->hi;
+        char want[32];
+        fmt(want, sizeof(want), "%lld", (long long)v);
+        if (strcmp(want, t)) ui_set_i64(h, v);
+        break;
+    }
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(h, num_proc, 2);
+        free(rg);
+        return DefSubclassProc(h, m, wp, lp);
+    }
+    return DefSubclassProc(h, m, wp, lp);
+}
+
+void ui_num(HWND e, i64 lo, i64 hi) {
+    if (!e || hi < 0) return;
+    if (lo > hi) { i64 t = lo; lo = hi; hi = t; }
+    // ES_NUMBER 让系统那一层就只认数字（输入法上屏的汉字也过不去），
+    // 下面的子类再补范围检查 —— 两道都留着，短路了也不会把脏数据写进库。
+    LONG_PTR st = GetWindowLongPtrW(e, GWL_STYLE);
+    SetWindowLongPtrW(e, GWL_STYLE, st | ES_NUMBER);
+    NumRange *rg = (NumRange *)xalloc(sizeof(*rg));
+    rg->lo = lo;
+    rg->hi = hi;
+    SetWindowSubclass(e, num_proc, 2, (DWORD_PTR)rg);
+}
+
 // ---------------- 按钮：接管绘制 ----------------
 // 主题按钮的悬停高亮（蓝框）点完不消失：它由 uxtheme 自己缓存，按钮即便收到
 // WM_MOUSELEAVE 也未必清得掉。实测真实点击后按钮区的蓝像素从 44 涨到 344，

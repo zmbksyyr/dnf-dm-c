@@ -238,6 +238,9 @@ static void mail_build(Page *p, HWND parent) {
     m_text = ui_edit(parent, "", M_TEXT, 0);
     m_aid = ui_edit(parent, "", M_AID, 0);
     m_anum = ui_edit(parent, "1", M_ANUM, 0);
+    // 附件编号与数量：库里是 int unsigned，数量至少 1（填 0 当 1 处理，这里直接不让填）
+    ui_num(m_aid, 0, 4294967295LL);
+    ui_num(m_anum, 1, 4294967295LL);
     m_hint = ui_label(parent, "物品 ID", M_HINT);
     m_target = ui_combo(parent, M_TARGET, 1);
     ui_combo_fill(m_target, kMailTarget, COUNT_OF(kMailTarget), 0);

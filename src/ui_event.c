@@ -104,6 +104,7 @@ static LRESULT ev_enable(Page *p, u32 type, const char *label) {
     u64 p1 = (u64)ui_i64(e_p1), p2 = (u64)ui_i64(e_p2);
     int days = ui_int(e_days);
     if (days < 0) days = 0;
+    if (days > 3650) days = 3650;          // 见 ev_build：再大 end_time 会溢出
     if (!app_confirm(fmt_new("启用活动「%s」？\n\n编号 %u · 参数 %llu / %llu%s\n全局生效，全服玩家都会受影响。",
                              label, type,
                              (unsigned long long)p1, (unsigned long long)p2,
@@ -204,9 +205,10 @@ static void ev_layout(Page *p, int w, int h) {
 
     // 说明不单独占一列：内容本来就在控件提示里（「持续天数填 0 = 永久」在 e_days 上，
     // 「下拉里翻不到」在 e_eid 上），页面上再写一遍只是占地方。
-    // 腾出来的宽度让四行的右端拉成一条线，按钮统一贴右。
-    const int right = ix + cw - ui_scale(20);
-    const int bwx = ui_scale(88);
+    // 按钮也不再贴窗口右边：贴右会跟前面的字段隔开半屏空白，看着像另一个功能。
+    // 两个操作按钮共用同一个左边界，右端对齐成一条竖线。
+    const int right = ix + cw - ui_scale(20);      // 活动下拉的右边界
+    const int bwx = ui_scale(96);
 
     // ---- 组一：启用活动 ----
     // 三行各有分工，不再把 7 个控件全塞在一行：活动下拉独占一行（长活动名才读得全），
@@ -223,7 +225,7 @@ static void ev_layout(Page *p, int w, int h) {
     if (cw1 < ui_scale(160)) cw1 = ui_scale(160);
     ui_add(&r, e_combo, cw1);
 
-    // 行 2：参数 / 持续天数 / 启用（按钮贴右端）
+    // 行 2：参数 / 持续天数 / 启用（按钮紧跟字段，不推到窗口最右）
     iy += rowh + g;
     ui_row(&r, p->wnd, ix, iy, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "参数1"), ui_scale(40));
@@ -234,7 +236,8 @@ static void ev_layout(Page *p, int w, int h) {
     ui_gap(&r, ui_scale(10));
     ui_add(&r, ui_lbl_at(p->wnd, "持续天数"), ui_scale(64));
     ui_add(&r, e_days, ui_scale(60));
-    r.x = right - bwx;
+    ui_gap(&r, ui_scale(16));
+    const int bx = r.x;                            // 两个按钮共用的左边界
     ui_add(&r, ui_btn_at(p->wnd, E_ADD, "启用活动"), bwx);
 
     // 行 3：按编号启用（下拉里翻不到时走这条）
@@ -242,8 +245,8 @@ static void ev_layout(Page *p, int w, int h) {
     ui_row(&r, p->wnd, ix, iy, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "活动编号"), ui_scale(64));
     ui_add(&r, e_eid, ui_scale(70));
-    r.x = right - ui_scale(96);
-    ui_add(&r, ui_btn_at(p->wnd, E_EIDADD, "按编号启用"), ui_scale(96));
+    r.x = bx;
+    ui_add(&r, ui_btn_at(p->wnd, E_EIDADD, "按编号启用"), bwx);
 
     // ---- 组二：新增活动定义 ----
     y += g1h + g;
@@ -258,13 +261,11 @@ static void ev_layout(Page *p, int w, int h) {
     ui_add(&r, e_dname, ui_scale(150));
     ui_gap(&r, ui_scale(8));
     ui_add(&r, ui_lbl_at(p->wnd, "说明"), ui_scale(34));
-    // 说明框原来吃掉剩余宽度（四百多像素），一行说明用不了那么长。缩到和上面同一
-    // 个右边界为止，「新增定义」按钮落在 right 上，四行的右端是一条线。
-    const int bw = ui_scale(88);
-    int dw = right - r.x - r.gap - bw;
-    if (dw < ui_scale(100)) dw = ui_scale(100);
-    ui_add(&r, e_dexp, dw);
-    ui_add(&r, ui_btn_at(p->wnd, E_ADDICT, "新增定义"), bw);
+    // 说明框给一个够用的定宽，按钮跟在后面：原来让它吃掉剩余宽度，按钮就被顶到
+    // 窗口最右边，离「说明」隔了半屏
+    ui_add(&r, e_dexp, ui_scale(260));
+    ui_gap(&r, ui_scale(16));
+    ui_add(&r, ui_btn_at(p->wnd, E_ADDICT, "新增定义"), ui_scale(88));
 
     // ---- 组三：当前启用的活动 ----
     // 「清空活动」从组一挪到这里：它清的是这张列表，和「停用所选」是一类操作，
@@ -303,6 +304,14 @@ static void ev_build(Page *p, HWND parent) {
     e_eid = ui_edit(parent, "", E_EID, 0);
     e_days = ui_edit(parent, "0", E_DAYS, 0);
     e_did = ui_edit(parent, "", E_DID, 0);
+    // 这几个在库里是 int / int unsigned，框里就只认这个范围。
+    // 天数再收窄到 3650（10 年）：end_time = now + days*86400 是 32 位 int，
+    // 填个十万天会直接溢出成过去的时间，活动一启用就过期。
+    ui_num(e_p1, 0, 4294967295LL);
+    ui_num(e_p2, 0, 4294967295LL);
+    ui_num(e_eid, 0, 2147483647);
+    ui_num(e_days, 0, 3650);
+    ui_num(e_did, 0, 2147483647);
     e_dname = ui_edit(parent, "", E_DNAME, 0);
     e_dexp = ui_edit(parent, "", E_DEXP, 0);
     e_list = ui_list(parent, E_LIST);
