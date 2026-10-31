@@ -24,7 +24,9 @@ enum {
     G_QEXP = PAGE_ID(PAGE_GM, 51), G_QIMP,
     // 分组框：纯视觉容器，不参与 enable / 提交。ID 单独起一段，避开上面连续递增的控件号
     G_BOX_ROLE = PAGE_ID(PAGE_GM, 60), G_BOX_ASSET, G_BOX_PVP, G_BOX_ONCE, G_BOX_ACCT,
-    G_BOX_MISC
+    G_BOX_MISC,
+    // 数值框右边的「+数量」快捷按钮：8 个连号，顺序见 kQAdd
+    G_QADD = PAGE_ID(PAGE_GM, 70)
 };
 
 static HWND c_name, c_lev, c_job, c_grow, c_money, c_coin, c_cera, c_point, c_accm, c_vip;
@@ -480,7 +482,10 @@ static void gm_commit(int id) {
             }
             if (v == g.cur.lev) return;
             c.i1 = v;
-            c.u1 = (u64)(g.pvf_ok ? pvf_exp_for(&g.pvf, v) : -1);
+            // 经验写 0，不写「这一级的门槛值」：exp 是「本级已经攒了多少」，
+            // 填成门槛等于让人顶着满经验条进游戏，服务端一结算就再升一级
+            // （85 级的门槛就 10.8 亿，94 级往上还超过 int 上限）。0 = 刚到这一级。
+            c.u1 = 0;
             gm_push(K_LEV, &c);
             return;
         }
@@ -573,6 +578,54 @@ static void gm_commit(int id) {
     }
 }
 
+// ---------------- 数值框的「+数量」快捷按钮 ----------------
+// 用户要改的往往不是「金币 = 20 万」而「再加 1000 万」，每次手算一遍很容易砸错一位。
+// 按钮只写「+数量」，点一下把框里的数加上去，然后走和失焦完全一样的那条提交路径
+// （范围校验 → 入队 → 立刻回填左栏），不新开写库通道。
+#define QADD_N 8
+static HWND s_qadd[QADD_N];
+static const struct {
+    int         target;    // 加到哪个输入框（同时决定用哪条提交校验）
+    u64         step;
+    const char *txt;
+} kQAdd[QADD_N] = {
+    {G_LEV,       10,       "+10"},        // 等级 1~100，从 95 点一下封顶到 100
+    {G_MONEY,     10000000, "+1000万"},
+    {G_COIN,      100,      "+100"},
+    {G_ACCM,      10000000, "+1000万"},
+    {G_CERA,      10000,    "+1万"},
+    {G_POINT,     10000,    "+1万"},
+    {G_WIN,       100,      "+100"},
+    {G_PVP_POINT, 1000,     "+1000"},
+};
+
+// 金币/复活币/账号金币/点券/赠送点券在库里都是 int unsigned，塞不进 2^32。
+// 先在这里夹住，否则 MySQL 非严格模式下会被静默截断成一个莫名其妙的小数。
+#define GM_U32_MAX 4294967295LL
+
+static void gm_quick_add(HWND pw, int i) {
+    if (i < 0 || i >= QADD_N) return;
+    if (!g.char_ok) return;
+    if (g.cur.online) {
+        app_status("角色在线，改动未写入——请先退出游戏");
+        return;
+    }
+    int tgt = kQAdd[i].target;
+    HWND e = GetDlgItem(pw, tgt);
+    if (!e) return;
+    i64 cap = (tgt == G_LEV) ? 100 : GM_U32_MAX;
+    i64 v = ui_i64(e);
+    if (v < 0) v = 0;
+    if (v >= cap) {
+        app_status("已经是上限 %lld 了，加不进去", (long long)cap);
+        return;
+    }
+    v += (i64)kQAdd[i].step;
+    if (v > cap) v = cap;
+    ui_set_i64(e, v);
+    gm_commit(tgt);
+}
+
 // 点页面空白处不会把焦点从输入框上拿走，但用户心里那就算「改完了」：
 // 把当前有焦点的那个框提交掉（值没变自然什么都不做）
 static void gm_commit_focus(void) {
@@ -582,7 +635,6 @@ static void gm_commit_focus(void) {
 }
 
 static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
-    (void)p;
     (void)lp;
     if (m == WM_LBUTTONDOWN) {
         gm_commit_focus();
@@ -604,6 +656,11 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     // 漏了这一条的表现是「勾上去像是生效了，库里一点没动」——只有勾选框会这样。
     if (code == BN_CLICKED && id == G_VIP) {
         gm_commit(id);
+        return 0;
+    }
+    // 「+数量」按钮：先加到框里，再交给上面的提交路径。按钮区间是连号的，不用逐个 if
+    if (code == BN_CLICKED && id >= G_QADD && id < G_QADD + QADD_N) {
+        gm_quick_add(p->wnd, id - G_QADD);
         return 0;
     }
     if (id == G_DUMP) { on_dump(); return 0; }
@@ -664,8 +721,10 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
 typedef struct {
     const char *lab;       // 左列标签
     HWND        ctl;       // 左列控件
+    HWND        btn;       // 左列控件右边的「+数量」按钮（NULL = 没有）
     const char *lab2;      // 右列标签（NULL = 这行只有一列）
     HWND        ctl2;      // 右列控件
+    HWND        btn2;      // 右列控件右边的「+数量」按钮
 } GmRow;
 
 typedef struct { int x, y, w, h; } GmRect;
@@ -674,11 +733,14 @@ typedef struct { int x, y, w, h; } GmRect;
 // 之前这里做过「按窗口等比缩放」，后来窗口本身固定了尺寸，缩放就没有意义了。
 #define gm_sc(px) ui_scale(px)
 
-// 在组框里摆 n 行字段：行距按框高均分（夹在 0~24），整体在框内垂直居中
+// 在组框里摆 n 行字段：行距按框高均分（夹在 0~24），整体在框内垂直居中。
+// 带按钮的列不整体换布局：按钮从这一列的宽度里切一条出来，输入框让位，
+// 标签仍然按整列宽摆 —— 左边那排标签的基线才不会因为多了按钮而错开。
 static void gm_rows(HWND pw, const GmRect *b, const GmRow *r, int n) {
     const int inx = gm_sc(12), iny = gm_sc(22), inb = gm_sc(10);
     const int lbh = gm_sc(15), lgap = gm_sc(4), rh = gm_sc(24);
     const int nat = lbh + lgap + rh;
+    const int qbw = gm_sc(66), qgap = gm_sc(6);       // 快捷按钮宽 / 与输入框的缝
     int inner = b->w - inx * 2;
     int half = (inner - gm_sc(10)) / 2;
     int avail = b->h - iny - inb;
@@ -692,12 +754,17 @@ static void gm_rows(HWND pw, const GmRect *b, const GmRow *r, int n) {
         const GmRow *q = &r[i];
         int ry = ytop + i * (nat + gapv);
         int w1 = q->lab2 ? half : inner;
-        ui_place(ui_lbl_at(pw, q->lab), b->x + inx, ry, w1, lbh);
-        ui_place(q->ctl, b->x + inx, ry + lbh + lgap, w1, rh);
+        int bx = b->x + inx;
+        ui_place(ui_lbl_at(pw, q->lab), bx, ry, w1, lbh);
+        int wc = q->btn ? w1 - qbw - qgap : w1;
+        ui_place(q->ctl, bx, ry + lbh + lgap, wc, rh);
+        if (q->btn) ui_place(q->btn, bx + wc + qgap, ry + lbh + lgap, qbw, rh);
         if (q->lab2) {
-            int bx = b->x + inx + half + gm_sc(10);
-            ui_place(ui_lbl_at(pw, q->lab2), bx, ry, half, lbh);
-            ui_place(q->ctl2, bx, ry + lbh + lgap, half, rh);
+            int bx2 = b->x + inx + half + gm_sc(10);
+            ui_place(ui_lbl_at(pw, q->lab2), bx2, ry, half, lbh);
+            int wc2 = q->btn2 ? half - qbw - qgap : half;
+            ui_place(q->ctl2, bx2, ry + lbh + lgap, wc2, rh);
+            if (q->btn2) ui_place(q->btn2, bx2 + wc2 + qgap, ry + lbh + lgap, qbw, rh);
         }
     }
 }
@@ -798,24 +865,25 @@ static void gm_layout(Page *p, int w, int h) {
         ui_place(GetDlgItem(pw, kBoxR[i]), R[i].x, R[i].y, R[i].w, R[i].h);
 
     GmRow role[2] = {
-        {"角色名", c_name, "等级", c_lev},
-        {"职业",   c_job,  "觉醒", c_grow},
+        {"角色名", c_name, NULL, "等级", c_lev, s_qadd[0]},
+        {"职业",   c_job,  NULL, "觉醒", c_grow, NULL},
     };
     // VIP 单独占一行，点券与赠送点券拆成两个带标签的框：
     // 原先两者挤在右半格共用一个「点券 / 赠送」标题，插进 VIP 后那半格就成了三个控件，
     // 挤在一行里标签对不上框，不如让每行都是左框 / 右框的对称结构。
+    // 五颗「+数量」跟着各自的框走（VIP 是勾选框，没有数值可加）
     GmRow asset[3] = {
-        {"金币",     c_money, "复活币",   c_coin},
-        {"账号金币", c_accm,  "VIP",      c_vip},
-        {"点券",     c_cera,  "赠送点券", c_point},
+        {"金币",     c_money, s_qadd[1], "复活币",   c_coin,  s_qadd[2]},
+        {"账号金币", c_accm,  s_qadd[3], "VIP",      c_vip,   NULL},
+        {"点券",     c_cera,  s_qadd[4], "赠送点券", c_point, s_qadd[5]},
     };
     // PVP 三项纵向排（段位 / 胜场 / 胜点），和参考工具一致。
     // 原来是「段位│胜场 / 分数│空」，两个数字框左右并排、下面还空半边，
     // 读的时候眼睛要在两列之间来回跳；纵向一行一项，扫下来就是一条线。
     GmRow pvp[3] = {
-        {"段位", g_grade, NULL, NULL},
-        {"胜场", g_win,   NULL, NULL},
-        {"胜点", g_point, NULL, NULL},
+        {"段位", g_grade, NULL,       NULL, NULL, NULL},
+        {"胜场", g_win,   s_qadd[6],  NULL, NULL, NULL},
+        {"胜点", g_point, s_qadd[7],  NULL, NULL, NULL},
     };
     gm_rows(pw, &L[0], role, 2);
     gm_rows(pw, &L[1], asset, 3);
@@ -834,6 +902,8 @@ static void gm_lock(Page *p) {
     // 灰掉的控件收不到悬停，提示只能写在旁边的文字里。一键按钮不受此限（它们直接改库）。
     int edit = g.char_ok && !g.cur.online;
     for (int i = 0; i < 13; i++) ui_enable(GetDlgItem(p->wnd, ids[i]), edit);
+    // 快捷按钮和它对应的输入框同生同死：框不能改的时候，按钮点了也没意义
+    for (int i = 0; i < QADD_N; i++) ui_enable(GetDlgItem(p->wnd, G_QADD + i), edit);
     for (int i = 0; i < 10; i++) ui_enable(GetDlgItem(p->wnd, G_SP + i), on);
     ui_enable(GetDlgItem(p->wnd, G_QEXP), on);
     ui_enable(GetDlgItem(p->wnd, G_QIMP), on);
@@ -889,6 +959,15 @@ static void gm_build(Page *p, HWND parent) {
     c_vip = ui_check(parent, "已开通", G_VIP, 0);
     c_cera = ui_edit(parent, "", G_CERA, 0);
     c_point = ui_edit(parent, "", G_POINT, 0);
+
+    // 「+数量」快捷按钮按 kQAdd 的顺序建，ID 连号（点击靠 id - G_QADD 反查）。
+    // 去掉 WS_TABSTOP：Tab 只该在输入框之间走，按钮挤进序列会让人每改一个数都多按几次。
+    for (int i = 0; i < QADD_N; i++) {
+        s_qadd[i] = ui_button(parent, kQAdd[i].txt, G_QADD + i);
+        if (s_qadd[i])
+            SetWindowLongPtrW(s_qadd[i], GWL_STYLE,
+                              GetWindowLongPtrW(s_qadd[i], GWL_STYLE) & ~WS_TABSTOP);
+    }
 
     pvp_labels();
     g_grade = ui_combo(parent, G_GRADE, 1);
@@ -950,6 +1029,17 @@ static void gm_build(Page *p, HWND parent) {
            "勾上写 1，取消勾选写 0 —— 不用自己填。"
            "角色在线时改了会被服务端存档覆盖");
     ui_tip(parent, c_cera, "点券和赠送点券一起提交（同一条 UPDATE）。角色在线时改了会被服务端覆盖");
+
+    // 快捷按钮上只有「+数量」，提示里必须说清是「加到当前值上」而不是「设成这个数」，
+    // 否则第一次点的人会以为是在填值
+    ui_tip(parent, s_qadd[0], "在当前等级上加 10 级（封顶 100），立刻写库");
+    ui_tip(parent, s_qadd[1], "在当前金币上加 1000 万，立刻写库（上限 4294967295）");
+    ui_tip(parent, s_qadd[2], "在当前复活币上加 100，立刻写库（上限 4294967295）");
+    ui_tip(parent, s_qadd[3], "在当前账号金币上加 1000 万，立刻写库（上限 4294967295）");
+    ui_tip(parent, s_qadd[4], "在当前点券上加 1 万，立刻写库；赠送点券一起提交");
+    ui_tip(parent, s_qadd[5], "在当前赠送点券上加 1 万，立刻写库；点券一起提交");
+    ui_tip(parent, s_qadd[6], "在当前胜场上加 100，立刻写库");
+    ui_tip(parent, s_qadd[7], "在当前胜点上加 1000，立刻写库");
 
     // PVP 默认值：最高段位 + 胜场/分数 999（选中角色后由 gm_reload 覆盖为实际值）
     ui_set_int(g_win, 999);
