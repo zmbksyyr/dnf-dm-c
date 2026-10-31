@@ -11,6 +11,7 @@ enum {
 };
 
 static HWND m_list, m_info, m_text, m_aid, m_anum, m_target, m_atype, m_hint;
+static HWND m_sep1, m_sep2;   // 列表上下的分隔线
 
 static const char *kMailTarget[] = {"当前角色", "全服", "在线玩家"};
 static const char *kMailAttach[] = {"普通物品", "时装(avata)", "宠物(creature)"};
@@ -184,18 +185,20 @@ static void mail_layout(Page *p, int w, int h) {
     // 底部两行：① 投递参数 ② 正文 + 发送
     int bottom = rc.bottom - pad;
     int sendh = rowh * 2 + g;
-    int ltop = pad + rowh + g;
-    int lh = bottom - sendh - ui_scale(6) - ltop;
+    // 列表上下各断一刀：上面是操作按钮，下面是投递表单，中间这块才是邮件列表
+    int sepy1 = pad + rowh + ui_scale(4);
+    ui_place(m_sep1, pad, sepy1, rc.right - pad * 2, ui_scale(2));
+    int ltop = sepy1 + ui_scale(6);
+    int y = bottom - sendh;
+    int sepy2 = y - ui_scale(8);
+    ui_place(m_sep2, pad, sepy2, rc.right - pad * 2, ui_scale(2));
+    int lh = sepy2 - ui_scale(6) - ltop;
     if (lh < ui_scale(60)) lh = ui_scale(60);
     MoveWindow(m_list, pad, ltop, rc.right - pad * 2, lh, TRUE);
 
-    int y = bottom - sendh;
     ui_row(&r, p->wnd, pad, y, rowh);
-    // 末端的提示文字按「实际文字宽」给控件宽：这样它的右端就是文字右端，
-    // 下一行的「发送邮件」按钮能跟它对齐。给 -1 撑满的话控件右端在窗口边上，
-    // 文字却只占前面一小段，按钮对上去会偏出去一百多像素。
-    const char *tip = "（ID 留空 = 纯文本邮件）";
-    const int tipw = ui_text_w(tip);
+    // 「（ID 留空 = 纯文本邮件）」这句不写在页面上了：附件 ID 框和发送按钮的提示里都有。
+    // 末端的提示原来兼作右边界锚点，现在直接对齐到页面右边，正文框按它反算。
     ui_add(&r, ui_lbl_at(p->wnd, "目标"), ui_scale(34));
     ui_add(&r, m_target, ui_scale(96));
     ui_add(&r, ui_lbl_at(p->wnd, "附件类型"), ui_scale(58));
@@ -204,17 +207,12 @@ static void mail_layout(Page *p, int w, int h) {
     ui_add(&r, m_aid, ui_scale(90));
     ui_add(&r, ui_lbl_at(p->wnd, "数量"), ui_scale(34));
     ui_add(&r, m_anum, ui_scale(50));
-    int tipx = r.x;
-    ui_add(&r, ui_lbl_at(p->wnd, tip), tipw);
-    const int align = tipx + tipw;             // 两行共用的右边界
 
     y += rowh + g;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "正文"), ui_scale(34));
-    // 正文框按这个右边界反算，不再撑满整行：原来它横到窗口那头，一千多像素宽，
-    // 填一两句正文根本用不到，还把「发送邮件」推得离内容很远。
     const int bw = ui_scale(88);
-    int tw = align - r.x - r.gap - bw;
+    int tw = rc.right - pad - r.x - r.gap - bw;
     if (tw < ui_scale(120)) tw = ui_scale(120);
     ui_add(&r, m_text, tw);
     ui_add(&r, ui_btn_at(p->wnd, M_SEND, "发送邮件"), bw);
@@ -235,6 +233,8 @@ static void mail_lock(Page *p) {
 static void mail_build(Page *p, HWND parent) {
     m_list = ui_list(parent, M_LIST);
     m_info = ui_label(parent, "请先选择角色", M_INFO);
+    m_sep1 = ui_hline(parent);
+    m_sep2 = ui_hline(parent);
     m_text = ui_edit(parent, "", M_TEXT, 0);
     m_aid = ui_edit(parent, "", M_AID, 0);
     m_anum = ui_edit(parent, "1", M_ANUM, 0);

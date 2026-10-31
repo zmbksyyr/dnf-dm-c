@@ -392,6 +392,12 @@ HWND ui_list(HWND parent, int id) {
     return lv;
 }
 
+// 分隔线：SS_ETCHEDHORZ 是上下各 1px 的凹线，2px 高。
+// 用系统的而不是自己画，深浅色主题下颜色都对；宽度由 ui_place 给
+HWND ui_hline(HWND parent) {
+    return ui_make(parent, L"STATIC", L"", SS_ETCHEDHORZ, 0, 0);
+}
+
 // ---------------- 组框：细线卡片 ----------------
 // 仍是 BS_GROUPBOX（布局按它的客户区算，几何一点不动），只接管外观：
 // 填页面底色、画一条 1px 圆角线、标题放进框内第一行。

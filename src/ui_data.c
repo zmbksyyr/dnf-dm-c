@@ -7,6 +7,7 @@
 enum { P_LIST = PAGE_ID(PAGE_PET, 1), P_NAME, P_RENAME, P_FULL, P_EXPIRE, P_DEL, P_REFRESH, P_INFO, P_BAD };
 
 static HWND p_list, p_name, p_info;
+static HWND p_sep;   // 列表和底部改名条之间的分隔线
 
 enum { D_PETS = 1, D_PETNAME, D_PETFULL, D_PETEXPIRE, D_PETDEL };
 
@@ -143,7 +144,8 @@ static void tab_show(void) {
     ui_add(&r, ui_btn_at(d, 6301, "删除所选"), ui_scale(84));
     ui_add(&r, ui_btn_at(d, 6302, "全部删除"), ui_scale(84));
     ui_add(&r, ui_btn_at(d, 6303, "重新扫描"), ui_scale(84));
-    ui_add(&r, ui_label(d, "it_id=0 的空行不算错误，不会动。", 0), -1);
+    // 「it_id=0 的空行不算错误」这类说明挂在列表提示上，不单独占一行
+    ui_tip(d, t_list, "扫的是宠物/时装表里 it_id 非法或为 0 的记录；it_id=0 的空行算正常，不会列出也不会动");
 
     ui_place(ui_button(d, "关闭", IDCANCEL), 640 - pad - ui_scale(90),
              420 - pad - rowh, ui_scale(90), rowh);
@@ -272,9 +274,10 @@ static void pet_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, P_DEL, "删除"), ui_scale(60));
     ui_add(&r, ui_btn_at(p->wnd, P_BAD, "清错误记录"), ui_scale(88));
     ui_add(&r, p_info, -1);
-    int y = pad + rowh + gp;
+    int y = pad + rowh + ui_scale(6);
     int by = rc.bottom - pad - rowh;
-    MoveWindow(p_list, pad, y, rc.right - pad * 2, by - gp - y, TRUE);
+    ui_place(p_sep, pad, by - ui_scale(8), rc.right - pad * 2, ui_scale(2));
+    MoveWindow(p_list, pad, y, rc.right - pad * 2, by - ui_scale(10) - y, TRUE);
     ui_row(&r, p->wnd, pad, by, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "新名字"), ui_scale(52));
     ui_add(&r, p_name, ui_scale(160));
@@ -290,6 +293,7 @@ static void pet_lock(Page *p) {
 
 static void pet_build(Page *p, HWND parent) {
     p_list = ui_list(parent, P_LIST);
+    p_sep = ui_hline(parent);
     p_info = ui_label(parent, "请先选择角色", P_INFO);
     p_name = ui_edit(parent, "", P_NAME, 0);
     ui_cols(p_list, (const char *const[]){"实例ID", "物品", "编号", "宠物名", "饱食", "到期"},
@@ -315,6 +319,7 @@ enum { A_LIST = PAGE_ID(PAGE_AVATAR, 1), A_HIDE, A_EXPIRE, A_DEL, A_REFRESH, A_I
 enum { D_AVAS = 20, D_AVAHIDE, D_AVAEXPIRE, D_AVADEL };
 
 static HWND a_list, a_info;
+static HWND a_sep;
 
 static int ava_work(void *ctx, Err err) {
     DCtx *c = (DCtx *)ctx;
@@ -408,7 +413,6 @@ static LRESULT ava_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 static void ava_layout(Page *p, int w, int h) {
-    (void)w;
     (void)h;
     int pad = ui_scale(6), rowh = ui_scale(23);
     URow r;
@@ -419,7 +423,9 @@ static void ava_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, A_DEL, "删除"), ui_scale(60));
     ui_add(&r, ui_btn_at(p->wnd, A_BAD, "清错误记录"), ui_scale(88));
     ui_add(&r, a_info, -1);
-    ui_fill_rest(p->wnd, a_list, pad + rowh + ui_scale(5));
+    int ly = pad + rowh + ui_scale(4);
+    ui_place(a_sep, pad, ly, w - pad * 2, ui_scale(2));
+    ui_fill_rest(p->wnd, a_list, ly + ui_scale(6));
 }
 
 static void ava_lock(Page *p) {
@@ -431,6 +437,7 @@ static void ava_lock(Page *p) {
 
 static void ava_build(Page *p, HWND parent) {
     a_list = ui_list(parent, A_LIST);
+    a_sep = ui_hline(parent);
     a_info = ui_label(parent, "请先选择角色", A_INFO);
     ui_cols(a_list, (const char *const[]){"实例ID", "时装", "编号", "状态"},
             (const int[]){80, 260, 80, 80}, 4);
@@ -455,6 +462,7 @@ enum { Q_LIST = PAGE_ID(PAGE_QUEST, 1), Q_REFRESH, Q_CLEAR, Q_INFO,
 enum { D_QUESTS = 30, D_QUESTCLR, D_QSLOT, D_QSEND, D_QPURGE };
 
 static HWND q_list, q_info;
+static HWND q_sep;
 
 // 任务页的动作都围绕「当前选中那一行」：放弃/完成只改槽位，
 // 完美清除还会顺带清掉背包里为它攒的任务材料。
@@ -649,7 +657,6 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 static void quest_layout(Page *p, int w, int h) {
-    (void)w;
     (void)h;
     int pad = ui_scale(6), rowh = ui_scale(23);
     URow r;
@@ -661,7 +668,9 @@ static void quest_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, Q_PURGE, "完美清除"), ui_scale(70));
     ui_add(&r, ui_btn_at(p->wnd, Q_CLEAR, "清空任务"), ui_scale(70));
     ui_add(&r, q_info, -1);
-    ui_fill_rest(p->wnd, q_list, pad + rowh + ui_scale(5));
+    int ly = pad + rowh + ui_scale(4);
+    ui_place(q_sep, pad, ly, w - pad * 2, ui_scale(2));
+    ui_fill_rest(p->wnd, q_list, ly + ui_scale(6));
 }
 
 static void quest_lock(Page *p) {
@@ -673,6 +682,7 @@ static void quest_lock(Page *p) {
 
 static void quest_build(Page *p, HWND parent) {
     q_list = ui_list(parent, Q_LIST);
+    q_sep = ui_hline(parent);
     q_info = ui_label(parent, "请先选择角色", Q_INFO);
     ui_cols(q_list, (const char *const[]){"槽位", "编号", "任务名", "需求物品", "状态"},
             (const int[]){48, 64, 200, 220, 72}, 5);
@@ -696,6 +706,7 @@ void page_quest_create(Page *p) {
 enum { L_TEXT = PAGE_ID(PAGE_LOG, 1), L_REFRESH, L_CLR, L_INFO };
 
 static HWND l_text, l_info;
+static HWND l_sep;
 
 static void log_load(void) {
     char path[MAX_PATH];
@@ -761,7 +772,6 @@ static LRESULT log_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 static void log_layout(Page *p, int w, int h) {
-    (void)w;
     (void)h;
     int pad = ui_scale(6), rowh = ui_scale(23);
     URow r;
@@ -769,7 +779,9 @@ static void log_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, L_REFRESH, "刷新"), ui_scale(60));
     ui_add(&r, ui_btn_at(p->wnd, L_CLR, "清空"), ui_scale(60));
     ui_add(&r, l_info, -1);
-    ui_fill_rest(p->wnd, l_text, pad + rowh + ui_scale(5));
+    int ly = pad + rowh + ui_scale(4);
+    ui_place(l_sep, pad, ly, w - pad * 2, ui_scale(2));
+    ui_fill_rest(p->wnd, l_text, ly + ui_scale(6));
 }
 
 static void log_lock(Page *p) {
@@ -782,6 +794,7 @@ static void log_build(Page *p, HWND parent) {
                      WS_BORDER | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
                      WS_EX_CLIENTEDGE, L_TEXT);
     l_info = ui_label(parent, "", L_INFO);
+    l_sep = ui_hline(parent);
     ui_button(parent, "刷新", L_REFRESH);
     ui_button(parent, "清空", L_CLR);
 }

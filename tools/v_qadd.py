@@ -43,8 +43,10 @@ def ctl(main, cid):
 
 
 def text(h):
+    # GetWindowText 对别的进程里的 EDIT 返回空（它走的是窗口标题那条路），
+    # WM_GETTEXT 在 WM_USER 以下会被系统编组，能读到真正的编辑框内容
     b = ctypes.create_unicode_buffer(64)
-    u.GetWindowTextW(h, b, 64)
+    u.SendMessageW(h, 0x000D, 64, ctypes.addressof(b))
     return b.value
 
 
@@ -102,7 +104,7 @@ def press(idx, name, waitdb=1.6):
     b = ctl(main, G_QADD + idx)
     u.SendMessageW(b, 0x00F5, 0, 0)            # BM_CLICK
     time.sleep(waitdb)
-    print("点 %s → 框里 %s" % (name, text(ctl(main, G_MONEY))))
+    print("点 %s → 金币框里 %r" % (name, text(ctl(main, G_MONEY))))
 
 
 def check(tag, got, want):
@@ -135,6 +137,16 @@ for _ in range(3):
 time.sleep(1.5)
 ok &= check("连点三次金币", db_money(CNO)[0], m0 + 40000000)
 grab(main, os.path.join(OUT, "gm_qadd_after.png"))
+
+# 手输增量：框里只填「加多少」，失焦后加到当前值上，框自己回 0
+e = ctl(main, G_MONEY)
+b = ctypes.create_unicode_buffer("500")
+u.SendMessageW(e, 0x000C, 0, ctypes.addressof(b))     # WM_SETTEXT
+u.SendMessageW(e, 0x0008, 0, 0)                       # WM_KILLFOCUS → 触发提交
+time.sleep(1.8)
+print("手输 500 后：框里 %r" % text(ctl(main, G_MONEY)))
+ok &= check("手输 500 加到库里", db_money(CNO)[0], m0 + 40000000 + 500)
+ok &= check("框回 0", text(ctl(main, G_MONEY)), "0")
 
 # 还原
 cur.execute("UPDATE taiwan_cain_2nd.inventory SET money=%d, coin=%d WHERE charac_no=%d"

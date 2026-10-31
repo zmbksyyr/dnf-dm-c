@@ -86,6 +86,10 @@ void ui_place(HWND w, int x, int y, int cw, int ch);
 // 悬浮提示：host 每个窗口共用一个 tooltip，ctl 上悬停时显示说明
 void ui_tip(HWND host, HWND ctl, const char *text);
 
+// 一条分隔线：用来把「表单区」和「列表区」断开，省得整页糊成一片。
+// 高度固定 2px（SS_ETCHEDHORZ 就是上下两条 1px 的凹线），宽度交给 ui_place
+HWND ui_hline(HWND parent);
+
 // ---- 下拉框 ----
 void ui_combo_fill(HWND c, const char *const *items, int n, int sel);
 int  ui_combo_sel(HWND c);

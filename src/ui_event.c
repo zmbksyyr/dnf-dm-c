@@ -202,14 +202,11 @@ static void ev_layout(Page *p, int w, int h) {
     int y = pad;
     URow r;
 
-    // 三行 + 新增定义那一行共用一个右边界：取第二行末尾「持续天数填 0 = 永久，无时限」
-    // 这段文字的右端。第一行的活动下拉对齐到这里就不再一横到底——下拉撑满整行时，
-    // 上面一行长、下面两行短，右边缘参差，看着像两套版面拼起来的。
-    // 说明列固定起点（第二行「启用活动」按钮右端再往右 10px），各行的说明文字才能左对齐。
-    const char *tip_days = "持续天数填 0 = 永久，无时限";
-    const int note_x = ix + ui_scale(500);
-    int right = note_x + ui_text_w(tip_days);
-    if (right > ix + cw - ui_scale(20)) right = ix + cw - ui_scale(20);
+    // 说明不单独占一列：内容本来就在控件提示里（「持续天数填 0 = 永久」在 e_days 上，
+    // 「下拉里翻不到」在 e_eid 上），页面上再写一遍只是占地方。
+    // 腾出来的宽度让四行的右端拉成一条线，按钮统一贴右。
+    const int right = ix + cw - ui_scale(20);
+    const int bwx = ui_scale(88);
 
     // ---- 组一：启用活动 ----
     // 三行各有分工，不再把 7 个控件全塞在一行：活动下拉独占一行（长活动名才读得全），
@@ -226,7 +223,7 @@ static void ev_layout(Page *p, int w, int h) {
     if (cw1 < ui_scale(160)) cw1 = ui_scale(160);
     ui_add(&r, e_combo, cw1);
 
-    // 行 2：参数 / 持续天数 / 启用
+    // 行 2：参数 / 持续天数 / 启用（按钮贴右端）
     iy += rowh + g;
     ui_row(&r, p->wnd, ix, iy, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "参数1"), ui_scale(40));
@@ -237,20 +234,16 @@ static void ev_layout(Page *p, int w, int h) {
     ui_gap(&r, ui_scale(10));
     ui_add(&r, ui_lbl_at(p->wnd, "持续天数"), ui_scale(64));
     ui_add(&r, e_days, ui_scale(60));
-    ui_gap(&r, ui_scale(10));
-    ui_add(&r, ui_btn_at(p->wnd, E_ADD, "启用活动"), ui_scale(88));
-    r.x = note_x;                              // 说明列固定起点
-    ui_add(&r, ui_lbl_at(p->wnd, tip_days), right - note_x);
+    r.x = right - bwx;
+    ui_add(&r, ui_btn_at(p->wnd, E_ADD, "启用活动"), bwx);
 
     // 行 3：按编号启用（下拉里翻不到时走这条）
     iy += rowh + g;
     ui_row(&r, p->wnd, ix, iy, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "活动编号"), ui_scale(64));
     ui_add(&r, e_eid, ui_scale(70));
-    ui_gap(&r, ui_scale(10));
+    r.x = right - ui_scale(96);
     ui_add(&r, ui_btn_at(p->wnd, E_EIDADD, "按编号启用"), ui_scale(96));
-    r.x = note_x;
-    ui_add(&r, ui_lbl_at(p->wnd, "下拉里翻不到时用这行"), right - note_x);
 
     // ---- 组二：新增活动定义 ----
     y += g1h + g;

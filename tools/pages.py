@@ -88,7 +88,8 @@ EXE = os.path.join(BUILD, "DNF_GM.exe")
 OUT = os.path.join(BUILD, "shots")          # 截图落在产物旁边
 os.makedirs(OUT, exist_ok=True)
 
-NAMES = ["item", "query", "grant", "mail", "pet", "avatar", "quest", "event", "gm", "ban", "log"]
+NAMES = ["item", "query", "grant", "mail", "pet", "avatar", "quest", "event", "gm", "bubble",
+         "ban", "log"]
 
 
 def db():

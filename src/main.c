@@ -162,7 +162,9 @@ static void left_layout(int x, int y0, int w, int h) {
     }
 
     ui_place(g_grp_card, x, g2y, w, g2h);
-    int kw = ui_scale(56);
+    // 标签列宽按最长的那个标签量：「装备 / 仓库」比「账号金币」还宽一格，
+    // 原来写死 56，最后那个「库」字会被值那一列盖掉
+    int kw = ui_scale(72);
     int yy = g2y + th;
     for (int i = 0; i < CARD_N; i++) {
         ui_place(g_ck[i], x + padx, yy, kw, crh);

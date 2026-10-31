@@ -217,7 +217,7 @@ static int item_edit(HWND owner, const Item *in, Item *out) {
 enum { I_SUB = PAGE_ID(PAGE_ITEM, 1), I_LIST, I_EDIT, I_CLR, I_CLRALL, I_INFO, I_BAD };
 
 static const char *kSubName[] = {"背包", "穿戴", "宠物", "仓库", "珠宝", "账号金库"};
-static HWND s_sub, s_list, s_info;
+static HWND s_sub, s_list, s_info, s_sep;
 
 // ---- 错误物品：结构异常，或编号在 PVF 里查不到 ----
 static void item_reload(Page *p);
@@ -474,7 +474,9 @@ static void item_layout(Page *p, int w, int h) {
     GetClientRect(p->wnd, &rc);
     ui_show(s_info, rc.right - r.x >= ui_scale(88));
     ui_add(&r, s_info, -1);
-    ui_fill_rest(p->wnd, s_list, pad + rowh + ui_scale(6));
+    int ly = pad + rowh + ui_scale(5);
+    ui_place(s_sep, pad, ly, w - pad * 2, ui_scale(2));
+    ui_fill_rest(p->wnd, s_list, ly + ui_scale(6));
     (void)h;
 }
 
@@ -492,6 +494,7 @@ static void item_build(Page *p, HWND parent) {
     s_sub = ui_combo(parent, I_SUB, 1);
     ui_combo_fill(s_sub, kSubName, COUNT_OF(kSubName), 0);
     s_list = ui_list(parent, I_LIST);
+    s_sep = ui_hline(parent);
     s_info = ui_label(parent, "请先选择角色", I_INFO);
     ui_cols(s_list,
             (const char *const[]){"槽位", "物品", "编号", "类型", "数量/耐久", "强化", "增幅", "封印",
@@ -519,7 +522,7 @@ enum {
     Q_MAT, Q_EQU, Q_AVA, Q_TASK       // 加载 常用材料 / 装备 / 时装 / 任务材料
 };
 
-static HWND q_kw, q_list, q_info;
+static HWND q_kw, q_list, q_info, q_sep;
 
 // 列表行的附带数据：低 32 位是物品编号，高 32 位是「这道工序要几个」。
 // LPARAM 在 x64 上是 64 位，一个字段装得下，不用再挂一张跟行号对齐的并排数组
@@ -705,7 +708,6 @@ static LRESULT query_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 static void query_layout(Page *p, int w, int h) {
-    (void)w;
     (void)h;
     int pad = ui_scale(6), rowh = ui_scale(23), g = ui_scale(6);
     URow r;
@@ -719,16 +721,32 @@ static void query_layout(Page *p, int w, int h) {
 
     // 第二行：四个批量抽屉。放在查询页是因为「先查后发」是这条链路的起点 ——
     // 查不到的东西不会有事，灌进去的都是 PVF 里真有的。
+    // 「双击某行加入队列」这类说明不占版面了，挂在列表和按钮的提示里。
     int y = pad + rowh + g;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_btn_at(p->wnd, Q_MAT, "加载常用材料"), ui_scale(100));
     ui_add(&r, ui_btn_at(p->wnd, Q_EQU, "加载常用装备"), ui_scale(100));
     ui_add(&r, ui_btn_at(p->wnd, Q_AVA, "加载常用时装"), ui_scale(100));
     ui_add(&r, ui_btn_at(p->wnd, Q_TASK, "加载任务材料"), ui_scale(100));
-    ui_gap(&r, ui_scale(8));   // 说明文字和按钮挤一起会看成按钮的一部分
-    ui_add(&r, ui_lbl_at(p->wnd, "列出当前 PVF 里有的，双击某行加入发放队列（数量列一起带过去）"), -1);
 
-    ui_fill_rest(p->wnd, q_list, y + rowh + g);
+    int ly = y + rowh + g;                    // 按钮和列表之间断一刀
+    ui_place(q_sep, pad, ly, w - pad * 2, ui_scale(2));
+    // 列宽按列表实际宽度摊：编号、数量是定宽，名称/说明吃掉剩下的。
+    // 写死像素（80+300+60+520=960）在 780 宽的页面上会撑出横向滚动条，列表底下多一条白带。
+    int listw = w - pad * 2 - ui_scale(8);
+    int c0 = ui_scale(72), c2 = ui_scale(56);
+    int rest = listw - c0 - c2;
+    if (rest < ui_scale(160)) rest = ui_scale(160);
+    int c1 = rest * 40 / 100, c3 = rest - c1;
+    static int s_qcw = -1;
+    if (listw != s_qcw) {
+        s_qcw = listw;
+        SendMessageW(q_list, LVM_SETCOLUMNWIDTH, 0, MAKELPARAM(c0, 0));
+        SendMessageW(q_list, LVM_SETCOLUMNWIDTH, 1, MAKELPARAM(c1, 0));
+        SendMessageW(q_list, LVM_SETCOLUMNWIDTH, 2, MAKELPARAM(c2, 0));
+        SendMessageW(q_list, LVM_SETCOLUMNWIDTH, 3, MAKELPARAM(c3, 0));
+    }
+    ui_fill_rest(p->wnd, q_list, ly + ui_scale(8));
 }
 
 static void query_lock(Page *p) {
@@ -748,6 +766,7 @@ static void query_build(Page *p, HWND parent) {
     q_kw = ui_edit(parent, "", Q_KW, 0);
     q_list = ui_list(parent, Q_LIST);
     q_info = ui_label(parent, "未加载 PVF", Q_INFO);
+    q_sep = ui_hline(parent);
     ui_cols(q_list, (const char *const[]){"编号", "名称", "数量", "说明"},
             (const int[]){80, 300, 60, 520}, 4);
     ui_button(parent, "搜索", Q_GO);
@@ -758,6 +777,15 @@ static void query_build(Page *p, HWND parent) {
     ui_button(parent, "加载常用装备", Q_EQU);
     ui_button(parent, "加载常用时装", Q_AVA);
     ui_button(parent, "加载任务材料", Q_TASK);
+    ui_tip(parent, q_list, "列出当前 PVF 里真有的物品；双击某行等于「加入发放」，"
+                           "「数量」列（任务材料要的个数）一起进队列");
+    ui_tip(parent, GetDlgItem(parent, Q_GO), "按物品名或编号在当前 PVF 里模糊查，最多列 800 条");
+    ui_tip(parent, GetDlgItem(parent, Q_ADD), "把选中的那一行加入发放队列，数量按「数量」列");
+    ui_tip(parent, GetDlgItem(parent, Q_ALL), "把列表里所有行加进发放队列；队列里已有的不重复加行，只把数量补大");
+    ui_tip(parent, GetDlgItem(parent, Q_MAT), "内置的常用材料编号，和当前 PVF 比对后只列真有的");
+    ui_tip(parent, GetDlgItem(parent, Q_EQU), "内置的常用装备编号，和当前 PVF 比对后只列真有的");
+    ui_tip(parent, GetDlgItem(parent, Q_AVA), "内置的常用时装编号，和当前 PVF 比对后只列真有的");
+    ui_tip(parent, GetDlgItem(parent, Q_TASK), "扫 PVF 里所有收集类任务，列出它们要的材料和个数");
 }
 
 void page_query_create(Page *p) {
@@ -777,7 +805,7 @@ enum {
 
 static HWND g_id, g_num, g_type, g_enh, g_inc, g_incv, g_forge, g_seal, g_sealc, g_dur, g_list, g_info;
 static HWND g_gauto;   // 连续取码开关
-static HWND g_hint;     // 队列怎么用，写一行在按钮下面，省得猜
+static HWND g_sep;     // 表单区 / 队列区之间的分隔线
 static int g_sync;      // 重填队列时屏蔽 LVN_ITEMCHANGED
 static int g_bind = -1; // 表单当前绑定的队列行；-1 = 未绑定（只填表单，不写回）
 
@@ -1232,8 +1260,9 @@ static void grant_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, G_EXPORT, "导出"), ui_scale(56));
     ui_add(&r, ui_btn_at(p->wnd, G_IMPORT, "导入"), ui_scale(56));
 
-    int listtop = y + rowh + g + rowh + g;   // 按钮行下面再留一行说明
-    ui_place(g_hint, pad, y + rowh + g, rc.right - pad * 2, rowh);
+    int ly = y + rowh + g;                   // 按钮行下面画一条线，把表单和队列断开
+    ui_place(g_sep, pad, ly, rc.right - pad * 2, ui_scale(2));
+    int listtop = ly + ui_scale(8);
     int by = rc.bottom - pad - rowh;
     MoveWindow(g_list, pad, listtop, rc.right - pad * 2, by - g - listtop, TRUE);
     int bw = ui_scale(96);
@@ -1267,8 +1296,7 @@ static void grant_build(Page *p, HWND parent) {
     g_seal = ui_check(parent, "封装", G_SEAL, 0);
     g_sealc = ui_edit(parent, "0", G_SEALC, 0);
     g_info = ui_label(parent, "请先选择角色", G_INFO);
-    g_hint = ui_label(parent, "单击队列行载回上方表单；改完点到别处就自动写回该行。"
-                              "新物品点「加入队列」入队，发放用底部「邮件发放 / 直接入包」。", 0);
+    g_sep = ui_hline(parent);
     ui_button(parent, "加入队列", G_ADD);
     g_gauto = ui_check(parent, "连续取码", G_GAUTO, g.cfg.grab_auto);
     ui_button(parent, "移除所选", G_DEL);
@@ -1294,6 +1322,8 @@ static void grant_build(Page *p, HWND parent) {
     ui_tip(parent, GetDlgItem(parent, G_IMPORT), "从 .tsv 导入队列（默认预填上次导出的文件）");
     ui_tip(parent, GetDlgItem(parent, G_MAIL), "把队列里的物品以邮件附件发给目标角色（≤10 件/封）");
     ui_tip(parent, GetDlgItem(parent, G_INV), "把队列里的物品直接写入背包空槽，要求角色离线");
+    ui_tip(parent, g_list, "单击某行把它的配置载回上方表单；改完点到别处就自动写回该行。"
+                           "要从头建一件新物品，点「加入队列」，用的是表单当前的值");
     (void)p;
 }
 

@@ -11,6 +11,7 @@ enum { B_LIST = PAGE_ID(PAGE_BAN, 1), B_CHAR, B_BANTYPE, B_DAYS, B_REASON, B_BAN
        B_REFRESH, B_INFO, B_PWD, B_RESETPWD, B_LOADALL, B_LOADON };
 
 static HWND b_list, b_char, b_bantype, b_days, b_reason, b_info, b_pwd;
+static HWND b_sep;   // 列表和封停表单之间的分隔线
 
 // 封禁时长：下拉里 0 = 永久。原来「类型」下拉里也有一个「永久封禁」，
 // 和这里重复 —— 两个地方都能表达永久，选错一个就封错时长，现在只留这一处。
@@ -267,10 +268,12 @@ static void ban_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, B_UNBAN, "解除封停"), ui_scale(80));
     ui_add(&r, b_info, -1);
 
-    int y = pad + rowh + g;
-    // 列表 + 底部操作区（3 行：字段 / 按钮 / 提示）
-    int btm = rc.bottom - pad - rowh * 3 - g * 3;
-    MoveWindow(b_list, pad, y, rc.right - pad * 2, btm - y, TRUE);
+    int y = pad + rowh + ui_scale(6);
+    // 列表 + 底部操作区（2 行：字段 / 按钮）。原来还有第三行整段说明，
+    // 内容已经挂在「类型」「时长」两个下拉的提示上，删掉后列表高出一行。
+    int btm = rc.bottom - pad - rowh * 2 - g * 2;
+    ui_place(b_sep, pad, btm - ui_scale(6), rc.right - pad * 2, ui_scale(2));
+    MoveWindow(b_list, pad, y, rc.right - pad * 2, btm - ui_scale(8) - y, TRUE);
 
     // 第一行：角色选择 + 封禁类型 + 时长 + 原因
     // 角色下拉收窄到 200：原先把「原因」挤成一小格，而原因才是每次都要填的；
@@ -294,13 +297,6 @@ static void ban_layout(Page *p, int w, int h) {
     ui_add(&r, b_pwd, ui_scale(100));
     ui_add(&r, ui_btn_at(p->wnd, B_RESETPWD, "重置密码"), ui_scale(76));
     ui_add(&r, ui_lbl_at(p->wnd, "（账号级操作在 GM 页）"), -1);
-
-    // 第三行：提示
-    y += rowh + g;
-    ui_row(&r, p->wnd, pad, y, rowh);
-    ui_add(&r, ui_lbl_at(p->wnd,
-        "类型：账号 = 封停整个账号登录；角色 = 只禁该角色，账号仍可登录其它角色。"
-        "时长选「永久」时封到 2099"), -1);
 }
 
 static void ban_lock(Page *p) {
@@ -313,6 +309,7 @@ static void ban_lock(Page *p) {
 
 static void ban_build(Page *p, HWND parent) {
     b_list = ui_list(parent, B_LIST);
+    b_sep = ui_hline(parent);
     b_info = ui_label(parent, "请先连接数据库", B_INFO);
     b_char = ui_combo(parent, B_CHAR, 1);   // droplist：只能从下拉选
     b_bantype = ui_combo(parent, B_BANTYPE, 1);

@@ -21,7 +21,7 @@ enum {
 
 static HWND b_on, b_sec, b_target, b_tno, b_hours;
 static HWND b_coin, b_dp, b_dc, b_item, b_num;
-static HWND b_info, b_tip, b_plan, b_box, b_box_rw, b_box_plan;
+static HWND b_info, b_sep, b_plan, b_box, b_box_rw, b_box_plan;
 
 static char s_info_last[192];   // 状态行每 tick 都被问一次，文字没变就不写（写一次就是一次重绘）
 static int  s_plan_ver = -1;    // 已填进列表的流水版本
@@ -140,16 +140,16 @@ static void bub_layout(Page *p, int w, int h) {
     const int pad = ui_scale(10), gap = ui_scale(12);
     const int bh = ui_scale(30);        // 按钮高
     const int hdr = ui_scale(26);       // 组框标题占的高度
-    const int tiph = ui_scale(16);      // 底部一行说明
 
-    // 自下而上：按钮贴底 → 一行说明 → 计划列表吃掉中间剩余 → 上排两框按内容定高。
+    // 自下而上：按钮贴底 → 一条分隔线 → 计划列表吃掉中间剩余 → 上排两框按内容定高。
     // 上排不铺满：这一页只有 5 个字段，框拉到整页高度时字段在中间缩成一条，
     // 上下各一大片空，看着像加载失败。
+    // 底部原来那行总结说明已删：结算条件、时长、间隔全在各自控件的提示里，页面上再写一遍占地方。
     const int btn_y = h - pad - bh;
-    const int tip_y = btn_y - ui_scale(8) - tiph;
+    const int sep_y = btn_y - ui_scale(10);
     const int top_h = ui_scale(206);       // 右组三行 + 标题 + 组内留白
     const int note_y = pad + top_h + gap;
-    int note_h = tip_y - ui_scale(6) - note_y;
+    int note_h = sep_y - ui_scale(8) - note_y;
     if (note_h < ui_scale(120)) note_h = ui_scale(120);
 
     const int fullW = w - pad * 2;
@@ -184,13 +184,13 @@ static void bub_layout(Page *p, int w, int h) {
         bub_fit_cols();
     }
 
-    // 底部：应用 / 导出记录 / 状态行，再下面一行说明
+    // 底部：一条线 + 应用 / 导出记录 / 状态行
     const int b1 = ui_scale(88), b2 = ui_scale(100), bg = ui_scale(8);
+    ui_place(b_sep, pad, sep_y, fullW, ui_scale(2));
     ui_place(GetDlgItem(pw, BUB_APPLY), pad, btn_y, b1, bh);
     ui_place(GetDlgItem(pw, BUB_EXP), pad + b1 + bg, btn_y, b2, bh);
     int sx = pad + b1 + bg + b2 + gap;
     ui_place(b_info, sx, btn_y + ui_scale(6), w - pad - sx, ui_scale(20));
-    ui_place(b_tip, pad, tip_y, fullW, tiph);
 }
 
 // ---------------- 构建 ----------------
@@ -225,9 +225,7 @@ static void bub_build(Page *p, HWND parent) {
     ui_button(parent, "应用", BUB_APPLY);
     ui_button(parent, "导出记录", BUB_EXP);
     b_info = ui_label(parent, "", BUB_INFO);
-    b_tip = ui_label(parent,
-                     "只在工具开着且已连库时结算，关掉不补算；间隔下限 5 秒；生效时长从点「应用」起算，0 = 持续。",
-                     BUB_TIP);
+    b_sep = ui_hline(parent);
 
     ui_tip(parent, b_on, "开启后按间隔给目标人群发放奖励；只在工具开着时结算，关掉不补算");
     ui_tip(parent, b_sec, "结算间隔，单位秒，下限 5");
