@@ -17,7 +17,7 @@ static HWND g_lpvf, g_pvf, g_pvfbtn;
 // 地址预设：Python 版 GM 工具 config.json 里的 saved_servers / 默认 DB_IP。
 // 本机自架的服最常见，127.0.0.1 排第一；其余是人家现成配过的机器。
 // 框是可编辑的下拉，不在预设里直接敲也行，敲过的照样存进 settings.ini。
-static const char *const kHostList[] = {"127.0.0.1", "192.168.200.131", "test"};
+static const char *const kHostList[] = {"127.0.0.1", "192.168.200.131"};
 
 // 把配置里的地址放回下拉框：命中预设就选中，不命中就当成手填的文本。
 // 切回来时要能看出"现在连的是哪台"，而不是永远停在第一个预设上。

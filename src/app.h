@@ -173,11 +173,24 @@ int  app_act_idle(void);                 // 连接空闲且没有排队动作：
 // 泡点：开关 / 间隔秒 / 目标人群 / 多奖励（赠送点券·D点·D币·物品）/ 生效时长。
 // 改完立即写回 settings.ini，计时从改的那一刻重来。
 // 结算由 app_tick 驱动，只在本工具开着、且连库期间发生（关掉不补算）。
-// hours：生效时长档位，0=持续，1/3/5/7 小时（从点「应用」这一刻起算）。
+// hours：生效时长小时数，0=持续（不自动停），可填任意 1~8760。
 void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dcoin,
                       u32 item, int itemnum, u32 tno, int hours);
 void app_bubble_status(char *out, int cap);   // 一行人话，给 GM 页底部标签用
 void app_bubble_export(void);                // 把泡点结算记录导出为 txt
+
+// 最近计划 / 结算流水（最多 20 条，最新的在第 0 条）。
+// 「计划」= 一次应用；「完成发放 / 无人可发 / 发放失败」= 一次结算结果。
+// 状态取值固定几个，UI 直接显示，不做二次映射。
+typedef struct {
+    char t[12];      // HH:MM:SS
+    char tg[16];     // 目标人群
+    char what[88];   // 内容摘要（间隔/奖励/对象数/错误）
+    char st[16];     // 等待发放 / 完成发放 / 无人可发 / 发放失败 / 已停止 / 已到时长
+} BubblePlan;
+int  app_bubble_plan_count(void);
+const BubblePlan *app_bubble_plan_at(int i);   // i=0 是最新一条
+int  app_bubble_plan_ver(void);                // 每次增减都 +1，页面据此决定要不要重填
 
 // 发放
 void app_grant_add(u32 id);

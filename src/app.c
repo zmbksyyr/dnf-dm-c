@@ -1119,6 +1119,41 @@ static u64 s_bubble_next;      // 下次结算时刻（0 = 还没开始计时）
 static u32 s_bubble_paid;      // 上次命中的对象数
 static u32 s_bubble_runs;      // 已结算次数
 
+// 最近计划 / 结算流水：界面上那张表就吃这 20 条。
+// 一条「计划」是点一次应用（等级：等待发放），之后每次结算追加一条结果。
+// 只留内存不落盘：这是给现场看的"刚才发了几次、每次几个"，重启就是新的一轮；
+// 要长期留档走「导出记录」。
+#define BUB_PLAN_MAX 20
+static BubblePlan s_plan[BUB_PLAN_MAX];
+static int s_plan_n;
+static int s_plan_ver;
+static int s_bub_live;         // 上一 tick 是否在结算中，用来抓「刚刚到期」这个边沿
+
+static const char *bub_target_name(int t) {
+    return t == 0 ? "仅在线" : t == 1 ? "全服" : t == 2 ? "指定角色" : "指定账号";
+}
+
+static void bub_plan_add(const char *tg, const char *what, const char *st) {
+    SYSTEMTIME tm;
+    GetLocalTime(&tm);
+    if (s_plan_n < BUB_PLAN_MAX) s_plan_n++;
+    if (s_plan_n > 1)
+        memmove(&s_plan[1], &s_plan[0], sizeof(BubblePlan) * (size_t)(s_plan_n - 1));
+    BubblePlan *p = &s_plan[0];
+    snprintf(p->t, sizeof(p->t), "%02d:%02d:%02d", tm.wHour, tm.wMinute, tm.wSecond);
+    snprintf(p->tg, sizeof(p->tg), "%s", tg && tg[0] ? tg : "—");
+    snprintf(p->what, sizeof(p->what), "%s", what ? what : "");
+    snprintf(p->st, sizeof(p->st), "%s", st ? st : "");
+    s_plan_ver++;
+}
+
+int app_bubble_plan_count(void) { return s_plan_n; }
+const BubblePlan *app_bubble_plan_at(int i) {
+    if (i < 0 || i >= s_plan_n) return NULL;
+    return &s_plan[i];
+}
+int app_bubble_plan_ver(void) { return s_plan_ver; }
+
 static int w_bubble(void *ctx, Err err) {
     (void)ctx;
     u32 n = 0;
@@ -1141,7 +1176,10 @@ void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dco
     if (dcoin < 0) dcoin = 0;
     if (itemnum < 0) itemnum = 0;
     if (target < 0 || target > 3) target = 0;
-    if (hours != 1 && hours != 3 && hours != 5 && hours != 7) hours = 0;   // 0 = 持续
+    // 时长不再限定 1/3/5/7 这四档：下拉可编辑，用户想填 12 小时就填 12。
+    // 0 = 持续；上限一年，再大没有意义（而且 until 会溢出到很离谱的年份）
+    if (hours < 0) hours = 0;
+    if (hours > 8760) hours = 8760;
     g.cfg.bubble_on = on ? 1 : 0;
     g.cfg.bubble_sec = sec;
     g.cfg.bubble_target = target;
@@ -1167,10 +1205,21 @@ void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dco
                          itemnum > 0 ? itemnum : 1);
     if (!rw[0]) snprintf(rw, sizeof(rw), "（无奖励）");
     const char *dur = hours == 0 ? "持续" : fmt_new("%d 小时", hours);
-    app_status("泡点：%s · 每 %d 秒 · %s · %s · 时长%s",
+    app_status("泡点：%s · 每 %d 秒 · %s · %s · 时长 %s",
                on ? "已启用" : "已停用", sec, tg, rw, dur);
-    app_log("泡点：%s · 每 %d 秒 · 目标%s · %s · 时长%s",
+    app_log("泡点：%s · 每 %d 秒 · 目标%s · %s · 时长 %s",
             on ? "已启用" : "已停用", sec, tg, rw, dur);
+
+    // 列表里留一条计划：开启是「等待发放」，关掉是「已停止」。
+    // 结算结果由 app_tick 逐条追加到这个计划后面。
+    char desc[120];
+    if (on) {
+        if (hours) snprintf(desc, sizeof(desc), "每 %d 秒 · %s · %d 小时", sec, rw, hours);
+        else       snprintf(desc, sizeof(desc), "每 %d 秒 · %s · 持续", sec, rw);
+        bub_plan_add(tg, desc, "等待发放");
+    } else {
+        bub_plan_add(tg, "手动停用", "已停止");
+    }
 }
 
 // 当前是否还在生效时长内（until==0 表示持续，不自动停）
@@ -1341,7 +1390,14 @@ void app_tick(void) {
     // 泡点：到点才发，而且必须连接空闲、队列里也没人的操作 —— 不跟人抢那条连接。
     // 没连库或没启用就把计时清零，下次连上从整段间隔重新开始。
     // 超出生效时长（bubble_until）时停止结算，时长内重新计时。
-    if (!g.db_ok || !g.cfg.bubble_on || !bubble_in_window()) {
+    int live = g.db_ok && g.cfg.bubble_on && bubble_in_window();
+    // 刚到时长这一瞬间记一条。之后 bubble_in_window 一直是 false，不会重复记；
+    // 中间若重新点应用（until 被续上）会重新变 true，下次到期再记一条。
+    if (s_bub_live && !live && g.cfg.bubble_on && !bubble_in_window())
+        bub_plan_add(bub_target_name(g.cfg.bubble_target), "已到生效时长，停止结算", "已到时长");
+    s_bub_live = live;
+
+    if (!live) {
         s_bubble_next = 0;
     } else if (!db_busy() && !g_pq_n) {
         u64 now = now_ms();
@@ -1354,12 +1410,19 @@ void app_tick(void) {
         }
     }
     if (job_poll(&g.job_bubble, err)) {
+        const char *tg = bub_target_name(g.cfg.bubble_target);
+        char d[88];
         if (err[0]) {
             app_log("泡点结算失败：%s", err);
+            snprintf(d, sizeof(d), "%s", err);
+            bub_plan_add(tg, d, "发放失败");
         } else if (s_bubble_paid) {
-            const char *tg = g.cfg.bubble_target==0?"仅在线":g.cfg.bubble_target==1?"全服":
-                             g.cfg.bubble_target==2?"指定角色":"指定账号";
             app_log("泡点结算：%s · %u 个对象已加奖励", tg, s_bubble_paid);
+            snprintf(d, sizeof(d), "%u 个对象已加奖励", s_bubble_paid);
+            bub_plan_add(tg, d, "完成发放");
+        } else {
+            // 一个都没命中也要记：否则界面上看不出「到底跑了没有」
+            bub_plan_add(tg, "没有符合条件的对象", "无人可发");
         }
     }
 
