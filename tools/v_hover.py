@@ -87,11 +87,24 @@ def cursor():
     return p.x, p.y
 
 
+LVM_GETHEADER = 0x101F
+
+
 def row_xy(lv, row=0):
-    """列表第 row 行中间那个点。行高按 20px 估，落在行内即可。"""
+    """列表第 row 行中间那个点。
+
+    行区的顶边要从列头控件（SysHeader32）的底边往下算 —— 固定按 24px 猜的话，
+    采样点会落进列头里；列头只弹「列表说明」，不弹编号卡片，测试就会误判。
+    """
     r = wt.RECT()
     u.GetWindowRect(P(lv), ctypes.byref(r))
-    return (r.left + r.right) // 2, r.top + 24 + row * 20
+    y = r.top + 24                          # 兜底：拿不到列头时的估计
+    hd = u.SendMessageW(P(lv), LVM_GETHEADER, 0, 0)
+    if hd:
+        hr = wt.RECT()
+        if u.GetWindowRect(ctypes.c_void_p(hd), ctypes.byref(hr)):
+            y = hr.bottom + 1
+    return (r.left + r.right) // 2, y + 8 + row * 20
 
 
 def park(x, y, secs, stop=None):

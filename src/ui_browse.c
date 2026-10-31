@@ -304,7 +304,7 @@ void ui_browse_open(HWND owner, int cat) {
     if (c.lv) {
         SendMessageW(c.lv, WM_SETFONT, (WPARAM)ui_font(), TRUE);
         ListView_SetExtendedListViewStyle(c.lv, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
-                                                    LVS_EX_GRIDLINES | LVS_EX_LABELTIP);
+                                                    LVS_EX_GRIDLINES);
         ui_cols(c.lv, (const char *const[]){"编号", "名称"}, (const int[]){100, 520}, 2);
         // 虚拟列表没有格子文本（没挂 LVN_GETDISPINFO），编号让回调直接给
         ui_idtip_bind_ex(c.lv, 0, br_id_at);

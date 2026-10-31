@@ -90,8 +90,10 @@ void ui_enable(HWND w, int on);
 void ui_show(HWND w, int on);
 void ui_place(HWND w, int x, int y, int cw, int ch);
 
-// 悬浮提示：host 每个窗口共用一个 tooltip，ctl 上悬停时显示说明
+// 悬浮提示：host 每个窗口共用一个 tooltip，ctl 上悬停时显示说明。
+// 列表的说明比较特殊：整块悬停都弹会和编号悬浮卡重叠，改成只在列头上弹（见 ui_tip_tick）。
 void ui_tip(HWND host, HWND ctl, const char *text);
+void ui_tip_tick(void);      // 主窗口定时器里调（ui_idtip_tick 会带上）
 
 // 编号悬浮卡：鼠标停在列表 id_col 列所在行的任一格上 ~0.4s，浮出物品详情 + 图标。
 // 详情查 PVF、图标查贴图包，两者谁没就绪就退化成只显示编号。

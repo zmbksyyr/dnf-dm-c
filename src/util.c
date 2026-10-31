@@ -558,30 +558,42 @@ void hash_md5(const void *d, size_t n, char out[33]) {
     out[32] = 0;
 }
 
-void hash_md5_file(const char *path, char out[33], void (*progress)(int)) {
+#define FP_WIN (64 * 1024)
+
+// 大文件的「换没换」快速指纹：长度 + 头部 64KB + 尾部 64KB 的 md5。
+// PVF 动辄两三百 MB，每次启动全量哈希要半秒多，而它只用来判断缓存还能不能用；
+// 换端 / 打补丁必然改动长度或头尾，采样足以区分，成本从 ~600ms 降到 1ms 以内。
+// 只按内容取样、不看 mtime，所以把 PVF 复制到别处也能接着用缓存。
+int hash_file_fp(const char *path, char out[33]) {
     out[0] = 0;
     HANDLE h = open_w(path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) return 0;
     LARGE_INTEGER sz;
-    GetFileSizeEx(h, &sz);
-    u64 total = (u64)sz.QuadPart, done = 0;
+    if (!GetFileSizeEx(h, &sz)) { CloseHandle(h); return 0; }
+    u64 total = (u64)sz.QuadPart;
     Md5 m;
     u8 raw[16];
-    u8 *buf = (u8 *)xalloc(1 << 20);
     md5_init(&m);
-    for (;;) {
+    md5_update(&m, &total, 8);
+    u8 *buf = (u8 *)xalloc(FP_WIN);
+    if (buf) {
         DWORD got = 0;
-        if (!ReadFile(h, buf, 1 << 20, &got, NULL) || !got) break;
-        md5_update(&m, buf, got);
-        done += got;
-        if (progress && total) progress((int)(done * 100 / total));
+        if (ReadFile(h, buf, FP_WIN, &got, NULL) && got) md5_update(&m, buf, got);
+        if (total > FP_WIN) {                 // 尾部：小文件会跟头部重叠，跳过
+            LARGE_INTEGER off;
+            off.QuadPart = (i64)(total - FP_WIN);
+            got = 0;
+            if (SetFilePointerEx(h, off, NULL, FILE_BEGIN) && ReadFile(h, buf, FP_WIN, &got, NULL) && got)
+                md5_update(&m, buf, got);
+        }
+        free(buf);
     }
-    free(buf);
     CloseHandle(h);
     md5_final(&m, raw);
     static const char *hd = "0123456789abcdef";
     for (int i = 0; i < 16; i++) { out[i * 2] = hd[raw[i] >> 4]; out[i * 2 + 1] = hd[raw[i] & 15]; }
     out[32] = 0;
+    return 1;
 }
 
 // ---------------- SHA1 ----------------

@@ -606,29 +606,8 @@ static void do_layout(void) {
     ui_add(&r, g_kw, ui_scale(110));
     ui_add(&r, g_kwgo, ui_scale(52));
     ui_add(&r, g_kwclr, ui_scale(48));
-    // PVF 段整体右移到页签「物品」的正上方：起点 = 页签左边界 + 页签文本内边距。
-    // 原来是顺着搜索段往后排的，搜索框一改宽度它就跟着漂，和下面的页签永远对不齐。
-    // 窗口太窄时搜索段可能已经越过这条线，那就保持原位（不重叠优先于对齐）。
-    int pvf_x = pad + leftw + pad + ui_scale(6);
-    if (r.x < pvf_x) r.x = pvf_x;
-    // 目录框两个并列：PVF 与贴图包挤同一行，各自缩短一些，省下的高度留给页签。
-    // PVF 是主用项，剩下的宽度按 6:4 分；中间空一段当分组间隔（不加竖线，
-    // 标签本身就是分隔）。窗口拉窄时两个框一起缩，不顶出右边界。
-    int lp = ui_scale(30), bp = ui_scale(64), li = ui_scale(30), bi = ui_scale(60);
-    int sp = ui_scale(14);
-    int avail = (w - pad) - r.x;
-    int editw = avail - lp - bp - li - bi - sp - gap * 2;
-    if (editw < ui_scale(150)) editw = ui_scale(150);
-    int e1 = editw * 6 / 10, e2 = editw - e1;
-    ui_add(&r, g_lpvf, lp);
-    ui_add(&r, g_pvf, e1);
-    ui_add(&r, g_pvfbtn, bp);
-    ui_gap(&r, sp);
-    ui_add(&r, g_limg, li);
-    ui_add(&r, g_img, e2);
-    ui_add(&r, g_imgbtn, bi);
-
-    // 页签区
+    // 页签区。先落位、再量内容区（TCM_ADJUSTRECT）—— 上面那行要和「页签里列表的右端」
+    // 对齐，得先知道内容区右边界；而 ADJUSTRECT 只有在页签已有真实尺寸时才量得准。
     int top = y + rowh + gap + ui_scale(6);   // 和上面那行留一口气，页签不贴控件
     int tabx = pad + leftw + pad;
     int tabw = w - tabx - pad;
@@ -637,16 +616,40 @@ static void do_layout(void) {
     if (tabh < ui_scale(120)) tabh = ui_scale(120);
     ui_place(g_tab, tabx, top, tabw, tabh);
 
-    left_layout(pad, top, leftw, tabh);
+    RECT tr, dr;
+    GetWindowRect(g_tab, &tr);
+    MapWindowPoints(NULL, g_main, (POINT *)&tr, 2);
+    dr = tr;
+    SendMessageW(g_tab, TCM_ADJUSTRECT, FALSE, (LPARAM)&dr);
+    // 页面容器再往里让一个页内边距，就是下方列表的右边界 —— 这一行排到它为止
+    int right = dr.right - ui_scale(6);
 
-    // 当前页放到页签内容区
+    // 两组「标签 + 目录框 + 按钮」并列，两组的框等长、按钮也等长。
+    // 宽度按「右边界 - 起点」反推，不再手工预算间隔：之前少算了两个 gap，
+    // 最后一个按钮被顶出客户区、右边被裁掉一截。
+    // 窗口太窄时搜索段可能已经越过这条线，那就保持原位（不重叠优先于对齐）。
+    int pvf_x = tabx + ui_scale(6);
+    if (r.x < pvf_x) r.x = pvf_x;
+    int lb = ui_scale(30);
+    int bw = ui_text_w("选择 PVF");                  // 按钮取两条文案里更宽的那个，
+    int tw = ui_text_w("ImagePacks2");               // 字号调大也不会把字截断
+    if (tw > bw) bw = tw;
+    bw += ui_scale(22);
+    int sp = ui_scale(14);                           // 两组之间的分组间隔（不加竖线，标签本身就是分隔）
+    int ngap = 5;                                    // 6 个控件排下来是 5 个间隙
+    int editw = (right - r.x - lb * 2 - bw * 2 - sp - gap * ngap) / 2;
+    if (editw < ui_scale(80)) editw = ui_scale(80);
+    ui_add(&r, g_lpvf, lb);
+    ui_add(&r, g_pvf, editw);
+    ui_add(&r, g_pvfbtn, bw);
+    ui_gap(&r, sp);
+    ui_add(&r, g_limg, lb);
+    ui_add(&r, g_img, editw);
+    ui_add(&r, g_imgbtn, bw);
+
+    // 当前页放到页签内容区（dr 上面已经量好，这里只做防越界的收口）
     int pi = ui_page_cur();
     if (pi >= 0 && g_pages[pi].wnd) {
-        RECT tr, dr;
-        GetWindowRect(g_tab, &tr);
-        MapWindowPoints(NULL, g_main, (POINT *)&tr, 2);
-        dr = tr;
-        SendMessageW(g_tab, TCM_ADJUSTRECT, FALSE, (LPARAM)&dr);
         // 双保险：页签区无论算出多大，页面容器都不许压到状态栏上
         int maxb = status_top - ui_scale(2);
         if (dr.bottom > maxb) dr.bottom = maxb;
@@ -748,9 +751,10 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             g_pvfbtn = ui_button(h, "选择 PVF", IDC_PVFS);
             g_limg = ui_label(h, "贴图", 0);
             g_img = ui_edit(h, g.cfg.img_dir, IDC_IMGB, 1);
-            g_imgbtn = ui_button(h, "选贴图包", IDC_IMGS);
+            g_imgbtn = ui_button(h, "ImagePacks2", IDC_IMGS);
             ui_tip(h, g_img, "ImagePacks2 目录：编号悬浮卡上的物品图标从这里取。"
-                   "通常选完 PVF 会自动填好；没填上就手动指到客户端的 ImagePacks2 目录");
+                   "通常选完 PVF 会自动填好；没填上就点右边的按钮手动指到客户端的 ImagePacks2 目录。"
+                   "留空不影响使用，只是卡片上没有图标");
 
             card_build(h);
 

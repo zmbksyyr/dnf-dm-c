@@ -134,7 +134,7 @@ void art_prune(const char *dir, const char *prefix, int keep);
 // ---------------- 摘要 ----------------
 u32  crc32_buf(const void *d, size_t n);                  // zlib 多项式，初值/异或均 0xFFFFFFFF
 void hash_md5(const void *d, size_t n, char out[33]);
-void hash_md5_file(const char *path, char out[33], void (*progress)(int));
+int  hash_file_fp(const char *path, char out[33]);   // 长度+头尾各 64KB 的 md5：判断大文件换没换，比全量快三个数量级
 void hash_sha1(const void *d, size_t n, u8 out[20]);
 
 // ---------------- 其它 ----------------

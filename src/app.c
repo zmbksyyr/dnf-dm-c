@@ -612,19 +612,33 @@ void app_load_npk(const char *dir) {
     g.npk_ok = 0;                 // 扫描期间悬浮卡不放图标，避免和重建打架
     g.npk_pct = 0;
     snprintf(g.npk_stage, sizeof(g.npk_stage), "准备中");
+    // 目录不存在 / 里面没有 npk 都不是错误：工具照常能用，只是卡片上没有图标。
+    // 但仍然要说清楚一声，不然「为什么不显示图标」很难自己查出来。
+    if (!dir_exists(dir)) {
+        app_log("贴图包：目录不存在 —— %s", dir);
+        app_status("贴图包目录不存在，编号悬浮卡不显示图标");
+        return;
+    }
     app_status("正在扫描贴图包…");
     job_start(&g.job_npk, w_npk, NULL);
 }
 
 void app_npk_tick(void) {
     Err err;
-    if (job_poll(&g.job_npk, err)) {
-        g.npk_ok = 1;
-        if (g.npk.nents)
-            app_log("贴图包索引就绪 · %d 个包 %d 张图", g.npk.nfiles, g.npk.nents);
-        else
-            app_status("贴图包目录里没有可用的 npk：%s", g.cfg.img_dir);
+    if (!job_poll(&g.job_npk, err)) return;
+    g.npk_ok = 1;
+    if (g.npk.nents) {
+        app_log("贴图包索引就绪 · %d 个包 %d 张图", g.npk.nfiles, g.npk.nents);
+        return;
     }
+    // 目录里一个能用的 npk 都没有。程序照常跑，悬浮卡只是没有图标。
+    // 提示同时进日志页：状态栏那行会被后面任何一条操作冲掉，日志里能一直翻到。
+    if (g.npk.nfiles)
+        app_log("贴图包：目录里有 %d 个 npk，但没有一个能读出贴图 —— %s", g.npk.nfiles,
+                g.cfg.img_dir);
+    else
+        app_log("贴图包：目录里没有 npk —— %s", g.cfg.img_dir);
+    app_status("贴图包不可用，编号悬浮卡不显示图标");
 }
 
 // 悬浮卡：详情文本（多行 UTF-8）+ 图标

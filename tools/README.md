@@ -72,13 +72,17 @@ python tools\v_gmwrite.py
 失焦提交（`blur`）、投递点击（`press` / `click_at`）、数列表行数（`rows`）、
 断言（`check`）、等条件（`wait_until`），外加截图、切页签、等主窗口、`db()` 连库。
 
-## 写新脚本的三条红线
+## 写新脚本的四条红线
 
 都是踩出来的，违反一条症状都很难查：
 
 1. **不要给跨进程消息传指针**。系统只对 `WM_GETTEXT / WM_SETTEXT / WM_COPYDATA` 等少数消息做内核封送，控件自定义消息（`WM_USER+n`）没有——指针原样进目标进程的窗口过程。`LVM_GETITEMTEXT` 会直接把被测程序打崩；`SB_GETTEXTW`（读状态栏）更阴：不崩，但会把对方的堆写花，之后 `GetWindowRect` 莫名失败、复选框时对时错。**读界面状态用 `WM_GETTEXT`（Edit/Static/ListBox）或读日志，别读状态栏。**
 2. **`BM_GETCHECK` 是 0x00F0**。0x00F2 是 `BM_GETSTATE`，带焦点位（0x8），复选框一有焦点返回值就是 9，`== 1` 永远不成立——症状是"勾选态和实际反着来"。
 3. **最小化恢复是异步的**。`ShowWindow(SW_RESTORE)` 之后立刻取控件矩形/句柄不可靠，至少等一秒。
+4. **采样列表行坐标别按固定偏移猜**。列头是个独立的子窗口（SysHeader32），
+   行区要从它的底边往下算（`LVM_GETHEADER` + `GetWindowRect`）。直接写
+   `top + 24` 之类的估算会把采样点落进列头里，而列头只弹「列表说明」、
+   不弹编号卡片 —— 看起来就像悬停没反应，其实是测错了位置。
 
 ## 几个约定
 

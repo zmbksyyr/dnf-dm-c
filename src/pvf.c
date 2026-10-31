@@ -2,7 +2,7 @@
 #include "pvf.h"
 
 #define XOR_KEY 0x81A79011u
-#define CACHE_MAGIC "PVFC5\0"   // 5：物品表带分类、多一张宠物表；旧缓存直接作废重建
+#define CACHE_MAGIC "PVFC6\0"   // 6：缓存校验从全量 md5 换成采样指纹；旧缓存直接作废重建
 #define CACHE_MAGIC_LEN 6
 
 // ---------------- 解密 ----------------
@@ -708,7 +708,7 @@ static void build_dicts(Pvf *p, PvfProg prog) {
 static void cache_path_of(const Pvf *p, char *out, int cap) {
     char dir[MAX_PATH];
     art_dir("cache", dir, sizeof(dir));
-    snprintf(out, (size_t)cap, "%s\\pvf-%.8s.cache", dir, p->md5);
+    snprintf(out, (size_t)cap, "%s\\pvf-%.8s.cache", dir, p->fp);
 }
 
 static void w_str(Buf *b, const char *s, int n) {
@@ -740,7 +740,7 @@ static void save_cache(Pvf *p) {
     buf_put32(&b, p->data_start);
     buf_put32(&b, p->str_cp);
     w_str(&b, p->uuid, (int)strlen(p->uuid));
-    w_str(&b, p->md5, 32);
+    w_str(&b, p->fp, 32);
     buf_put32(&b, (u32)p->nleaf);
     for (int i = 0; i < p->nleaf; i++) {
         Leaf *l = &p->leafs[i];
@@ -841,7 +841,7 @@ static int load_cache(Pvf *p) {
     const char *u = r_bytes(&r, &len);
     snprintf(p->uuid, sizeof(p->uuid), "%.*s", len, u);
     const char *m = r_bytes(&r, &len);
-    if (!r.ok || len != 32 || memcmp(m, p->md5, 32) != 0) { buf_free(&raw); return 0; }
+    if (!r.ok || len != 32 || memcmp(m, p->fp, 32) != 0) { buf_free(&raw); return 0; }
 
     int nl = (int)r_u32(&r);
     if (!r.ok || nl <= 0 || nl > 4000000) { buf_free(&raw); return 0; }
@@ -892,12 +892,12 @@ static int load_cache(Pvf *p) {
 
 // ---------------- 对外 ----------------
 static void reset_keep_id(Pvf *p) {
-    char path[MAX_PATH], md5[33];
+    char path[MAX_PATH], fp[33];
     snprintf(path, sizeof(path), "%s", p->path);
-    snprintf(md5, sizeof(md5), "%s", p->md5);
+    snprintf(fp, sizeof(fp), "%s", p->fp);
     pvf_close(p);
     snprintf(p->path, sizeof(p->path), "%s", path);
-    snprintf(p->md5, sizeof(p->md5), "%s", md5);
+    snprintf(p->fp, sizeof(p->fp), "%s", fp);
 }
 
 int pvf_open(Pvf *p, const char *path, PvfProg prog) {
@@ -905,11 +905,11 @@ int pvf_open(Pvf *p, const char *path, PvfProg prog) {
     pvf_close(p);
     snprintf(p->path, sizeof(p->path), "%s", path);
     if (prog.pct) *prog.pct = 2;
-    if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "计算校验值");
+    if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "比对文件指纹");
 
     if (!file_exists(path)) return 0;
-    hash_md5_file(path, p->md5, NULL);
-    if (!p->md5[0]) return 0;
+    // 指纹只取长度 + 头尾各 64KB：全量 md5 要半秒多，而判断「包换没换」用不着那么严
+    if (!hash_file_fp(path, p->fp)) return 0;
 
     if (load_cache(p)) {
         p->opened = 1;
@@ -956,7 +956,7 @@ void pvf_close(Pvf *p) {
     p->nexp = 0;
     p->size = 0;
     p->opened = 0;
-    p->md5[0] = 0;
+    p->fp[0] = 0;
     p->path[0] = 0;
 }
 
@@ -1202,8 +1202,7 @@ int pvf_item_detail(const Pvf *p, u32 id, Str *out) {
     }
     stk_seg_text((Pvf *)p, &c, "[explain]", &v);
     if (v.n) str_catf(out, "%s说明：%s", out->n ? " · " : "", str_c(&v));
-    if (out->n) str_catc(out, '\n');
-    str_catf(out, "文件：%s", path);
+    // 末尾不再附 PVF 内部路径：那是给解析用的，对看卡片的人没用，还占一行
     str_free(&v);
     buf_free(&c);
     return 1;

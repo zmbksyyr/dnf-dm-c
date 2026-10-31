@@ -507,8 +507,9 @@ HWND ui_combo(HWND parent, int id, int droplist) {
 HWND ui_list(HWND parent, int id) {
     HWND lv = ui_make(parent, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_TABSTOP,
                       WS_EX_CLIENTEDGE, id);
-    ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES |
-                                              LVS_EX_LABELTIP);
+    // 不开 LVS_EX_LABELTIP：列宽不够时它会自己弹一条气泡，正好压在编号悬浮卡上。
+    // 列表要看说明，把鼠标移到列头那一条上即可。
+    ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
     return lv;
 }
 
@@ -699,8 +700,54 @@ static HWND tip_of(HWND host) {
     return t;
 }
 
+// 列表的说明提示：整块悬停都弹的话，会和「编号悬浮卡」在行上撞成一团。
+// 改成只在鼠标停在列头（栏目顶部那条）上时才显示，跟按行弹的卡片各占一块，互不遮挡。
+#define LVTIP_MAX 24
+typedef struct {
+    HWND host, tip, lv;
+    char text[512];
+} LvTip;
+static LvTip g_lvt[LVTIP_MAX];
+static int   g_nlvt;
+static int   g_lvt_on = -1;      // 当前正显示的那一条（下标，-1 = 没有）
+
+static int is_listview(HWND h) {
+    WCHAR c[32];
+    if (!h || !GetClassNameW(h, c, COUNT_OF(c))) return 0;
+    for (int i = 0; c[i]; i++)
+        if (c[i] >= 'A' && c[i] <= 'Z') c[i] = (WCHAR)(c[i] + 32);
+    return wcscmp(c, WC_LISTVIEWW) == 0;
+}
+
 void ui_tip(HWND host, HWND ctl, const char *text) {
     if (!host || !ctl || !text || !text[0]) return;
+    if (is_listview(ctl)) {
+        for (int i = 0; i < g_nlvt; i++)          // 同一个列表重复挂：以新文案为准
+            if (g_lvt[i].lv == ctl) {
+                snprintf(g_lvt[i].text, sizeof(g_lvt[i].text), "%s", text);
+                return;
+            }
+        if (g_nlvt == LVTIP_MAX) return;
+        HWND t = tip_of(host);
+        if (!t) return;
+        LvTip *e = &g_lvt[g_nlvt];
+        e->host = host;
+        e->tip = t;
+        e->lv = ctl;
+        snprintf(e->text, sizeof(e->text), "%s", text);
+        // 只登记工具，不挂 TTF_SUBCLASS —— 显示时机完全由 ui_tip_tick 决定。
+        // 列表销毁后槽位由 tick 回收。
+        TOOLINFOW ti;
+        memset(&ti, 0, sizeof(ti));
+        ti.cbSize = sizeof(ti);
+        ti.hwnd = host;
+        ti.uId = (UINT_PTR)ctl;
+        ti.uFlags = TTF_IDISHWND;
+        ti.lpszText = L"";
+        SendMessageW(t, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+        g_nlvt++;
+        return;
+    }
     HWND t = tip_of(host);
     if (!t) return;
     WCHAR w[512];
@@ -714,6 +761,63 @@ void ui_tip(HWND host, HWND ctl, const char *text) {
     ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
     ti.lpszText = w;
     SendMessageW(t, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+}
+
+// 主窗口定时器里调：决定列表说明气泡什么时候出来。
+void ui_tip_tick(void) {
+    for (int i = g_nlvt - 1; i >= 0; i--)        // 回收已销毁列表的槽位
+        if (!IsWindow(g_lvt[i].lv)) {
+            memmove(&g_lvt[i], &g_lvt[i + 1], sizeof(LvTip) * (size_t)(g_nlvt - i - 1));
+            g_nlvt--;
+        }
+    if (!g_nlvt) return;
+
+    POINT pt;
+    GetCursorPos(&pt);
+    HWND top = WindowFromPoint(pt);     // 光标下真正最上层的窗口：被弹窗盖住的列表不算
+    int hit = -1;
+    for (int i = 0; i < g_nlvt && hit < 0; i++) {
+        // 所属顶层窗口被禁用的（正被模态弹窗盖着）就别接了：那种窗口用户点不到，
+        // 说明也无从谈起，还会让卡片停在旧内容上。
+        if (!IsWindowEnabled(GetAncestor(g_lvt[i].lv, GA_ROOT))) continue;
+        // 列头是个独立的子窗口（SysHeader32），比列表顶部高出一条。
+        // 命中测试直接按它的矩形判，不用去猜表头有多高。
+        HWND hd = (HWND)SendMessageW(g_lvt[i].lv, LVM_GETHEADER, 0, 0);
+        RECT hr;
+        if (hd && GetWindowRect(hd, &hr)) {
+            if (pt.x >= hr.left && pt.x < hr.right && pt.y >= hr.top && pt.y < hr.bottom) hit = i;
+        } else {
+            RECT lr;                        // 没有列头：退回列表顶部一条
+            if (GetWindowRect(g_lvt[i].lv, &lr) && pt.x >= lr.left && pt.x < lr.right &&
+                pt.y >= lr.top && pt.y < lr.top + ui_scale(20))
+                hit = i;
+        }
+    }
+
+    if (hit >= 0) {
+        LvTip *e = &g_lvt[hit];
+        TOOLINFOW ti;
+        memset(&ti, 0, sizeof(ti));
+        ti.cbSize = sizeof(ti);
+        ti.hwnd = e->host;
+        ti.uId = (UINT_PTR)e->lv;
+        WCHAR wt[512];
+        utf16(e->text, wt, COUNT_OF(wt));
+        ti.lpszText = wt;
+        SendMessageW(e->tip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+        SendMessageW(e->tip, TTM_TRACKACTIVATE, (WPARAM)TRUE, (LPARAM)&ti);
+        SendMessageW(e->tip, TTM_TRACKPOSITION, 0,
+                    (LPARAM)(DWORD)MAKELONG(pt.x + ui_scale(16), pt.y + ui_scale(20)));
+    } else if (g_lvt_on >= 0 && g_lvt_on < g_nlvt) {
+        LvTip *e = &g_lvt[g_lvt_on];
+        TOOLINFOW ti;
+        memset(&ti, 0, sizeof(ti));
+        ti.cbSize = sizeof(ti);
+        ti.hwnd = e->host;
+        ti.uId = (UINT_PTR)e->lv;
+        SendMessageW(e->tip, TTM_TRACKACTIVATE, (WPARAM)FALSE, (LPARAM)&ti);
+    }
+    g_lvt_on = hit;
 }
 
 void ui_place(HWND w, int x, int y, int cw, int ch) {
@@ -1266,6 +1370,7 @@ static void tip_show(u32 id) {
 }
 
 void ui_idtip_tick(void) {
+    ui_tip_tick();          // 列表说明气泡（只在列头上弹）
     // 回收已销毁列表的绑定（页面对话框是动态建删的）
     for (int i = g_nbinds - 1; i >= 0; i--)
         if (!IsWindow(g_binds[i].lv)) {
@@ -1280,18 +1385,22 @@ void ui_idtip_tick(void) {
 
     POINT pt;
     GetCursorPos(&pt);
+    // 光标下真正最上层的窗口：只看它，不再按绑定顺序挑第一个「可见且包含光标」的。
+    // 否则弹窗盖住主窗口时（EnableWindow 不改 WS_VISIBLE，后面列表照样"可见"，
+    // SendMessage 也不受禁用影响）会命中后面那个列表，卡片显示成别处的物品。
+    HWND top = WindowFromPoint(pt);
     HWND hit = NULL;
     int row = -1, col = 0;
-    for (int i = 0; i < g_nbinds && !hit; i++) {
-        // 只有可见的列表才接（页签没切过去时窗口是隐藏的）
-        if (!IsWindowVisible(g_binds[i].lv)) continue;
-        RECT rc;
-        GetWindowRect(g_binds[i].lv, &rc);
-        if (pt.x < rc.left || pt.x >= rc.right || pt.y < rc.top || pt.y >= rc.bottom) continue;
+    for (int i = 0; i < g_nbinds; i++) {
+        // 顶层窗口被禁用的（正被模态弹窗盖着）不接：那种窗口此刻不可交互，
+        // 卡片留在旧编号上就是「显示后面的物品」。
+        if (!IsWindowEnabled(GetAncestor(g_binds[i].lv, GA_ROOT))) continue;
+        if (g_binds[i].lv != top) continue;
         LVHITTESTINFO ht;
         memset(&ht, 0, sizeof(ht));
-        ScreenToClient(g_binds[i].lv, &pt);
-        ht.pt = pt;
+        POINT c = pt;
+        ScreenToClient(g_binds[i].lv, &c);
+        ht.pt = c;
         SendMessageW(g_binds[i].lv, LVM_SUBITEMHITTEST, 0, (LPARAM)&ht);
         // 行上任意一列都算：编号从绑定的那一列取，别的列悬停也能看到这张卡
         if (ht.iItem >= 0 && (ht.flags & LVHT_ONITEM)) {

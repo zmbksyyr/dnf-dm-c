@@ -39,7 +39,7 @@ typedef struct {
 
 typedef struct {
     char  path[MAX_PATH];
-    char  md5[33];
+    char  fp[33];        // 内容指纹（长度 + 头尾各 64KB 的 md5），只用于缓存校验
     char  uuid[64];
     u32   version, tree_len, tree_crc, num_files, data_start;
 
