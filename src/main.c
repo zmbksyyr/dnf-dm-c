@@ -344,6 +344,13 @@ static int grab_probe_main(void) {
 static u32 s_chars_ver, s_data_ver, s_act_ver, s_grab_ver;
 static int s_ready = -1, s_sel = -2, s_pvf = -1;
 
+// 「控件的启用状态可能要重算」的脏标记。
+// 以前是每个变更点各自调 ui_pages_lock()，结果加载 PVF 那条漏了 —— 查询页在
+// PVF 加载完还一直灰着，按钮点不动。改成变更点只置位、tick 统一重算一次：
+// 以后再加状态量（比如「已选 PVF」之外的东西）只置位就行，不会再漏。
+static int s_lock_dirty;
+#define LOCK_REDO() (s_lock_dirty = 1)
+
 // ---- 取码热键（轮询，避免 RegisterHotKey 抢走 Tab 等按键）----
 static int hotkey_vk(const char *name) {
     if (!name || !name[0]) return 0;
@@ -481,7 +488,7 @@ static void tick(void) {
         chars_fill();
         // 在线状态也进 ready：GM 页的表单在线时要置灰并把条件写进组框标题，
         // 不重新 lock 一次，上下线切换界面不会跟着变
-        ui_pages_lock();
+        LOCK_REDO();
     }
     if (g.sel != s_sel) {
         s_sel = g.sel;
@@ -497,11 +504,18 @@ static void tick(void) {
     if (g.pvf_ok != s_pvf) {
         s_pvf = g.pvf_ok;
         if (g.pvf_ok) ui_pages_reload_all();
+        LOCK_REDO();   // 查询页、发放页的「需要 PVF」按钮就靠这一下解锁
     }
     if (g.act_ver != s_act_ver) {
         s_act_ver = g.act_ver;
         ui_pages_reload_all();
         buttons_refresh();
+        LOCK_REDO();
+    }
+    // 所有「状态可能变了」的判断都走完了，这里统一重算一次
+    if (s_lock_dirty) {
+        s_lock_dirty = 0;
+        ui_pages_lock();
     }
     if (g.grab_ver != s_grab_ver) {
         s_grab_ver = g.grab_ver;
