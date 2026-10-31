@@ -514,9 +514,15 @@ void page_item_create(Page *p) {
 }
 
 // ================================================================ 查询页
-enum { Q_KW = PAGE_ID(PAGE_QUERY, 1), Q_LIST, Q_INFO, Q_GO, Q_ADD };
+enum {
+    Q_KW = PAGE_ID(PAGE_QUERY, 1), Q_LIST, Q_INFO, Q_GO, Q_ADD,
+    Q_MAT, Q_EQU, Q_AVA          // 加载常用材料 / 装备 / 时装
+};
 
 static HWND q_kw, q_list, q_info;
+
+// 实现在发放页那一段（要读内置编号表、查 PVF 索引、往队列里灌）
+static void common_load(const unsigned char *data, size_t len, u8 type, const char *what);
 
 static void query_reload(Page *p) {
     (void)p;
@@ -573,9 +579,16 @@ static void query_add(void) {
 static LRESULT query_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     (void)p;
     if (m == WM_COMMAND) {
-        if (LOWORD(wp) == Q_GO) { query_do(); return 0; }
-        if (LOWORD(wp) == Q_ADD) { query_add(); return 0; }
-        if (LOWORD(wp) == Q_KW && HIWORD(wp) == EN_CHANGE) return 0;
+        int id = LOWORD(wp);
+        if (id == Q_GO) { query_do(); return 0; }
+        if (id == Q_ADD) { query_add(); return 0; }
+        // 三个常用物品按钮：一次往发放队列里灌几十到几百条，灌完不用跳页
+        if (id == Q_MAT) { common_load(kCommonMat, sizeof(kCommonMat), IT_STACK, "常用材料"); return 0; }
+        if (id == Q_EQU) { common_load(kCommonEquip, sizeof(kCommonEquip), IT_EQUIP, "常用装备"); return 0; }
+        // 时装表里 2600000/10000000 段那批，PVF 里是「装扮礼包」不是可穿部位，
+        // 按可堆叠发出去，玩家自己开 —— 按时装部位发会得到一堆空槽。
+        if (id == Q_AVA) { common_load(kCommonAvatar, sizeof(kCommonAvatar), IT_STACK, "常用时装"); return 0; }
+        if (id == Q_KW && HIWORD(wp) == EN_CHANGE) return 0;
     }
     if (m == WM_NOTIFY) {
         LPNMHDR nh = (LPNMHDR)lp;
@@ -590,7 +603,7 @@ static LRESULT query_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
 static void query_layout(Page *p, int w, int h) {
     (void)w;
     (void)h;
-    int pad = ui_scale(6), rowh = ui_scale(23);
+    int pad = ui_scale(6), rowh = ui_scale(23), g = ui_scale(6);
     URow r;
     ui_row(&r, p->wnd, pad, pad, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "物品名"), ui_scale(44));
@@ -598,7 +611,18 @@ static void query_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, Q_GO, "搜索"), ui_scale(60));
     ui_add(&r, ui_btn_at(p->wnd, Q_ADD, "加入发放"), ui_scale(80));
     ui_add(&r, q_info, -1);
-    ui_fill_rest(p->wnd, q_list, pad + rowh + ui_scale(6));
+
+    // 第二行：三个批量灌队列的按钮。放在查询页是因为「先查后发」是这条链路的
+    // 起点 —— 查不到的东西不会有事，灌进去的都是 PVF 里真有的。
+    int y = pad + rowh + g;
+    ui_row(&r, p->wnd, pad, y, rowh);
+    ui_add(&r, ui_btn_at(p->wnd, Q_MAT, "加载常用材料"), ui_scale(100));
+    ui_add(&r, ui_btn_at(p->wnd, Q_EQU, "加载常用装备"), ui_scale(100));
+    ui_add(&r, ui_btn_at(p->wnd, Q_AVA, "加载常用时装"), ui_scale(100));
+    ui_gap(&r, ui_scale(8));   // 说明文字和按钮挤一起会看成按钮的一部分
+    ui_add(&r, ui_lbl_at(p->wnd, "整批加入发放队列，当前 PVF 里没有的自动跳过"), -1);
+
+    ui_fill_rest(p->wnd, q_list, y + rowh + g);
 }
 
 static void query_lock(Page *p) {
@@ -606,6 +630,12 @@ static void query_lock(Page *p) {
     ui_enable(q_kw, g.pvf_ok);
     ui_enable(GetDlgItem(p->wnd, Q_GO), g.pvf_ok);
     ui_enable(GetDlgItem(p->wnd, Q_ADD), g.pvf_ok && g.char_ok);
+    // 常用物品表里只有编号：没有 PVF 索引既查不到名字，也判断不了在不在，
+    // 所以除了 PVF 之外还得选好角色（队列是攒给这个角色的）。
+    int on = g.pvf_ok && g.char_ok;
+    ui_enable(GetDlgItem(p->wnd, Q_MAT), on);
+    ui_enable(GetDlgItem(p->wnd, Q_EQU), on);
+    ui_enable(GetDlgItem(p->wnd, Q_AVA), on);
 }
 
 static void query_build(Page *p, HWND parent) {
@@ -615,6 +645,10 @@ static void query_build(Page *p, HWND parent) {
     ui_cols(q_list, (const char *const[]){"编号", "名称", "说明"}, (const int[]){80, 240, 160}, 3);
     ui_button(parent, "搜索", Q_GO);
     ui_button(parent, "加入发放", Q_ADD);
+    // 创建顺序就是 Tab 顺序，所以紧跟在「加入发放」后面
+    ui_button(parent, "加载常用材料", Q_MAT);
+    ui_button(parent, "加载常用装备", Q_EQU);
+    ui_button(parent, "加载常用时装", Q_AVA);
 }
 
 void page_query_create(Page *p) {
@@ -629,8 +663,7 @@ void page_query_create(Page *p) {
 enum {
     G_ID = PAGE_ID(PAGE_GRANT, 1), G_NUM, G_TYPE, G_ENH, G_INC, G_INCV, G_FORGE,
     G_SEAL, G_SEALC, G_DUR, G_ADD, G_LIST, G_DEL, G_CLR, G_MAIL, G_INV, G_INFO,
-    G_EXPORT, G_IMPORT, G_GAUTO,
-    G_MAT, G_EQU, G_AVA          // 加载常用材料 / 装备 / 时装
+    G_EXPORT, G_IMPORT, G_GAUTO
 };
 
 static HWND g_id, g_num, g_type, g_enh, g_inc, g_incv, g_forge, g_seal, g_sealc, g_dur, g_list, g_info;
@@ -1041,11 +1074,6 @@ static LRESULT grant_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         }
         switch (id) {
             case G_ADD: grant_add_manual(); return 0;
-            case G_MAT: common_load(kCommonMat, sizeof(kCommonMat), IT_STACK, "常用材料"); return 0;
-            case G_EQU: common_load(kCommonEquip, sizeof(kCommonEquip), IT_EQUIP, "常用装备"); return 0;
-            // 时装表里 2600000/10000000 段那批，PVF 里是「装扮礼包」不是可穿部位，
-            // 按可堆叠发出去，玩家自己开 —— 按时装部位发会得到一堆空槽。
-            case G_AVA: common_load(kCommonAvatar, sizeof(kCommonAvatar), IT_STACK, "常用时装"); return 0;
             case G_TYPE:
                 if (code == CBN_SELCHANGE) grant_sync();
                 return 0;
@@ -1139,11 +1167,6 @@ static void grant_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, G_CLR, "清空队列"), ui_scale(84));
     ui_add(&r, ui_btn_at(p->wnd, G_EXPORT, "导出"), ui_scale(56));
     ui_add(&r, ui_btn_at(p->wnd, G_IMPORT, "导入"), ui_scale(56));
-    // 和上面「导入/导出」之间留个空档：前者是整张队列的进出，后者是一次灌一批
-    ui_gap(&r, ui_scale(16));
-    ui_add(&r, ui_btn_at(p->wnd, G_MAT, "加载常用材料"), ui_scale(100));
-    ui_add(&r, ui_btn_at(p->wnd, G_EQU, "加载常用装备"), ui_scale(100));
-    ui_add(&r, ui_btn_at(p->wnd, G_AVA, "加载常用时装"), ui_scale(100));
 
     int listtop = y + rowh + g + rowh + g;   // 按钮行下面再留一行说明
     ui_place(g_hint, pad, y + rowh + g, rc.right - pad * 2, rowh);
@@ -1161,12 +1184,6 @@ static void grant_lock(Page *p) {
     int ids[] = {G_ID, G_NUM, G_TYPE, G_ENH, G_INC, G_INCV, G_FORGE, G_SEAL, G_SEALC, G_DUR,
                  G_ADD, G_DEL, G_CLR, G_MAIL, G_INV, G_EXPORT, G_IMPORT};
     for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
-    // 三个常用物品按钮还多一个条件：已加载 PVF。表里只有编号，没有 PVF 索引
-    // 既查不出名字、也判断不了这件东西在不在。
-    int pv = on && g.pvf_ok;
-    ui_enable(GetDlgItem(p->wnd, G_MAT), pv);
-    ui_enable(GetDlgItem(p->wnd, G_EQU), pv);
-    ui_enable(GetDlgItem(p->wnd, G_AVA), pv);
     if (on) grant_sync();
 }
 
@@ -1195,10 +1212,6 @@ static void grant_build(Page *p, HWND parent) {
     // 创建顺序就是 Tab 顺序：这一行照视觉排（…清空队列→导出→导入）
     ui_button(parent, "导出", G_EXPORT);
     ui_button(parent, "导入", G_IMPORT);
-    // 三个常用物品按钮：点了会一次往队列里灌几十到几百条
-    ui_button(parent, "加载常用材料", G_MAT);
-    ui_button(parent, "加载常用装备", G_EQU);
-    ui_button(parent, "加载常用时装", G_AVA);
     // 列表建在按钮行后面；底部那一对（邮件发放/直接入包）建在最后，视觉上也在最下面
     g_list = ui_list(parent, G_LIST);
     ui_cols(g_list, (const char *const[]){"物品名", "编号", "数量", "强化", "增幅", "锻造", "封装", "耐久"},
