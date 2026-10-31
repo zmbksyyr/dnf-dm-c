@@ -521,6 +521,13 @@ enum {
 
 static HWND q_kw, q_list, q_info;
 
+// 列表行的附带数据：低 32 位是物品编号，高 32 位是「这道工序要几个」。
+// LPARAM 在 x64 上是 64 位，一个字段装得下，不用再挂一张跟行号对齐的并排数组
+// （列表随时会被清空重填，那种数组很容易错位）。
+#define QROW(id, num) ((LPARAM)(((u64)(u32)(num) << 32) | (u32)(id)))
+#define QROW_ID(v)    ((u32)(v))
+#define QROW_NUM(v)   ((u32)(((u64)(v)) >> 32))
+
 // 内置编号表是「排序后差分 + base128 varint」，这里逐条还原成编号
 static u32 varint_rd(const unsigned char **pp) {
     const unsigned char *p = *pp;
@@ -557,8 +564,8 @@ static void common_list(const unsigned char *data, size_t len, const char *what)
         if (!nm || !*nm) { miss++; continue; }   // 这版 PVF 里没有，跳过
         char ids[16];
         fmt(ids, sizeof(ids), "%u", id);
-        const char *cells[3] = {ids, nm, "双击加入发放队列"};
-        ui_row_add(q_list, cells, 3, (LPARAM)id);
+        const char *cells[4] = {ids, nm, "1", "双击加入发放队列"};
+        ui_row_add(q_list, cells, 4, QROW(id, 1));
         hit++;
     }
     ui_batch(q_list, 0);
@@ -568,6 +575,7 @@ static void common_list(const unsigned char *data, size_t len, const char *what)
 
 // 「加载任务材料」：把 PVF 里所有收集类任务要的物品列出来。
 // 数量是「单个任务最多要多少个」—— 同一件材料被几十个任务要，累加没有意义。
+// 这个数量跟着行进队列：任务要 30 个，发放列表里就是 30，不用再手动改一遍。
 static void query_task_mats(void) {
     if (!g.pvf_ok) {
         app_info("还没加载 PVF。\n\n任务材料是从任务文件里读的，得先选好 Script.pvf。");
@@ -584,35 +592,40 @@ static void query_task_mats(void) {
     for (int i = 0; i < n; i++) {
         const char *nm = pvf_item_name(&g.pvf, v[i].id);
         if (!nm || !*nm) continue;      // 任务里引用了但 PVF 没这件东西，跳过
-        char ids[16], note[96];
+        char ids[16], cnt[16], note[64];
         fmt(ids, sizeof(ids), "%u", v[i].id);
-        fmt(note, sizeof(note), "需要 %u 个 · %u 个任务要用", v[i].cnt, v[i].quests);
-        const char *cells[3] = {ids, nm, note};
-        ui_row_add(q_list, cells, 3, (LPARAM)v[i].id);
+        fmt(cnt, sizeof(cnt), "%u", v[i].cnt);
+        fmt(note, sizeof(note), "%u 个任务要用到它", v[i].quests);
+        const char *cells[4] = {ids, nm, cnt, note};
+        ui_row_add(q_list, cells, 4, QROW(v[i].id, v[i].cnt));
         shown++;
     }
     ui_batch(q_list, 0);
     free(v);
-    ui_text(q_info, fmt_new("任务材料 %d 条", shown));
+    ui_text(q_info, fmt_new("任务材料 %d 条 · 数量随行进队列", shown));
     app_status("任务材料：%d 种", shown);
 }
 
-// 「全部加入」：把列表里所有行灌进发放队列，已在队列里的跳过。
+// 「全部加入」：把列表里所有行灌进发放队列，已在队列里的不重复加行、只把数量补大。
 static void query_add_all(void) {
     int n = (int)SendMessageW(q_list, LVM_GETITEMCOUNT, 0, 0);
     if (n <= 0) {
         app_status("列表是空的，先查一批出来");
         return;
     }
-    int add = 0, dup = 0;
+    int add = 0, upd = 0, dup = 0;
     for (int i = 0; i < n; i++) {
-        u32 id = (u32)ui_row_data(q_list, i);
+        LPARAM v = ui_row_data(q_list, i);
+        u32 id = QROW_ID(v);
         if (!id) continue;
-        if (app_grant_add_new(id)) add++;
+        int r = app_grant_add_new(id, QROW_NUM(v));
+        if (r == 1) add++;
+        else if (r == 2) upd++;
         else dup++;
     }
     ui_pages_reload(PAGE_GRANT);
-    app_status("已加入发放队列 %d 项 · 队列里已有 %d 项", add, dup);
+    if (upd) app_status("已加入发放队列 %d 项 · 数量补大 %d 项 · 已有 %d 项", add, upd, dup);
+    else app_status("已加入发放队列 %d 项 · 队列里已有 %d 项", add, dup);
 }
 
 static void query_reload(Page *p) {
@@ -651,8 +664,8 @@ static void query_do(void) {
         if (!match) continue;
         char ids[16];
         fmt(ids, sizeof(ids), "%u", id);
-        const char *cells[3] = {ids, nm, "双击加入发放队列"};
-        ui_row_add(q_list, cells, 3, (LPARAM)id);
+        const char *cells[4] = {ids, nm, "1", "双击加入发放队列"};
+        ui_row_add(q_list, cells, 4, QROW(id, 1));
         hit++;
     }
     ui_batch(q_list, 0);
@@ -662,8 +675,8 @@ static void query_do(void) {
 static void query_add(void) {
     int row = ui_row_sel(q_list);
     if (row < 0) return;
-    u32 id = (u32)ui_row_data(q_list, row);
-    app_grant_add(id);
+    LPARAM v = ui_row_data(q_list, row);
+    app_grant_add(QROW_ID(v), QROW_NUM(v));   // 任务材料带着「需要 30 个」一起进队列
     ui_pages_reload(PAGE_GRANT);
 }
 
@@ -713,7 +726,7 @@ static void query_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, Q_AVA, "加载常用时装"), ui_scale(100));
     ui_add(&r, ui_btn_at(p->wnd, Q_TASK, "加载任务材料"), ui_scale(100));
     ui_gap(&r, ui_scale(8));   // 说明文字和按钮挤一起会看成按钮的一部分
-    ui_add(&r, ui_lbl_at(p->wnd, "列出当前 PVF 里有的，双击某行加入发放队列"), -1);
+    ui_add(&r, ui_lbl_at(p->wnd, "列出当前 PVF 里有的，双击某行加入发放队列（数量列一起带过去）"), -1);
 
     ui_fill_rest(p->wnd, q_list, y + rowh + g);
 }
@@ -735,7 +748,8 @@ static void query_build(Page *p, HWND parent) {
     q_kw = ui_edit(parent, "", Q_KW, 0);
     q_list = ui_list(parent, Q_LIST);
     q_info = ui_label(parent, "未加载 PVF", Q_INFO);
-    ui_cols(q_list, (const char *const[]){"编号", "名称", "说明"}, (const int[]){80, 240, 160}, 3);
+    ui_cols(q_list, (const char *const[]){"编号", "名称", "数量", "说明"},
+            (const int[]){80, 300, 60, 520}, 4);
     ui_button(parent, "搜索", Q_GO);
     ui_button(parent, "加入发放", Q_ADD);
     ui_button(parent, "全部加入", Q_ALL);

@@ -807,35 +807,47 @@ int app_act_idle(void) {
 }
 
 // ---------------- 发放 ----------------
-void app_grant_add(u32 id) {
+// num 是「这次要几个」，0 当 1。任务材料是带着「需要 30 个」来的，
+// 队列里的数量列就该是 30，而不是清一色的 1。
+void app_grant_add(u32 id, u32 num) {
+    if (!num) num = 1;
     char buf[64];
     const char *nm = app_item_name(id, buf, sizeof(buf));
     for (int i = 0; i < g.grant.n; i++) {
         NamedId *n = VEC_AT(&g.grant, NamedId, i);
-        if (n->id == id) {
-            n->num++;
-            app_status("已加入队列：%s ×%u", n->name, n->num);
-            return;
-        }
+        if (n->id != id) continue;
+        // 没带数量（num=1）就是老行为：同一件再多要一份；
+        // 带了明确数量（任务材料）就按这个数落定，但不往下压 ——
+        // 用户把数量手改成 50 之后又点一次「需要 30 个」的行，不该被改回 30。
+        if (num > 1) {
+            if (num > n->num) n->num = num;
+        } else n->num++;
+        app_status("已加入队列：%s ×%u", n->name, n->num);
+        return;
     }
     NamedId *n = VEC_ADD(&g.grant, NamedId);
     n->id = id;
-    n->num = 1;
+    n->num = num;
     n->type = IT_STACK;
     snprintf(n->name, sizeof(n->name), "%s", nm);
-    app_status("已加入队列：%s", nm);
+    app_status("已加入队列：%s ×%u", nm, num);
 }
 
-// 批量入队用：已经在队列里的直接跳过（不叠数量），也不刷状态栏 —— 一次几百条，
-// 逐条刷只会被最后一条盖住。返回 1 表示这次真的加进去了。
-int app_grant_add_new(u32 id) {
-    for (int i = 0; i < g.grant.n; i++)
-        if (VEC_AT(&g.grant, NamedId, i)->id == id) return 0;
+// 批量入队用：不重复加行、也不逐条刷状态栏 —— 一次几百条，逐条刷只会被最后一条盖住。
+// 返回 1 = 新增一行，2 = 本来就有、这次把数量补大了，0 = 原样没动。
+int app_grant_add_new(u32 id, u32 num) {
+    if (!num) num = 1;
+    for (int i = 0; i < g.grant.n; i++) {
+        NamedId *n = VEC_AT(&g.grant, NamedId, i);
+        if (n->id != id) continue;
+        if (num > n->num) { n->num = num; return 2; }
+        return 0;
+    }
     char buf[64];
     const char *nm = app_item_name(id, buf, sizeof(buf));
     NamedId *n = VEC_ADD(&g.grant, NamedId);
     n->id = id;
-    n->num = 1;
+    n->num = num;
     n->type = IT_STACK;
     snprintf(n->name, sizeof(n->name), "%s", nm);
     return 1;
