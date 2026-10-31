@@ -526,7 +526,17 @@ static void do_layout(void) {
     SendMessageW(g_status, WM_SIZE, 0, 0);
     RECT sr;
     GetWindowRect(g_status, &sr);
+    // 换到主窗口客户区坐标：后面的页签区高度要按「状态栏顶边」算，不能按
+    // 「客户区高 - 状态栏高」算 —— 后者在状态栏还没定位时（首次布局读到 0）
+    // 会把页签一路铺到窗口最底下，页面容器跟着压到状态栏下面，
+    // 页面里贴底的按钮就被状态栏盖掉一截（泡点页的「应用」正是这么被遮的）。
+    MapWindowPoints(NULL, g_main, (POINT *)&sr, 2);
     int sh = sr.bottom - sr.top;
+    int status_top = sr.top;
+    if (sh < ui_scale(18) || status_top <= 0) {
+        sh = ui_scale(22);
+        status_top = h - sh;
+    }
     int parts[2];
     parts[0] = w - ui_scale(240);
     parts[1] = -1;
@@ -571,7 +581,7 @@ static void do_layout(void) {
     int top = y + rowh + gap + ui_scale(6);   // 和上面那行留一口气，页签不贴控件
     int tabx = pad + leftw + pad;
     int tabw = w - tabx - pad;
-    int tabh = h - sh - top - pad;
+    int tabh = status_top - top - pad;     // 页签区到状态栏顶为止，不往下压
     if (tabw < ui_scale(200)) tabw = ui_scale(200);
     if (tabh < ui_scale(120)) tabh = ui_scale(120);
     ui_place(g_tab, tabx, top, tabw, tabh);
@@ -586,6 +596,10 @@ static void do_layout(void) {
         MapWindowPoints(NULL, g_main, (POINT *)&tr, 2);
         dr = tr;
         SendMessageW(g_tab, TCM_ADJUSTRECT, FALSE, (LPARAM)&dr);
+        // 双保险：页签区无论算出多大，页面容器都不许压到状态栏上
+        int maxb = status_top - ui_scale(2);
+        if (dr.bottom > maxb) dr.bottom = maxb;
+        if (dr.right > w - pad) dr.right = w - pad;
         ui_pages_place(pi, dr.left, dr.top, dr.right - dr.left, dr.bottom - dr.top);
     }
     (void)sh;
