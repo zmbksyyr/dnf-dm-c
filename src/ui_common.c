@@ -16,7 +16,7 @@ Page g_pages[PAGE_COUNT] = {
     [PAGE_ITEM] = {"物品"},     [PAGE_QUERY] = {"查询"},  [PAGE_GRANT] = {"发放"},
     [PAGE_MAIL] = {"邮件"},     [PAGE_PET] = {"宠物"},    [PAGE_AVATAR] = {"时装"},
     [PAGE_QUEST] = {"任务"},    [PAGE_EVENT] = {"活动"},  [PAGE_GM] = {"GM"},
-    [PAGE_BAN] = {"封停"},      [PAGE_LOG] = {"日志"},
+    [PAGE_BUBBLE] = {"泡点"},   [PAGE_BAN] = {"封停"},    [PAGE_LOG] = {"日志"},
 };
 
 void ui_pages_wire(void) {
@@ -29,6 +29,7 @@ void ui_pages_wire(void) {
     page_quest_create(&g_pages[PAGE_QUEST]);
     page_event_create(&g_pages[PAGE_EVENT]);
     page_gm_create(&g_pages[PAGE_GM]);
+    page_bubble_create(&g_pages[PAGE_BUBBLE]);
     page_ban_create(&g_pages[PAGE_BAN]);
     page_log_create(&g_pages[PAGE_LOG]);
 }

@@ -174,6 +174,8 @@ static void left_layout(int x, int y0, int w, int h) {
 // ---------------------------------------------------------------- 状态
 // 同理：状态栏也只在文字真的变了才写，避免每 100ms 重绘一次
 static char s_st0[700], s_st1[200], s_st_init;
+// 固定窗口的外框尺寸（创建时算好，WM_GETMINMAXINFO 用它把大小锁死）
+static int s_win_w, s_win_h;
 
 static void status_refresh(void) {
     WCHAR w[700];
@@ -455,6 +457,7 @@ static void tick(void) {
     // 也可能不在前台，边沿那一下同步不上。每 tick 幂等刷一次，100ms 内必然收敛。
     page_grant_syncauto();
     page_gm_pump();      // GM 页排队的写入往前推：跟本页是否可见无关
+    page_bubble_pump();  // 泡点状态行同理：倒计时要在不切页的时候也走
 
     // 从最小化恢复时，子控件的绘制表面已被系统丢弃，和切页一样会留白：
     // 恢复到前台后整页补画一次
@@ -683,9 +686,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             return 0;
 
         case WM_GETMINMAXINFO: {
+            // 窗口固定：最大值与最小值都锁在创建时算出的尺寸上，边框拖不动、也最大化不了
             MINMAXINFO *mm = (MINMAXINFO *)lp;
-            mm->ptMinTrackSize.x = ui_scale(900);
-            mm->ptMinTrackSize.y = ui_scale(560);
+            if (s_win_w > 0 && s_win_h > 0) {
+                mm->ptMinTrackSize.x = mm->ptMaxTrackSize.x = s_win_w;
+                mm->ptMinTrackSize.y = mm->ptMaxTrackSize.y = s_win_h;
+            }
             return 0;
         }
 
@@ -842,15 +848,27 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     wc.lpszClassName = L"DnfGmMain";
     if (!RegisterClassExW(&wc)) return 1;
 
-    int cw = ui_scale(1100), ch = ui_scale(700);
+    // 窗口尺寸固定，不给拉伸。界面按一套固定像素排版，能拉大拉小只会让某页在某个
+    // 尺寸下摆不开（挤在左上角或者控件叠在一起），不如定死一个所有页面都摆得下的尺寸。
+    // 客户区 1240×800：GM 页去掉泡点后自然高约 540，这个尺寸下按 100% 摆还有富余；
+    // 宽度够两栏并排不挤。DPI 变化时 ui_scale 会跟着放大，和原来一致。
+    int cw = ui_scale(1240), ch = ui_scale(800);
     int sw = GetSystemMetrics(SM_CXSCREEN), shh = GetSystemMetrics(SM_CYSCREEN);
-    int x = (sw - cw) / 2, y = (shh - ch) / 2;
+    if (cw > sw * 96 / 100) cw = sw * 96 / 100;
+    if (ch > shh * 92 / 100) ch = shh * 92 / 100;
+
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    RECT rc = {0, 0, cw, ch};
+    AdjustWindowRectEx(&rc, style, FALSE, 0);
+    s_win_w = rc.right - rc.left;
+    s_win_h = rc.bottom - rc.top;
+
+    int x = (sw - s_win_w) / 2, y = (shh - s_win_h) / 2;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
 
-    g_main = CreateWindowExW(0, L"DnfGmMain", L"DNF GM 工具",
-                            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                            x, y, cw, ch, NULL, NULL, inst, NULL);
+    g_main = CreateWindowExW(0, L"DnfGmMain", L"DNF GM 工具", style,
+                            x, y, s_win_w, s_win_h, NULL, NULL, inst, NULL);
     if (!g_main) return 1;
 
     ShowWindow(g_main, show);

@@ -16,10 +16,6 @@ enum {
     G_ACCM, G_GRADE, G_WIN, G_PVP_POINT,
     G_SP, G_QP, G_NOWEIGHT, G_SLOT, G_UNLOCK, G_EXPERT, G_FATIGUE, G_DUNGEON, G_PUNISH, G_QCLR,
     G_DUMP, G_RESTORE, G_CDUMP, G_UNLCREATE, G_SCANBAD, G_CLONE,
-    // 泡点：开关 / 间隔 / 目标人群 / 奖励(点券·D点·D币·物品) / 起止时间 / 应用 / 导出 / 状态行
-    G_BON, G_BSEC, G_BTARGET, G_BTNO,
-    G_BCOIN, G_BDP, G_BDC, G_BITEM, G_BINUM,
-    G_BSTART, G_BEND, G_BAPPLY, G_BEXP, G_BINFO,
     // VIP：独立号段。上面 G_SP..G_QCLR 是连续的（G_SP+i 批量置灰依赖这一点），
     // 插进去会挪动整段编号，所以单独占一个号，不并进递增链。
     G_VIP = PAGE_ID(PAGE_GM, 50),
@@ -28,15 +24,11 @@ enum {
     G_QEXP = PAGE_ID(PAGE_GM, 51), G_QIMP,
     // 分组框：纯视觉容器，不参与 enable / 提交。ID 单独起一段，避开上面连续递增的控件号
     G_BOX_ROLE = PAGE_ID(PAGE_GM, 60), G_BOX_ASSET, G_BOX_PVP, G_BOX_ONCE, G_BOX_ACCT,
-    G_BOX_MISC, G_BOX_BUB
+    G_BOX_MISC
 };
 
 static HWND c_name, c_lev, c_job, c_grow, c_money, c_coin, c_cera, c_point, c_accm, c_vip;
 static HWND g_grade, g_win, g_point;
-// 泡点组：开关、间隔、目标人群、多奖励、起止时间、应用、导出、状态行
-static HWND c_bon, c_bsec, c_btarget, c_btno, c_bcoin, c_bdp, c_bdc, c_bitem, c_binum,
-             c_bstart, c_bend, c_binfo;
-static char s_binfo_last[192];   // 状态行只在文字变了才写，SetWindowText 会重绘
 
 // 全服清错误物品的状态（实现在本文件后面）
 static Vec  s_scan;
@@ -117,24 +109,11 @@ static void gm_kick(void) {
     app_act(gm_what(s_gm_run.kind), char_work, &s_gm_run);
 }
 
-// 泡点状态行：每 tick 会被问一次，文字没变就不写（SetWindowText 会触发重绘）
-static void gm_bubble_status_sync(void) {
-    if (!c_binfo) return;
-    char buf[192];
-    app_bubble_status(buf, sizeof(buf));
-    if (!strcmp(buf, s_binfo_last)) return;
-    snprintf(s_binfo_last, sizeof(s_binfo_last), "%s", buf);
-    ui_text(c_binfo, buf);
-}
-
 // 队列的推进挂在这里，而不是挂在 gm_reload 上。
 // 挂在 reload 上意味着"页面不刷新 → 队列不发"，于是隐藏页也必须跟着刷，
 // 刷新就从"让界面跟上"变成了写入流程的一环——这条耦合正是各种刷新打架的根源。
 // 现在每 tick 推进一次，与页面可见性无关；reload 只管显示。
-void page_gm_pump(void) {
-    gm_kick();
-    gm_bubble_status_sync();       // 倒计时和上次结算结果都在这行里
-}
+void page_gm_pump(void) { gm_kick(); }
 
 static void gm_refill(void);          // 实现见下（gm_push 队列满时要回滚界面）
 
@@ -637,39 +616,6 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         app_act("解除建角限制", char_work, &kc);
         return 0;
     }
-    if (id == G_BAPPLY) {
-        // 泡点是账号级/全服设置，不依赖当前选中角色，所以放在 need_char 之前
-        int on = (int)SendMessageW(c_bon, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        int target = ui_combo_sel(c_btarget);          // 0仅在线 1全服 2指定角色 3指定账号
-        if (target < 0) target = 0;
-        u32 tno = (u32)ui_i64(c_btno);
-        int coin = (int)ui_i64(c_bcoin);
-        int dpoint = (int)ui_i64(c_bdp);
-        int dcoin = (int)ui_i64(c_bdc);
-        u32 item = (u32)ui_i64(c_bitem);
-        int inum = (int)ui_i64(c_binum);
-        // 解析起止时间：HH:MM 格式，留空 = 全天（start==end==0）
-        int start_min = 0, end_min = 0;
-        char ts[16], te[16];
-        ui_get(c_bstart, ts, sizeof(ts));
-        ui_get(c_bend, te, sizeof(te));
-        str_trim(ts); str_trim(te);
-        if (ts[0] || te[0]) {
-            int h, m;
-            if (ts[0] && sscanf(ts, "%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60)
-                start_min = h * 60 + m;
-            if (te[0] && sscanf(te, "%d:%d", &h, &m) == 2 && h >= 0 && h < 24 && m >= 0 && m < 60)
-                end_min = h * 60 + m;
-            // 只填了一个时间：另一个取对称值（如只填开始 20:00，结束默认 20:00=全天）
-            if (ts[0] && !te[0]) end_min = start_min;
-            if (te[0] && !ts[0]) start_min = end_min;
-        }
-        app_bubble_apply(on, (int)ui_i64(c_bsec), target, coin, dpoint, dcoin,
-                         item, inum, tno, start_min, end_min);
-        gm_bubble_status_sync();
-        return 0;
-    }
-    if (id == G_BEXP) { app_bubble_export(); return 0; }
     if (!need_char()) return 0;
     // kc 是全局 Ctx，跨动作复用：不先清零，上一次动作留下的 i1/i2/s 会跟着跑；
     // 更糟的是 cno/mid 从没人填过 —— 一键按钮全在写 charac_no=0，0 行影响被
@@ -717,17 +663,21 @@ typedef struct {
 
 typedef struct { int x, y, w, h; } GmRect;
 
+// 控件尺寸一律走 ui_scale（只跟系统 DPI 走，不跟窗口大小走）。
+// 之前这里做过「按窗口等比缩放」，后来窗口本身固定了尺寸，缩放就没有意义了。
+#define gm_sc(px) ui_scale(px)
+
 // 在组框里摆 n 行字段：行距按框高均分（夹在 0~24），整体在框内垂直居中
 static void gm_rows(HWND pw, const GmRect *b, const GmRow *r, int n) {
-    const int inx = ui_scale(12), iny = ui_scale(22), inb = ui_scale(10);
-    const int lbh = ui_scale(15), lgap = ui_scale(4), rh = ui_scale(24);
+    const int inx = gm_sc(12), iny = gm_sc(22), inb = gm_sc(10);
+    const int lbh = gm_sc(15), lgap = gm_sc(4), rh = gm_sc(24);
     const int nat = lbh + lgap + rh;
     int inner = b->w - inx * 2;
-    int half = (inner - ui_scale(10)) / 2;
+    int half = (inner - gm_sc(10)) / 2;
     int avail = b->h - iny - inb;
     int gapv = (n > 1) ? (avail - n * nat) / (n - 1) : 0;
     if (gapv < 0) gapv = 0;
-    if (gapv > ui_scale(22)) gapv = ui_scale(22);
+    if (gapv > gm_sc(22)) gapv = gm_sc(22);
     int used = n * nat + (n - 1) * gapv;
     int ytop = b->y + iny + (avail > used ? (avail - used) / 2 : 0);
 
@@ -738,7 +688,7 @@ static void gm_rows(HWND pw, const GmRect *b, const GmRow *r, int n) {
         ui_place(ui_lbl_at(pw, q->lab), b->x + inx, ry, w1, lbh);
         ui_place(q->ctl, b->x + inx, ry + lbh + lgap, w1, rh);
         if (q->lab2) {
-            int bx = b->x + inx + half + ui_scale(10);
+            int bx = b->x + inx + half + gm_sc(10);
             ui_place(ui_lbl_at(pw, q->lab2), bx, ry, half, lbh);
             ui_place(q->ctl2, bx, ry + lbh + lgap, half, rh);
         }
@@ -748,15 +698,15 @@ static void gm_rows(HWND pw, const GmRect *b, const GmRow *r, int n) {
 // 在组框里摆按钮网格：cols 列；最后一个按钮不满一行就拉满整行
 // （「全服清错误物品」正好是这类重操作，独占一行反而更醒目）
 static void gm_btns(HWND pw, const GmRect *b, const int *ids, int n, int cols) {
-    const int inx = ui_scale(12), iny = ui_scale(22), inb = ui_scale(10);
-    const int gp = ui_scale(8), bh = ui_scale(30);
+    const int inx = gm_sc(12), iny = gm_sc(22), inb = gm_sc(10);
+    const int gp = gm_sc(8), bh = gm_sc(30);
     int rows = (n + cols - 1) / cols;
     int inner = b->w - inx * 2;
     int bw = (inner - (cols - 1) * gp) / cols;
     int avail = b->h - iny - inb;
     int gapv = rows > 1 ? (avail - rows * bh) / (rows - 1) : 0;
     if (gapv < 0) gapv = 0;
-    if (gapv > ui_scale(20)) gapv = ui_scale(20);
+    if (gapv > gm_sc(20)) gapv = gm_sc(20);
     int used = rows * bh + (rows - 1) * gapv;
     int ytop = b->y + iny + (avail > used ? (avail - used) / 2 : 0);
 
@@ -767,68 +717,6 @@ static void gm_btns(HWND pw, const GmRect *b, const int *ids, int n, int cols) {
         ui_place(GetDlgItem(pw, ids[i]), b->x + inx + c * (bw + gp), ytop + r * (bh + gapv),
                  cw, bh);
     }
-}
-
-// 泡点组：开关一行、四个字段一行（间隔/点数/开始/结束）、应用 + 状态一行。
-// 高度按「一行开关 + 一行字段 + 一行按钮」给权重，见 gm_layout 里的 wR[3]。
-static void gm_bubble(HWND pw, const GmRect *b) {
-    const int inx = ui_scale(12), iny = ui_scale(20);
-    const int lbh = ui_scale(15), lgap = ui_scale(4), rh = ui_scale(24);
-    const int inner = b->w - inx * 2;
-    const int gap3 = ui_scale(6);
-    const int qw = (inner - gap3 * 2) / 3;
-    const int hw = (inner - gap3) / 2;
-
-    int ry = b->y + iny;
-    ui_place(c_bon, b->x + inx, ry, inner, rh);
-    ry += rh + ui_scale(6);
-
-    // 目标人群 + 指定 ID
-    int fx = b->x + inx;
-    ui_place(ui_lbl_at(pw, "目标人群"), fx, ry, qw, lbh);
-    ui_place(c_btarget, fx, ry + lbh + lgap, qw, rh);
-    fx += qw + gap3;
-    ui_place(ui_lbl_at(pw, "指定 ID（角色号 / 账号）"), fx, ry, qw * 2 + gap3, lbh);
-    ui_place(c_btno, fx, ry + lbh + lgap, qw * 2 + gap3, rh);
-    ry += lbh + lgap + rh + ui_scale(6);
-
-    // 间隔 | 生效开始 | 生效结束
-    fx = b->x + inx;
-    ui_place(ui_lbl_at(pw, "间隔（秒）"), fx, ry, qw, lbh);
-    ui_place(c_bsec, fx, ry + lbh + lgap, qw, rh);
-    fx += qw + gap3;
-    ui_place(ui_lbl_at(pw, "生效开始 HH:MM"), fx, ry, qw, lbh);
-    ui_place(c_bstart, fx, ry + lbh + lgap, qw, rh);
-    fx += qw + gap3;
-    ui_place(ui_lbl_at(pw, "生效结束 HH:MM"), fx, ry, qw, lbh);
-    ui_place(c_bend, fx, ry + lbh + lgap, qw, rh);
-    ry += lbh + lgap + rh + ui_scale(6);
-
-    // 赠送点券 | D点 | D币
-    fx = b->x + inx;
-    ui_place(ui_lbl_at(pw, "赠送点券"), fx, ry, qw, lbh);
-    ui_place(c_bcoin, fx, ry + lbh + lgap, qw, rh);
-    fx += qw + gap3;
-    ui_place(ui_lbl_at(pw, "D点"), fx, ry, qw, lbh);
-    ui_place(c_bdp, fx, ry + lbh + lgap, qw, rh);
-    fx += qw + gap3;
-    ui_place(ui_lbl_at(pw, "D币"), fx, ry, qw, lbh);
-    ui_place(c_bdc, fx, ry + lbh + lgap, qw, rh);
-    ry += lbh + lgap + rh + ui_scale(6);
-
-    // 物品 ID | 数量
-    fx = b->x + inx;
-    ui_place(ui_lbl_at(pw, "物品 ID（0=不发）"), fx, ry, hw, lbh);
-    ui_place(c_bitem, fx, ry + lbh + lgap, hw, rh);
-    fx += hw + gap3;
-    ui_place(ui_lbl_at(pw, "数量"), fx, ry, hw, lbh);
-    ui_place(c_binum, fx, ry + lbh + lgap, hw, rh);
-    ry += lbh + lgap + rh + ui_scale(8);
-
-    ui_place(GetDlgItem(pw, G_BAPPLY), b->x + inx, ry, ui_scale(72), ui_scale(28));
-    ui_place(GetDlgItem(pw, G_BEXP), b->x + inx + ui_scale(80), ry, ui_scale(88), ui_scale(28));
-    ui_place(c_binfo, b->x + inx + ui_scale(176), ry + ui_scale(5), inner - ui_scale(176),
-             ui_scale(20));
 }
 
 // 一栏纵向分 n 个组框：按组高权重 wgt 分配，铺满整栏
@@ -847,33 +735,38 @@ static void gm_lane(int x, int w, int y, int h, int gap, const int *wgt, int n, 
 
 static void gm_layout(Page *p, int w, int h) {
     HWND pw = p->wnd;
-    const int pad = ui_scale(10), gap = ui_scale(12);
-    int cw = (w - pad * 2 - gap) / 2;
-    int x0 = pad, x1 = pad + cw + gap;
-
-    // 组框高度权重 = 框内留白 + 行数 × 该类型一行的自然高。
-    // 不按"行数"平分：字段行要 43px（标签 15 + 缝 4 + 框 24），按钮行 34px 就够，
-    // 按行数平分会把按钮多的组撑得过松，两栏疏密观感对不上。
-    const int padY = ui_scale(22) + ui_scale(10);
-    const int natF = ui_scale(15) + ui_scale(4) + ui_scale(24);   // 字段行
-    const int natB = ui_scale(30) + ui_scale(4);                  // 按钮行
 
     static const int kBoxL[3] = {G_BOX_ROLE, G_BOX_ASSET, G_BOX_PVP};
-    static const int kBoxR[4] = {G_BOX_ONCE, G_BOX_ACCT, G_BOX_MISC, G_BOX_BUB};
+    static const int kBoxR[3] = {G_BOX_ONCE, G_BOX_ACCT, G_BOX_MISC};
     static const int kOnce[] = {G_SP, G_QP, G_NOWEIGHT, G_SLOT, G_UNLOCK,
                                 G_EXPERT, G_FATIGUE, G_DUNGEON, G_PUNISH, G_QCLR,
                                 G_QEXP, G_QIMP};
     static const int kAcct[] = {G_UNLCREATE};
     static const int kMisc[] = {G_DUMP, G_CDUMP, G_RESTORE, G_SCANBAD, G_CLONE};
-    int wL[3], wR[4];
+    // 按钮网格的行数一律由数组长度推，不再手写数字。之前往 kMisc 里加了「克隆角色」
+    // 却忘了把这里的 4 改成 5，那个按钮就一直没被摆出来（坐标为 0）。
+    const int rowsOnce = (COUNT_OF(kOnce) + 1) / 2;
+    const int rowsMisc = (COUNT_OF(kMisc) + 1) / 2;
+
+    // 组框高度权重 = 框内留白 + 行数 × 该类型一行的自然高。
+    // 不按"行数"平分：字段行要 43px（标签 15 + 缝 4 + 框 24），按钮行 34px 就够，
+    // 按行数平分会把按钮多的组撑得过松，两栏疏密观感对不上。
+    // 窗口尺寸是固定的（见 main.c），所以这里不用再按可用空间反推缩放比例，
+    // 直接按 ui_scale 排；组框再把剩余高度吃掉，两栏底部自然对齐。
+    const int pad = gm_sc(10), gap = gm_sc(12);
+    int cw = (w - pad * 2 - gap) / 2;
+    int x0 = pad, x1 = pad + cw + gap;
+
+    const int padY = gm_sc(22) + gm_sc(10);
+    const int natF = gm_sc(15) + gm_sc(4) + gm_sc(24);   // 字段行
+    const int natB = gm_sc(30) + gm_sc(4);               // 按钮行
+
+    int wL[3], wR[3];
     for (int i = 0; i < 3; i++) wL[i] = padY + 2 * natF;
     wL[1] = padY + 3 * natF;        // 资产组三行（多了 VIP），按行数给高才不会挤成一团
-    wR[0] = padY + 6 * natB;        // 一键：12 个按钮，2 列 6 行
-    wR[1] = padY + 1 * natB;        // 账号：解除建角限制
-    wR[2] = padY + 3 * natB;        // 维护：5 个按钮，2 列 3 行
-    // 泡点组：开关(24) + 目标行(49) + 间隔/起止行(49) + 点券/D点/D币行(49)
-    //        + 物品行(51) + 应用/状态行(28) + 组内上边距(20) ≈ ui_scale(280)
-    wR[3] = ui_scale(290);
+    wR[0] = padY + rowsOnce * natB;
+    wR[1] = padY + COUNT_OF(kAcct) * natB;
+    wR[2] = padY + rowsMisc * natB;
 
     // 铺满整栏，但有个上限：窗口很高时别把组框拉成空盒子——内容最多长到自然高的
     // 1.3 倍。顶部照常贴齐，多出来的空间留在页面下方，和左栏列表、其它页的贴顶版面一致。
@@ -881,19 +774,19 @@ static void gm_layout(Page *p, int w, int h) {
     // 逐项相加而不是用单一行高估算：资产组已经比另两组高一行，
     // 再按同一数字乘三会低估左栏自然高度，算出来的上限会把内容框压矮。
     int natColL = wL[0] + wL[1] + wL[2] + 2 * gap;
-    int natColR = wR[0] + wR[1] + wR[2] + wR[3] + 3 * gap;
+    int natColR = wR[0] + wR[1] + wR[2] + 2 * gap;
     int natMax = natColL > natColR ? natColL : natColR;
     int cap = natMax + natMax * 3 / 10;
     int ch = h - pad * 2;
     if (ch > cap) ch = cap;
     int y0 = pad;
 
-    GmRect L[3], R[4];
+    GmRect L[3], R[3];
     gm_lane(x0, cw, y0, ch, gap, wL, 3, L);
-    gm_lane(x1, cw, y0, ch, gap, wR, 4, R);
+    gm_lane(x1, cw, y0, ch, gap, wR, 3, R);
     for (int i = 0; i < 3; i++)
         ui_place(GetDlgItem(pw, kBoxL[i]), L[i].x, L[i].y, L[i].w, L[i].h);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 3; i++)
         ui_place(GetDlgItem(pw, kBoxR[i]), R[i].x, R[i].y, R[i].w, R[i].h);
 
     GmRow role[2] = {
@@ -915,10 +808,9 @@ static void gm_layout(Page *p, int w, int h) {
     gm_rows(pw, &L[0], role, 2);
     gm_rows(pw, &L[1], asset, 3);
     gm_rows(pw, &L[2], pvp, 2);
-    gm_btns(pw, &R[0], kOnce, 12, 2);
-    gm_btns(pw, &R[1], kAcct, 1, 1);
-    gm_btns(pw, &R[2], kMisc, 4, 2);
-    gm_bubble(pw, &R[3]);
+    gm_btns(pw, &R[0], kOnce, COUNT_OF(kOnce), 2);
+    gm_btns(pw, &R[1], kAcct, COUNT_OF(kAcct), 1);
+    gm_btns(pw, &R[2], kMisc, COUNT_OF(kMisc), 2);
 }
 static void gm_lock(Page *p) {
     (void)p;
@@ -966,7 +858,6 @@ static void gm_build(Page *p, HWND parent) {
     ui_group(parent, "一键操作", G_BOX_ONCE);
     ui_group(parent, "账号", G_BOX_ACCT);
     ui_group(parent, "数据库维护", G_BOX_MISC);
-    ui_group(parent, "泡点", G_BOX_BUB);
 
     c_name = ui_edit(parent, "", G_NAME, 0);
     c_lev = ui_edit(parent, "", G_LEV, 0);
@@ -1043,54 +934,9 @@ static void gm_build(Page *p, HWND parent) {
            "改完点到别处即写入库。角色在线时改了会被服务端存档覆盖");
     ui_tip(parent, c_cera, "点券和赠送点券一起提交（同一条 UPDATE）。角色在线时改了会被服务端覆盖");
 
-    // 泡点组：全服设置，跟选中哪个角色无关。创建顺序 = Tab 顺序。
-    static const char *kTarget[] = {"仅在线", "全服(含离线)", "指定角色", "指定账号"};
-    c_bon = ui_check(parent, "启用泡点", G_BON, 0);
-    c_bsec = ui_edit(parent, "", G_BSEC, 0);
-    c_btarget = ui_combo(parent, G_BTARGET, 1);
-    ui_combo_fill(c_btarget, kTarget, COUNT_OF(kTarget), 0);
-    c_btno = ui_edit(parent, "", G_BTNO, 0);
-    c_bcoin = ui_edit(parent, "", G_BCOIN, 0);
-    c_bdp = ui_edit(parent, "", G_BDP, 0);
-    c_bdc = ui_edit(parent, "", G_BDC, 0);
-    c_bitem = ui_edit(parent, "", G_BITEM, 0);
-    c_binum = ui_edit(parent, "", G_BINUM, 0);
-    c_bstart = ui_edit(parent, "", G_BSTART, 0);
-    c_bend = ui_edit(parent, "", G_BEND, 0);
-    ui_button(parent, "应用", G_BAPPLY);
-    ui_button(parent, "导出记录", G_BEXP);
-    c_binfo = ui_label(parent, "", G_BINFO);
-    ui_tip(parent, c_bon, "开启后按间隔给目标人群发放奖励；只在工具开着时结算，关掉不补算");
-    ui_tip(parent, c_bsec, "结算间隔，单位秒，下限 5");
-    ui_tip(parent, c_btarget, "仅在线：login_status>=1 的账号；全服：含离线；指定角色/账号：填下面的 ID");
-    ui_tip(parent, c_btno, "目标选「指定角色」填角色号 charac_no；选「指定账号」填账号 m_id");
-    ui_tip(parent, c_bcoin, "每次给每个目标角色加的赠送点券（inventory.coin），0 表示不加");
-    ui_tip(parent, c_bdp, "每次给每个目标账号加的 D点（cash_cera.cera），0 表示不加");
-    ui_tip(parent, c_bdc, "每次给每个目标账号加的 D币（cash_cera_point.cera_point），0 表示不加");
-    ui_tip(parent, c_bitem, "随邮件发放的物品 ID，0 表示不发物品（全服目标不支持发物品）");
-    ui_tip(parent, c_binum, "物品数量（指定/在线目标最多 200）");
-    ui_tip(parent, c_bstart, "生效开始时间，HH:MM（如 20:00）；留空 = 全天生效");
-    ui_tip(parent, c_bend, "生效结束时间，HH:MM（如 08:00）；留空 = 全天生效。支持跨夜（开始 > 结束）");
-    ui_tip(parent, GetDlgItem(parent, G_BAPPLY), "把以上设置写进 settings.ini，立即生效并重新计时");
-    ui_tip(parent, GetDlgItem(parent, G_BEXP), "把日志里的泡点结算记录导出为 config/export/泡点记录.txt");
     // PVP 默认值：最高段位 + 胜场/分数 999（选中角色后由 gm_reload 覆盖为实际值）
     ui_set_int(g_win, 999);
     ui_set_int(g_point, 999);
-    // 泡点初值来自 settings.ini；ui_check/ui_edit 建的时候留空，在这里一次设好
-    if (g.cfg.bubble_on) SendMessageW(c_bon, BM_SETCHECK, BST_CHECKED, 0);
-    ui_set_int(c_bsec, g.cfg.bubble_sec);
-    ui_combo_set(c_btarget, g.cfg.bubble_target < 0 || g.cfg.bubble_target > 3 ? 0 : g.cfg.bubble_target);
-    if (g.cfg.bubble_target >= 2) ui_set_int(c_btno, (int)g.cfg.bubble_tno);
-    ui_set_int(c_bcoin, g.cfg.bubble_coin);
-    ui_set_int(c_bdp, g.cfg.bubble_dpoint);
-    ui_set_int(c_bdc, g.cfg.bubble_dcoin);
-    ui_set_int(c_bitem, (int)g.cfg.bubble_item);
-    ui_set_int(c_binum, g.cfg.bubble_itemnum);
-    if (g.cfg.bubble_start != g.cfg.bubble_end) {
-        ui_text(c_bstart, fmt_new("%02d:%02d", g.cfg.bubble_start / 60, g.cfg.bubble_start % 60));
-        ui_text(c_bend, fmt_new("%02d:%02d", g.cfg.bubble_end / 60, g.cfg.bubble_end % 60));
-    }
-    gm_bubble_status_sync();
     (void)p;
 }
 

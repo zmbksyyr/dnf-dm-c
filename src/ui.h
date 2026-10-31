@@ -15,7 +15,7 @@ enum {
 // ---- 页签 ----
 enum {
     PAGE_ITEM = 0, PAGE_QUERY, PAGE_GRANT, PAGE_MAIL, PAGE_PET, PAGE_AVATAR, PAGE_QUEST,
-    PAGE_EVENT, PAGE_GM, PAGE_BAN, PAGE_LOG, PAGE_COUNT
+    PAGE_EVENT, PAGE_GM, PAGE_BUBBLE, PAGE_BAN, PAGE_LOG, PAGE_COUNT
 };
 
 // 每页控件 ID 从 1000 + 页号*100 开始
@@ -143,5 +143,7 @@ void page_quest_create(Page *p);
 void page_event_create(Page *p);
 void page_gm_create(Page *p);
 void page_gm_pump(void);                // 把 GM 页排队的写入往前推（每 tick 调，与是否可见无关）
+void page_bubble_create(Page *p);
+void page_bubble_pump(void);            // 泡点状态行（倒计时/上次结算）跟着 tick 刷
 void page_ban_create(Page *p);
 void page_log_create(Page *p);
