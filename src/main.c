@@ -615,6 +615,7 @@ static void do_layout(void) {
     if (tabw < ui_scale(200)) tabw = ui_scale(200);
     if (tabh < ui_scale(120)) tabh = ui_scale(120);
     ui_place(g_tab, tabx, top, tabw, tabh);
+    left_layout(pad, top, leftw, tabh);   // 左栏（角色卡）跟着页签一起重排
 
     RECT tr, dr;
     GetWindowRect(g_tab, &tr);
