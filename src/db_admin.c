@@ -4,6 +4,7 @@
 #include "util.h"
 #include "mysql.h"
 #include "item.h"
+#include "zlib.h"
 #include <time.h>
 
 // ---------------- 活动 ----------------
@@ -603,6 +604,12 @@ typedef struct {
     int  by_mid;     // 0 = 按 charac_no，1 = 按 m_id
 } CharTab;
 
+// charac_view：账号的角色槽位视图，客户端的角色列表照着它画。
+// 槽定长 296 字节：+0 charac_no(u32)、+4 名字(20)、+24 job、+25 grow_type、
+// +26 lev。布局是从库里现存的原生槽逐字节量出来的，不是猜的。
+#define CV_SLOT 296
+#define CV_NAME 20
+
 // 按 m_id 归属的表必须手工列，不能自动发现：那一列只说明「属于某个账号」，
 // 里面混着封停记录（member_punish_info）、建角限制、计费数据。自动扫出来
 // 再复制过去，等于把封号一起克隆 —— 那不是备份，是复制故障。
@@ -1030,6 +1037,64 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
             if (ret == 1 && n2) { nt++; nr += n2; }
         }
         vec_free(&tabs);
+    }
+
+    // 4) 账号的角色槽位视图：客户端的角色列表就是照着这张表画的。
+    //    克隆出的角色不在这儿占一格，界面上就永远看不见 —— charac_info 里
+    //    老老实实写着两行也没用，登录时 charac_count 照旧是 1。
+    //    它按 m_id 归属，进不了上面那份 charac_no 清单，所以只能单独处理。
+    //    槽定长 296 字节：+0 charac_no(u32)、+4 名字(20)、+24 job、
+    //    +25 grow_type、+26 lev。新槽拿源角色那格当模板，改掉这三项即可。
+    if (ok) {
+        MyResult rv = {0};
+        u32 nlev = 0;
+        str_clear(&s);
+        str_catf(&s, "SELECT `lev` FROM taiwan_cain.charac_info WHERE `charac_no`=%u", new_no);
+        if (select1(d, &s, &rv) && rv.nrow) nlev = (u32)my_u64(&rv, 0, 0, 0);
+        my_free(&rv);
+
+        str_clear(&s);
+        str_catf(&s, "SELECT `info` FROM taiwan_cain.charac_view WHERE `m_id`=%u", c->mid);
+        if (select1(d, &s, &rv) && rv.nrow) {
+            const char *bp = my_text(&rv, 0, 0);
+            int bn = my_len(&rv, 0, 0);
+            Buf plain = {0};
+            if (bp && bn > 4 && zlib_unpack((const u8 *)bp + 4, (size_t)(bn - 4), &plain)) {
+                int nslot = plain.n / CV_SLOT;
+                int t = -1;
+                for (int k = 1; k < nslot; k++) {          // 0 号槽是源角色，从 1 开始找空位
+                    int z = 1;
+                    for (int j = 0; j < CV_SLOT; j++)
+                        if (plain.p[k * CV_SLOT + j]) { z = 0; break; }
+                    if (z) { t = k; break; }
+                }
+                if (t >= 0) {
+                    u8 *q = plain.p + t * CV_SLOT;
+                    memcpy(q, plain.p, CV_SLOT);           // 以源角色那一格为模板
+                    wr32(q + 0, new_no);
+                    memset(q + 4, 0, 20);
+                    memcpy(q + 4, cand, strlen(cand) < 20 ? strlen(cand) : 19);
+                    q[26] = (u8)nlev;
+
+                    Buf pk = {0};
+                    zlib_pack(plain.p, plain.n, &pk);
+                    Str u = {0};
+                    str_cat(&u, "UPDATE taiwan_cain.charac_view SET `info`=");
+                    sql_lit(&u, (const char *)pk.p, (int)pk.n, 1);
+                    str_catf(&u, ", `charac_count`=(SELECT COUNT(*) FROM taiwan_cain.charac_info"
+                                 " WHERE `m_id`=%u AND `delete_flag`=0) WHERE `m_id`=%u",
+                             c->mid, c->mid);
+                    if (!run(d, &u)) {
+                        snprintf(err, ERRBUF, "更新 charac_view 失败：%s", d->err);
+                        ok = 0;
+                    }
+                    str_free(&u);
+                    buf_free(&pk);
+                }
+                buf_free(&plain);
+            }
+            my_free(&rv);
+        }
     }
 
     str_clear(&s);
