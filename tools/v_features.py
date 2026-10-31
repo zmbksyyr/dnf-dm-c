@@ -19,6 +19,7 @@ from ctypes import wintypes as wt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pages import u, EXE, BUILD, wait_main, switch, db
+from pages import ctl
 
 u.SendMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
 u.SendMessageW.restype = wt.LPARAM
@@ -38,25 +39,6 @@ G = dict(NAME=1801, LEV=1802, JOB=1803, GROW=1804, MONEY=1805, COIN=1806, CERA=1
 EN_KILLFOCUS = 0x0200
 WM_COMMAND = 0x0111
 BN_CLICK = 0x00F5
-
-
-def ctl(main, cid):
-    """在可见的 DnfPage 下按号找控件。"""
-    found = []
-    cb = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-
-    def each(h, lp):
-        cls = ctypes.create_unicode_buffer(64)
-        u.GetClassNameW(h, cls, 64)
-        if cls.value == "DnfPage" and u.IsWindowVisible(h):
-            w = u.GetDlgItem(h, cid)
-            if w:
-                found.append(w)
-                return False
-        return True
-
-    u.EnumChildWindows(main, cb(each), 0)
-    return found[0] if found else None
 
 
 def log_new(n0):

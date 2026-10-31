@@ -16,9 +16,10 @@ import time
 from ctypes import wintypes as wt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, EXE, OUT, wait_main, switch, grab, db as open_db
+from pages import u, EXE, OUT, wait_main, switch, grab, db as open_db, PID, start
+from pages import check, ctl, set_text, txt as text
 
-PID = lambda page, n: 1000 + page * 100 + n
+
 G_MONEY = PID(8, 5)
 IDC_CONN, IDC_CHLIST = 104, 113
 
@@ -27,40 +28,6 @@ u.SetForegroundWindow.argtypes = [wt.HWND]
 u.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
 u.keybd_event.argtypes = [wt.BYTE, wt.BYTE, wt.DWORD, ctypes.c_size_t]
 u.mouse_event.argtypes = [wt.DWORD, wt.DWORD, wt.DWORD, wt.DWORD, ctypes.c_size_t]
-
-
-def ctl(main, cid):
-    cb = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-    f = []
-
-    def each(h, lp):
-        c = ctypes.create_unicode_buffer(64)
-        u.GetClassNameW(h, c, 64)
-        if c.value == "DnfPage" and u.IsWindowVisible(h):
-            w = u.GetDlgItem(h, cid)
-            if w:
-                f.append(w)
-                return False
-        return True
-
-    u.EnumChildWindows(main, cb(each), 0)
-    return f[0] if f else None
-
-
-def text(h):
-    b = ctypes.create_unicode_buffer(64)
-    u.SendMessageW(h, 0x000D, 64, ctypes.addressof(b))
-    return b.value
-
-
-def set_text(h, s):
-    b = ctypes.create_unicode_buffer(s)
-    u.SendMessageW(h, 0x000C, 0, ctypes.addressof(b))
-
-
-def check(tag, got, want):
-    print("%s %s（得到 %r，期望 %r）" % ("OK " if got == want else "!! ", tag, got, want))
-    return got == want
 
 
 def key(h, ch):
@@ -78,10 +45,7 @@ cur.execute("SELECT money FROM taiwan_cain_2nd.inventory WHERE charac_no=%d" % C
 m0 = cur.fetchone()[0]
 print("金币原值 %d" % m0)
 
-p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main(p)
-u.PostMessageW(u.GetDlgItem(main, IDC_CONN), 0x00F5, 0, 0)
-time.sleep(4.5)
+p, main = start()
 r = wt.RECT()
 lp = (12 << 16) | 40
 u.PostMessageW(u.GetDlgItem(main, IDC_CHLIST), 0x0201, 1, lp)

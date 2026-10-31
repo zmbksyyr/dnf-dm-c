@@ -12,16 +12,11 @@ import time
 from ctypes import wintypes as wt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, EXE, OUT, NAMES, wait_main, switch, grab
+from pages import u, EXE, OUT, NAMES, wait_main, switch, grab, start
+from pages import click_at as click
 
 IDC_CONN, IDC_CHLIST = 104, 113
 PVF = r"D:\cache\game\opendnf-win-0.4.0-jbz69\clients\jbz69\Script.pvf"
-
-
-def click(h, x=20, y=12):
-    lp = (y << 16) | (x & 0xFFFF)
-    u.PostMessageW(h, 0x0201, 1, lp)
-    u.PostMessageW(h, 0x0202, 0, lp)
 
 
 def find_dlg(pid, timeout=6.0):
@@ -51,10 +46,7 @@ def find_dlg(pid, timeout=6.0):
     return None
 
 
-p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main(p)
-u.PostMessageW(u.GetDlgItem(main, IDC_CONN), 0x00F5, 0, 0)
-time.sleep(4.5)
+p, main = start()
 click(u.GetDlgItem(main, IDC_CHLIST), 40, 12)
 time.sleep(1.5)
 

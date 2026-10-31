@@ -10,43 +10,14 @@
 """
 import ctypes, subprocess, time, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, grab, EXE, OUT, switch, wait_main, db as open_db
+from pages import u, grab, EXE, OUT, switch, wait_main, db as open_db, PID as PAGE_ID, start
+from pages import click_at as click, ctl, txt as gettext
 
-PAGE_ID = lambda page, n: 1000 + page * 100 + n
+
 PAGE_ITEM, PAGE_GM = 0, 8
 I_LIST = PAGE_ID(PAGE_ITEM, 2)
 G_LEV = PAGE_ID(PAGE_GM, 2)
 LVM_GETNEXTITEM, LVNI_SELECTED = 0x100C, 0x0002
-
-
-def click(h, x, y):
-    lp = (y << 16) | (x & 0xFFFF)
-    u.PostMessageW(h, 0x0201, 1, lp)
-    u.PostMessageW(h, 0x0202, 0, lp)
-
-
-def ctl(main, cid):
-    cb = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-    found = []
-
-    def each(h, lp):
-        cls = ctypes.create_unicode_buffer(64)
-        u.GetClassNameW(h, cls, 64)
-        if cls.value == "DnfPage":
-            w = u.GetDlgItem(h, cid)
-            if w:
-                found.append(w)
-                return False
-        return True
-
-    u.EnumChildWindows(main, cb(each), 0)
-    return found[0] if found else None
-
-
-def gettext(h):
-    b = ctypes.create_unicode_buffer(64)
-    u.SendMessageW(h, 0x000D, 64, ctypes.addressof(b))
-    return b.value
 
 
 def statics(main):
@@ -71,10 +42,7 @@ cur.execute("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=1")
 lev0 = int(cur.fetchone()[0])
 print("db lev =", lev0)
 
-p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main(p)
-u.PostMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)     # 连接
-time.sleep(4.5)
+p, main = start()
 lv = u.GetDlgItem(main, 113)                             # 左栏角色列表
 click(lv, 40, 12)
 time.sleep(3.0)

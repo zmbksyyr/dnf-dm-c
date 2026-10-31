@@ -156,11 +156,16 @@ void app_log(const char *fmt, ...) {
     if (full) app_log_flush();
 }
 
+// 状态栏那一行带上时刻：连着点几下、或者「正在写入…」卡住了，看一眼就知道
+// 这条是几秒前的、有没有被后面的覆盖。日志行早就是 [HH:MM:SS] 开头，这里保持一致。
 void app_status(const char *fmt, ...) {
+    char msg[384], ts[16];
     va_list ap;
     va_start(ap, fmt);
-    fmtv(g.status, sizeof(g.status), fmt, ap);
+    fmtv(msg, sizeof(msg), fmt, ap);
     va_end(ap);
+    now_str(ts, sizeof(ts), "%H:%M:%S");
+    snprintf(g.status, sizeof(g.status), "[%s] %s", ts, msg);
 }
 
 // 多行文本按行写进日志：整块塞进一条的话，日志页里就是一根读不动的长行，

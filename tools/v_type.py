@@ -10,6 +10,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 from pages import wait_main, db  # noqa: E402
+from pages import txt
 
 u = ctypes.windll.user32
 u.GetDlgCtrlID.restype = ctypes.c_int
@@ -45,16 +46,6 @@ def index_pages(hwnd, out):
         u.EnumChildWindows(h, cb(each), 0)
 
     walk(hwnd)
-
-
-def txt(h, cid):
-    hw = h.get(cid)
-    if not hw:
-        return "(控件不存在)"
-    n = int(u.SendMessageW(ctypes.c_void_p(hw.value), WM_GETTEXTLENGTH, 0, 0) or 0)
-    b = ctypes.create_unicode_buffer(n + 8)
-    u.SendMessageW(ctypes.c_void_p(hw.value), WM_GETTEXT, n + 8, b)
-    return b.value
 
 
 def set_txt(h, cid, s):

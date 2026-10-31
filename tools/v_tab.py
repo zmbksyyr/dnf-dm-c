@@ -13,7 +13,8 @@ Win32 对话框的 Tab 导航顺序 = 子窗口的 Z 序 = 控件的创建顺序
 import ctypes, subprocess, time, os, sys
 from ctypes import wintypes as wt
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, EXE, wait_main, switch
+from pages import u, EXE, wait_main, switch, start
+from pages import txt as text
 
 GW_CHILD, GW_HWNDNEXT = 5, 2
 WS_TABSTOP = 0x00010000
@@ -44,12 +45,6 @@ def cls(h):
     return b.value
 
 
-def text(h):
-    b = ctypes.create_unicode_buffer(64)
-    u.SendMessageW(h, 0x000D, 64, ctypes.addressof(b))
-    return b.value
-
-
 def rect(h):
     r = wt.RECT()
     u.GetWindowRect(h, ctypes.byref(r))
@@ -64,10 +59,7 @@ def inside(r, x, y):
     return r.left <= x <= r.right and r.top <= y <= r.bottom
 
 
-p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main(p)
-u.PostMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)   # 连接
-time.sleep(4.0)
+p, main = start(wait=4.0)
 # 页号可传参：python v_tab.py 2 = 发放页；不传默认 GM 页
 PAGE = int(sys.argv[1]) if len(sys.argv) > 1 else 8
 switch(main, PAGE)                                      # GM 页

@@ -2,9 +2,10 @@
 """量 PVF 段与页签「物品」的横向关系：PVF 标签左边、页签控件左边、页签文本左边。"""
 import ctypes, subprocess, time, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, g, EXE, wait_main
+from pages import u, g, EXE, wait_main, start
 
 from ctypes import wintypes as wt
+from pages import txt as text
 
 def kids(h):
     out = []
@@ -15,10 +16,6 @@ def kids(h):
     u.EnumChildWindows(h, cb(each), 0)
     return out
 
-def text(h):
-    b = ctypes.create_unicode_buffer(128)
-    u.SendMessageW(h, 0x000D, 128, ctypes.addressof(b))
-    return b.value
 
 def rect(h):
     r = wt.RECT()
@@ -31,10 +28,7 @@ def dpi_scale():
     u.ReleaseDC(0, dc)
     return d / 96.0
 
-p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main(p)
-u.PostMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)
-time.sleep(4.0)
+p, main = start(wait=4.0)
 
 sc = dpi_scale()
 pvf = tab = None

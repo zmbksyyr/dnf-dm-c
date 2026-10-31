@@ -9,7 +9,8 @@
 """
 import ctypes, subprocess, time, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, grab, EXE, OUT, switch, NAMES, wait_main
+from pages import u, grab, EXE, OUT, switch, NAMES, wait_main, PID as PAGE_ID, start
+from pages import click_at as click, ctl, txt as gettext, set_text as settext
 
 WM_TIMER = 0x0113
 WM_KILLFOCUS = 0x0008
@@ -19,7 +20,7 @@ LVM_GETNEXTITEM = 0x100C
 LVM_GETTOPINDEX = 0x1027
 LVM_GETITEMCOUNT = 0x1004
 LVNI_SELECTED = 0x0002
-PAGE_ID = lambda page, n: 1000 + page * 100 + n
+
 PAGE_ITEM, PAGE_GM = 0, 8
 I_LIST = PAGE_ID(PAGE_ITEM, 2)
 I_INFO = PAGE_ID(PAGE_ITEM, 6)
@@ -45,46 +46,7 @@ def lv_select(lv, i):
     u.SendMessageW(lv, 0x100B, i, ctypes.addressof(it))   # LVM_SETITEMSTATE
 
 
-def settext(h, s):
-    buf = ctypes.create_unicode_buffer(s)
-    u.SendMessageW(h, WM_SETTEXT, 0, ctypes.addressof(buf))
-
-
-def gettext(h):
-    buf = ctypes.create_unicode_buffer(128)
-    u.SendMessageW(h, 0x000D, 128, ctypes.addressof(buf))
-    return buf.value
-
-
-def click(h, x, y):
-    lp = (y << 16) | (x & 0xFFFF)
-    u.PostMessageW(h, 0x0201, 1, lp)
-    u.PostMessageW(h, 0x0202, 0, lp)
-
-
-def ctl(main, cid):
-    """页面控件挂在 DnfPage 子窗口里：逐个找"""
-    cb = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-    found = []
-
-    def each(h, lp):
-        cls = ctypes.create_unicode_buffer(64)
-        u.GetClassNameW(h, cls, 64)
-        if cls.value == "DnfPage":
-            w = u.GetDlgItem(h, cid)
-            if w:
-                found.append(w)
-                return False
-        return True
-
-    u.EnumChildWindows(main, cb(each), 0)
-    return found[0] if found else None
-
-
-p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main(p)
-u.SendMessageW(u.GetDlgItem(main, 104), BM_CLICK, 0, 0)
-time.sleep(4.5)
+p, main = start()
 lv = u.GetDlgItem(main, 113)
 click(lv, 40, 12)
 time.sleep(3.0)

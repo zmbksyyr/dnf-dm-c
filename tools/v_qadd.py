@@ -14,46 +14,14 @@ import time
 from ctypes import wintypes as wt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, EXE, OUT, wait_main, switch, grab, db as open_db
+from pages import u, EXE, OUT, wait_main, switch, grab, db as open_db, PID, start
 
-PID = lambda page, n: 1000 + page * 100 + n
+
 G_LEV, G_MONEY, G_COIN = PID(8, 2), PID(8, 5), PID(8, 6)
 G_QADD = PID(8, 70)                     # 1870 起，顺序见源码 kQAdd
 IDC_CONN, IDC_CHLIST = 104, 113
 
 u.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
-
-
-def ctl(main, cid):
-    cb = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-    f = []
-
-    def each(h, lp):
-        c = ctypes.create_unicode_buffer(64)
-        u.GetClassNameW(h, c, 64)
-        if c.value == "DnfPage" and u.IsWindowVisible(h):
-            w = u.GetDlgItem(h, cid)
-            if w:
-                f.append(w)
-                return False
-        return True
-
-    u.EnumChildWindows(main, cb(each), 0)
-    return f[0] if f else None
-
-
-def text(h):
-    # GetWindowText 对别的进程里的 EDIT 返回空（它走的是窗口标题那条路），
-    # WM_GETTEXT 在 WM_USER 以下会被系统编组，能读到真正的编辑框内容
-    b = ctypes.create_unicode_buffer(64)
-    u.SendMessageW(h, 0x000D, 64, ctypes.addressof(b))
-    return b.value
-
-
-def click(h, x=20, y=12):
-    lp = (y << 16) | (x & 0xFFFF)
-    u.PostMessageW(h, 0x0201, 1, lp)
-    u.PostMessageW(h, 0x0202, 0, lp)
 
 
 db = open_db()
@@ -77,6 +45,7 @@ def db_exp(cno):
 
 # 等级上限读配置：settings.ini [gm] lev_max，缺省 85（源码 app.c 同款默认值）
 import configparser
+from pages import blur, check, click_at as click, ctl, set_text, txt as text
 _cp = configparser.RawConfigParser()   # 密码里带 %，普通 ConfigParser 会插值报错
 _cp.read(os.path.join(os.path.dirname(EXE), "config", "settings.ini"), encoding="utf-8")
 LEV_MAX = _cp.getint("gm", "lev_max", fallback=85)
@@ -95,10 +64,7 @@ if l0 > LEV_MAX or l0 < 1:
     l0 = 70
 print("原值：金币 %d 复活币 %d 等级 %d 经验 %d" % (m0, c0, l0, e0))
 
-p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main(p)
-u.PostMessageW(u.GetDlgItem(main, IDC_CONN), 0x00F5, 0, 0)
-time.sleep(4.5)
+p, main = start()
 click(u.GetDlgItem(main, IDC_CHLIST), 40, 12)
 time.sleep(1.5)
 switch(main, 8)          # GM 页
@@ -110,24 +76,6 @@ if not ctl(main, G_MONEY):
     sys.exit(1)
 
 ok = True
-
-
-def check(tag, got, want):
-    global ok
-    good = got == want
-    ok = ok and good
-    print("%s %s（得到 %s，期望 %s）" % ("OK " if good else "!! ", tag, got, want))
-    return good
-
-
-def set_text(h, s):
-    b = ctypes.create_unicode_buffer(s)
-    u.SendMessageW(h, 0x000C, 0, ctypes.addressof(b))     # WM_SETTEXT
-
-
-def blur(h, wait=1.8):
-    u.SendMessageW(h, 0x0008, 0, 0)                      # WM_KILLFOCUS → 触发提交
-    time.sleep(wait)
 
 
 def press(idx, name, wait=1.6):

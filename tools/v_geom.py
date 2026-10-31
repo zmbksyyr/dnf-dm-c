@@ -11,7 +11,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, EXE, wait_main, switch
+from pages import u, EXE, wait_main, switch, start
 
 u.EnumChildWindows.argtypes = [wt.HWND, ctypes.c_void_p, wt.LPARAM]
 u.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
@@ -35,10 +35,7 @@ def kids(hwnd):
 
 
 if __name__ == "__main__":
-    p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-    main = wait_main(p)
-    u.SendMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)
-    time.sleep(4.0)
+    p, main = start(wait=4.0)
     combo = u.GetDlgItem(main, 108)
     if u.SendMessageW(combo, 0x0146, 0, 0) > 0:
         u.SendMessageW(combo, 0x014E, 0, 0)

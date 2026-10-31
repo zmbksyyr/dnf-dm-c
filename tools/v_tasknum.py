@@ -15,9 +15,10 @@ import time
 from ctypes import wintypes as wt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, EXE, OUT, wait_main, switch, grab
+from pages import u, EXE, OUT, wait_main, switch, grab, PID
+from pages import click_at as click, ctl, rows, txt as text
 
-PID = lambda page, n: 1000 + page * 100 + n
+
 Q_INFO, Q_ADD, Q_ALL, Q_TASK = PID(1, 3), PID(1, 5), PID(1, 6), PID(1, 10)
 G_LIST, G_INFO = PID(2, 12), PID(2, 17)
 IDC_CONN, IDC_PVFS, IDC_CHLIST = 104, 107, 113
@@ -32,39 +33,8 @@ u.GetClientRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
 u.ClientToScreen.argtypes = [wt.HWND, ctypes.POINTER(wt.POINT)]
 
 
-def text(h):
-    b = ctypes.create_unicode_buffer(512)
-    u.GetWindowTextW(h, b, 512)
-    return b.value
-
-
-def ctl(main, cid):
-    """页控件挂在 DnfPage 子窗口下，主窗口 GetDlgItem 找不到，得先枚举出来。"""
-    cb = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-    f = []
-
-    def each(h, lp):
-        c = ctypes.create_unicode_buffer(64)
-        u.GetClassNameW(h, c, 64)
-        if c.value == "DnfPage" and u.IsWindowVisible(h):
-            w = u.GetDlgItem(h, cid)
-            if w:
-                f.append(w)
-                return False
-        return True
-
-    u.EnumChildWindows(main, cb(each), 0)
-    return f[0] if f else None
-
-
 def label(main, cid):
     return text(ctl(main, cid))
-
-
-def click(h, x=20, y=12):
-    lp = (y << 16) | (x & 0xFFFF)
-    u.PostMessageW(h, 0x0201, 1, lp)
-    u.PostMessageW(h, 0x0202, 0, lp)
 
 
 def dblclick(h, x, y):
@@ -75,10 +45,6 @@ def dblclick(h, x, y):
     time.sleep(0.05)
     u.PostMessageW(h, 0x0203, 1, lp)
     u.PostMessageW(h, 0x0202, 0, lp)
-
-
-def rows(lv):
-    return u.SendMessageW(lv, 0x1004, 0, 0)   # LVM_GETITEMCOUNT
 
 
 def find_dlg(pid, timeout=6.0):

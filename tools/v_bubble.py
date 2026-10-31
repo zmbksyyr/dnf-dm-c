@@ -18,9 +18,10 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, EXE, wait_main, switch, db
+from pages import u, EXE, wait_main, switch, db, PID, start
+from pages import click_at as click, press as click_btn, ctl, txt as gettext, set_text as settext
 
-PID = lambda page, n: 1000 + page * 100 + n
+
 G_BON = PID(8, 28)        # 启用泡点（复选框）
 G_BSEC = PID(8, 29)       # 间隔（秒）
 G_BTARGET = PID(8, 30)    # 目标人群（下拉）
@@ -41,48 +42,8 @@ BM_CLICK = 0x00F5
 WM_SETTEXT = 0x000C
 
 
-def ctl(main, cid):
-    """在可见的 DnfPage 下找控件。GM 页控件都挂在页窗口上，不在主窗口上。"""
-    found = []
-    cb = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-
-    def each(h, lp):
-        cls = ctypes.create_unicode_buffer(64)
-        u.GetClassNameW(h, cls, 64)
-        if cls.value == "DnfPage" and u.IsWindowVisible(h):
-            w = u.GetDlgItem(h, cid)
-            if w:
-                found.append(w)
-                return False
-        return True
-
-    u.EnumChildWindows(main, cb(each), 0)
-    return found[0] if found else None
-
-
-def gettext(h):
-    b = ctypes.create_unicode_buffer(256)
-    u.SendMessageW(h, 0x000D, 256, ctypes.addressof(b))
-    return b.value
-
-
-def settext(h, s):
-    b = ctypes.create_unicode_buffer(s)
-    u.SendMessageW(h, WM_SETTEXT, 0, ctypes.addressof(b))
-
-
 def setcombo(h, idx):
     u.SendMessageW(h, CB_SETCURSEL, idx, 0)
-
-
-def click_btn(h):
-    u.SendMessageW(h, BM_CLICK, 0, 0)
-
-
-def click(lv, x, y):
-    lp = (y << 16) | (x & 0xFFFF)
-    u.PostMessageW(lv, 0x0201, 1, lp)
-    u.PostMessageW(lv, 0x0202, 0, lp)
 
 
 def q1(sql, args=()):
@@ -170,10 +131,7 @@ if CH is None:
 
 p = None
 try:
-    p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-    main = wait_main(p)
-    u.SendMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)     # 连接
-    time.sleep(4.5)
+    p, main = start()
     click(u.GetDlgItem(main, 113), 40, 12)                     # 选中第一个角色（仅为了连库就绪）
     time.sleep(3.0)
     switch(main, 8)                                            # 切到 GM 页

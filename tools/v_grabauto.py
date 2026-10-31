@@ -22,12 +22,13 @@ from configparser import RawConfigParser
 from ctypes import wintypes as wt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, EXE, BUILD, wait_main, switch
+from pages import u, EXE, BUILD, wait_main, switch, PID, start
+from pages import press as click, ctl, txt as edit_text
 
 u.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
 u.SetCursorPos.argtypes = [wt.LONG, wt.LONG]
 
-PID = lambda page, n: 1000 + page * 100 + n
+
 G_ID = PID(2, 1)          # 编号（编辑框）
 G_ADD = PID(2, 11)        # 加入队列（按钮）
 G_LIST = PID(2, 12)       # 队列列表
@@ -98,37 +99,10 @@ def log_lines():
 
 
 # ---------------- 被测程序控件 ----------------
-def ctl(main, cid):
-    """在可见的 DnfPage 下找控件。页面控件都挂在页窗口上，不在主窗口上。"""
-    found = []
-    cb = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-
-    def each(h, lp):
-        cls = ctypes.create_unicode_buffer(64)
-        u.GetClassNameW(h, cls, 64)
-        if cls.value == "DnfPage" and u.IsWindowVisible(h):
-            w = u.GetDlgItem(h, cid)
-            if w:
-                found.append(w)
-                return False
-        return True
-
-    u.EnumChildWindows(main, cb(each), 0)
-    return found[0] if found else None
 
 
 def checked(h):
     return u.SendMessageW(h, 0x00F0, 0, 0) == 1               # BM_GETCHECK（不是 0x00F2 的 GETSTATE，那带焦点位）
-
-
-def click(h):
-    u.SendMessageW(h, 0x00F5, 0, 0)                           # BM_CLICK：按钮/复选框通用
-
-
-def edit_text(h):
-    buf = ctypes.create_unicode_buffer(128)
-    u.SendMessageW(h, 0x000D, 128, ctypes.addressof(buf))     # WM_GETTEXT
-    return buf.value.strip()
 
 
 GAME_CLS = "地下城与勇士"     # DNF 主窗口类名（探测输出里那一长串中文）
@@ -336,10 +310,7 @@ ini_del("auto")
 
 p = None
 try:
-    p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-    main = wait_main(p)
-    u.SendMessageW(u.GetDlgItem(main, 104), 0x00F5, 0, 0)     # 连接
-    time.sleep(4.5)
+    p, main = start()
     u.PostMessageW(u.GetDlgItem(main, 113), 0x0201, 1, (12 << 16) | 40)
     u.PostMessageW(u.GetDlgItem(main, 113), 0x0202, 0, (12 << 16) | 40)
     time.sleep(2.5)

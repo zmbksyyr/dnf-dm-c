@@ -17,6 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 from pages import wait_main, grab, OUT as SHOTS  # noqa: E402
+from pages import enabled, rows, set_text as set_txt, txt
 
 u = ctypes.windll.user32
 u.GetDlgCtrlID.restype = ctypes.c_int
@@ -80,20 +81,6 @@ def switch(main, idx):
     time.sleep(1.2)
 
 
-def txt(h):
-    if not h:
-        return "(无句柄)"
-    n = int(u.SendMessageW(P(h), WM_GETTEXTLENGTH, 0, 0) or 0)
-    b = ctypes.create_unicode_buffer(n + 8)
-    u.SendMessageW(P(h), WM_GETTEXT, n + 8, b)
-    return b.value
-
-
-def set_txt(h, s):
-    if h:
-        u.SendMessageW(P(h), WM_SETTEXT, 0, ctypes.create_unicode_buffer(s))
-
-
 def click(h, wait=0.0):
     """用 PostMessage 投递 BM_CLICK：SendMessage 会同步等到对方处理完，
     而打开浏览窗口这次处理是「跑一个模态循环」，窗口不关 SendMessage 就永不返回
@@ -102,14 +89,6 @@ def click(h, wait=0.0):
         u.PostMessageW(P(h), BM_CLICK, 0, 0)
         if wait:
             time.sleep(wait)
-
-
-def enabled(h):
-    return bool(h and u.IsWindowEnabled(P(h)))
-
-
-def rows(h):
-    return int(u.SendMessageW(P(h), LVM_GETITEMCOUNT, 0, 0) or 0)
 
 
 def wait_dlg(timeout=25.0):

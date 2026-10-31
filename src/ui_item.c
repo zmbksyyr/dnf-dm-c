@@ -549,25 +549,10 @@ static void q_fit_cols(void);      // 按列表实际客户区摊列宽，见下
 #define QROW_ID(v)    ((u32)(v))
 #define QROW_NUM(v)   ((u32)(((u64)(v)) >> 32))
 
-// 内置编号表是「排序后差分 + base128 varint」，这里逐条还原成编号
-static u32 varint_rd(const unsigned char **pp) {
-    const unsigned char *p = *pp;
-    u32 v = 0;
-    int sh = 0;
-    for (;;) {
-        unsigned char b = *p++;
-        v |= (u32)(b & 0x7F) << sh;
-        if (!(b & 0x80)) break;
-        sh += 7;
-    }
-    *pp = p;
-    return v;
-}
-
-// 「加载常用材料 / 装备 / 时装」：把这个清单填进结果列表。
+// 「加载常用材料 / 装备 / 时装」：把 items_data.h 里那份编号清单填进结果列表。
 // 只查不灌 —— 队列是发放页的事，这里回答的是「这批常用件在当前的 PVF 里都有哪些」；
 // 看中了再双击或按「加入发放」进队列。每次都先清空列表，不叠加。
-static void common_list(const unsigned char *data, size_t len, const char *what) {
+static void common_list(const unsigned int *ids, int n, const char *what) {
     if (!g.pvf_ok) {
         app_info("还没加载 PVF。\n\n"
                  "常用物品只存了编号，名字和「当前 PVF 里有没有这件」都得查 PVF 索引，"
@@ -576,11 +561,9 @@ static void common_list(const unsigned char *data, size_t len, const char *what)
     }
     ui_rows_clear(q_list);
     ui_batch(q_list, 1);
-    const unsigned char *p = data, *end = data + len;
-    u32 id = 0;
     int hit = 0, miss = 0;
-    while (p < end) {
-        id += varint_rd(&p);
+    for (int i = 0; i < n; i++) {
+        u32 id = (u32)ids[i];
         const char *nm = pvf_item_name(&g.pvf, id);
         if (!nm || !*nm) { miss++; continue; }   // 这版 PVF 里没有，跳过
         char ids[16];
@@ -732,9 +715,9 @@ static LRESULT query_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         if (id == Q_ADD) { query_add(); return 0; }
         if (id == Q_ALL) { query_add_all(); return 0; }
         // 常用物品按钮：把清单填进结果列表（每次先清空），看中了再双击进队列
-        if (id == Q_MAT) { common_list(kCommonMat, sizeof(kCommonMat), "常用材料"); return 0; }
-        if (id == Q_EQU) { common_list(kCommonEquip, sizeof(kCommonEquip), "常用装备"); return 0; }
-        if (id == Q_AVA) { common_list(kCommonAvatar, sizeof(kCommonAvatar), "常用时装"); return 0; }
+        if (id == Q_MAT) { common_list(kCommonMat, COUNT_OF(kCommonMat), "常用材料"); return 0; }
+        if (id == Q_EQU) { common_list(kCommonEquip, COUNT_OF(kCommonEquip), "常用装备"); return 0; }
+        if (id == Q_AVA) { common_list(kCommonAvatar, COUNT_OF(kCommonAvatar), "常用时装"); return 0; }
         if (id == Q_TASK) { query_task_mats(); return 0; }
         // 浏览：这几类成千上万条，所以开独立窗口（虚拟列表）挑，不往本页列表里灌
         if (id == Q_BMAT) { ui_browse_open(g_main, BR_MAT); return 0; }
@@ -1029,9 +1012,9 @@ static void grant_add_manual(void) {
 }
 
 // ---- 常用物品的内置编号表 → 逐条查 PVF 的逻辑在查询页那一段 ----
-// 表在 items_data.h（tools/gen_items.py 生成）。只存编号不存名字，有两个好处：
-// 体积小（663 个编号 689 字节），而且名字是显示时从 PVF 取的，不会出现 ini 里
-// 的名字和实际 PVF 对不上（比如 8387 手写成「天空礼盒」，PVF 里叫「稀有装扮自选礼盒」）。
+// 表在 items_data.h，就是三张手写的编号数组，加编号往里插一行即可。
+// 只存编号不存名字：名字是显示时从 PVF 取的，不会因为手抄的名字和实际 PVF
+// 对不上（比如 8387 手写成「天空礼盒」，PVF 里叫「稀有装扮自选礼盒」）。
 // 查不到名字 = 当前这版 PVF 里根本没这件东西，正好跳过。
 
 static void grant_load_sel(void) {

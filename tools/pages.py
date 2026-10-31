@@ -68,6 +68,115 @@ def grab(hwnd, out):
     u.ReleaseDC(hwnd, hdc)
 
 
+# ── 控件工具箱 ────────────────────────────────────────────────────────
+# 页面控件挂在「DnfPage」子窗口上，不在主窗口上，所以一律按编号在可见页里找。
+# 这套东西原先每个验证脚本都抄一遍，集中在 pages 后脚本只留各自的用例。
+WM_SETTEXT, WM_GETTEXT, WM_GETTEXTLENGTH = 0x000C, 0x000D, 0x000E
+WM_KILLFOCUS, WM_CLOSE, BM_CLICK = 0x0008, 0x0010, 0x00F5
+WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0201, 0x0202
+LVM_GETITEMCOUNT = 0x1004
+PID = lambda page, n: 1000 + page * 100 + n
+
+
+def ctl(main, cid):
+    """在可见的 DnfPage 下按编号找控件，找不到返回 None。"""
+    found = []
+    cb = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def each(h, lp):
+        cls = ctypes.create_unicode_buffer(64)
+        u.GetClassNameW(h, cls, 64)
+        if cls.value == "DnfPage" and u.IsWindowVisible(h):
+            w = u.GetDlgItem(h, cid)
+            if w:
+                found.append(w)
+                return False
+        return True
+
+    u.EnumChildWindows(main, cb(each), 0)
+    return found[0] if found else None
+
+
+def txt(h, cap=256):
+    """跨进程读编辑框内容：GetWindowText 对别的进程的 EDIT 返回空，
+    WM_GETTEXT 在 WM_USER 以下会被系统编组，读得到真正的文本。"""
+    if not h:
+        return ""
+    b = ctypes.create_unicode_buffer(cap)
+    u.SendMessageW(h, WM_GETTEXT, cap, ctypes.addressof(b))
+    return b.value
+
+
+def set_text(h, s):
+    b = ctypes.create_unicode_buffer(str(s))
+    u.SendMessageW(h, WM_SETTEXT, 0, ctypes.addressof(b))
+
+
+def blur(h, wait=1.5):
+    """失焦 = 提交（界面上「点到别处就写库」就是这条路径）。"""
+    u.SendMessageW(h, WM_KILLFOCUS, 0, 0)
+    time.sleep(wait)
+
+
+def press(h, wait=0.6):
+    """投递 BM_CLICK。必须异步：SendMessage 会等到对方处理完，而「打开浏览窗口」
+    这类处理是跑一个模态循环，窗口不关就永不返回（脚本会卡死）。"""
+    u.PostMessageW(h, BM_CLICK, 0, 0)
+    if wait:
+        time.sleep(wait)
+
+
+def click_at(h, x=20, y=12, wait=0.4):
+    """鼠标点击：列表行之类的地方没有 BM_CLICK 语义，只能投坐标。"""
+    lp = (int(y) << 16) | (int(x) & 0xFFFF)
+    u.PostMessageW(h, WM_LBUTTONDOWN, 1, lp)
+    u.PostMessageW(h, WM_LBUTTONUP, 0, lp)
+    if wait:
+        time.sleep(wait)
+
+
+def enabled(h):
+    return bool(h) and bool(u.IsWindowEnabled(h))
+
+
+def rows(h):
+    """列表行数。只数不取文本 —— 跨进程 LVM_GETITEMTEXT 会让对方进程往我们
+    内存里写，虚拟列表（LVS_OWNERDATA）上直接崩。"""
+    return u.SendMessageW(h, LVM_GETITEMCOUNT, 0, 0) if h else 0
+
+
+IDC_CONN, IDC_CHLIST = 104, 113
+
+
+def start(page=None, connect=True, wait=4.5):
+    """启动程序 → 连库 →（可选）切到第 page 页，返回 (proc, main)。
+    连库后要等一会儿角色列表才填得出来，wait 就是那个间隔。"""
+    p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
+    main = wait_main(p)
+    if connect:
+        u.PostMessageW(u.GetDlgItem(main, IDC_CONN), BM_CLICK, 0, 0)
+        time.sleep(wait)
+    if page is not None:
+        switch(main, page)
+    return p, main
+
+
+def wait_until(fn, timeout=30.0, step=0.5):
+    """等到条件成立或超时，返回是否成立。"""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if fn():
+            return True
+        time.sleep(step)
+    return False
+
+
+def check(tag, got, want):
+    good = got == want
+    print("%s %s（得到 %r，期望 %r）" % ("OK " if good else "!! ", tag, got, want))
+    return good
+
+
 def switch(main, idx):
     tab = u.GetDlgItem(main, 190)
     u.SendMessageW(tab, 0x130C, idx, 0)  # TCM_SETCURSEL

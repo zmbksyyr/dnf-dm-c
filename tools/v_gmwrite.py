@@ -2,31 +2,15 @@
 页面上的控件挂在子窗口 "DnfPage" 下，必须从那里找控件 ID。"""
 import ctypes, subprocess, time, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pages import u, grab, EXE, OUT, switch, NAMES, wait_main
+from pages import u, grab, EXE, OUT, switch, NAMES, wait_main, PID as PAGE_ID, start
+from pages import click_at as click, txt as gettext, set_text as settext
 
 WM_KILLFOCUS = 0x0008
 WM_SETTEXT = 0x000C
 BM_CLICK = 0x00F5
-PAGE_ID = lambda page, n: 1000 + page * 100 + n
+
 PAGE_GM = 8
 G_MONEY = PAGE_ID(PAGE_GM, 5)
-
-
-def settext(h, s):
-    buf = ctypes.create_unicode_buffer(s)
-    u.SendMessageW(h, WM_SETTEXT, 0, ctypes.addressof(buf))
-
-
-def gettext(h):
-    buf = ctypes.create_unicode_buffer(128)
-    u.SendMessageW(h, 0x000D, 128, ctypes.addressof(buf))
-    return buf.value
-
-
-def click(h, x, y):
-    lp = (y << 16) | (x & 0xFFFF)
-    u.PostMessageW(h, 0x0201, 1, lp)
-    u.PostMessageW(h, 0x0202, 0, lp)
 
 
 def pages_of(main):
@@ -53,10 +37,7 @@ def logtail(n=20):
         return "".join(f.readlines()[-n:])
 
 
-p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-main = wait_main(p)
-u.SendMessageW(u.GetDlgItem(main, 104), BM_CLICK, 0, 0)
-time.sleep(4.5)
+p, main = start()
 lv = u.GetDlgItem(main, 113)
 click(lv, 40, 12)
 time.sleep(3.5)
