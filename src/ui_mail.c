@@ -211,8 +211,11 @@ static void mail_layout(Page *p, int w, int h) {
     y += rowh + g;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "正文"), ui_scale(34));
+    // 正文框定宽：原来它一直算到窗口右边，一千多像素宽，写两句话的地方
+    // 却横穿整个窗口，把「发送邮件」推到很远。现在只占一段，按钮紧跟其后。
     const int bw = ui_scale(88);
-    int tw = rc.right - pad - r.x - r.gap - bw;
+    int tw = ui_scale(460);
+    if (tw > rc.right - pad - r.x - r.gap - bw) tw = rc.right - pad - r.x - r.gap - bw;
     if (tw < ui_scale(120)) tw = ui_scale(120);
     ui_add(&r, m_text, tw);
     ui_add(&r, ui_btn_at(p->wnd, M_SEND, "发送邮件"), bw);
@@ -236,6 +239,9 @@ static void mail_build(Page *p, HWND parent) {
     m_sep1 = ui_hline(parent);
     m_sep2 = ui_hline(parent);
     m_text = ui_edit(parent, "", M_TEXT, 0);
+    // 正文默认给一个 "GM."：绝大多数邮件是 GM 发的，每次手打这两下没必要。
+    // 建完再设，不带文本建 EDIT 造成的 EN_CHANGE 会惊动页面处理函数。
+    ui_text(m_text, "GM.");
     m_aid = ui_edit(parent, "", M_AID, 0);
     m_anum = ui_edit(parent, "1", M_ANUM, 0);
     // 附件编号与数量：库里是 int unsigned，数量至少 1（填 0 当 1 处理，这里直接不让填）

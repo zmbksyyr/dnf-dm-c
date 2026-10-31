@@ -94,11 +94,14 @@ static void card_refresh(void) {
     app_money_text(d->account_money, t1, sizeof(t1));
     card_put(7, t1);
 
-    fmt(b, sizeof(b), "SP %d / %d", d->sp, d->sp2);
+    // 三行都只写当前值，不写「/ 上限」：上限是各渠道自己算的满额（SP 90000、
+    // TP 90000、QP 却是 0），三行摆在一起时 QP 独独少一半，看着像没读到数据。
+    // 需要看满额的场合去游戏里看，这里只回答「现在有多少」。
+    fmt(b, sizeof(b), "%d", d->sp);
     card_put(8, b);
-    fmt(b, sizeof(b), "TP %d / %d", d->tp, d->tp2);
+    fmt(b, sizeof(b), "%d", d->tp);
     card_put(9, b);
-    fmt(b, sizeof(b), "QP %d", d->qp);
+    fmt(b, sizeof(b), "%d", d->qp);
     card_put(10, b);
     fmt(b, sizeof(b), "%s · %d 胜 · %d 分", app_pvp_text(d->pvp_grade), d->pvp_win, d->pvp_point);
     card_put(11, b);

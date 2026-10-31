@@ -188,16 +188,17 @@ static void gm_reload(Page *p) {
     if (!g.char_ok) return;              // 没选角色：控件由 gm_lock 置灰，无需回填
     if (!s_refill && s_fill_gen == g.data_ver) return;
     ui_text(c_name, g.cur.name);
-    // 数值框填的是「设成多少」，和库里的值一致；要「加多少」用右边的 + 按钮，
-    // 那条路会自己把这个框更新成加法之后的结果，两种操作不会互相误解。
-    ui_set_int(c_lev, g.cur.lev);
+    // 数值框一律填 0：这些框收的是「这次要设成多少」，填完一次就交出去，
+    // 交完框自己清回 0（见 gm_commit）。把当前值填进来会让人以为「框里是什么
+    // 库里就是什么」，其实这框只管这一次的设定。当前值看左边角色信息。
+    ui_set_int(c_lev, 0);
     ui_combo_set(c_job, g.cur.job >= 0 && g.cur.job < COUNT_OF(kJobList) ? g.cur.job : 0);
     ui_combo_set(c_grow, g.cur.grow >= 0 && g.cur.grow < COUNT_OF(kGrowList) ? g.cur.grow : 0);
-    ui_set_i64(c_money, (i64)g.data.money);
-    ui_set_i64(c_coin, (i64)g.data.coin);
-    ui_set_i64(c_cera, (i64)g.data.cera);
-    ui_set_i64(c_point, (i64)g.data.cera_point);
-    ui_set_i64(c_accm, (i64)g.data.account_money);
+    ui_set_i64(c_money, 0);
+    ui_set_i64(c_coin, 0);
+    ui_set_i64(c_cera, 0);
+    ui_set_i64(c_point, 0);
+    ui_set_i64(c_accm, 0);
     SendMessageW(c_vip, BM_SETCHECK,
                  (g.data.vip[0] && strcmp(g.data.vip, "0")) ? BST_CHECKED : BST_UNCHECKED, 0);
 
@@ -205,8 +206,8 @@ static void gm_reload(Page *p) {
     if (gr < 0) gr = 0;
     if (gr > kPvpMax) gr = kPvpMax;
     ui_combo_set(g_grade, gr);
-    ui_set_int(g_win, g.data.pvp_win);
-    ui_set_int(g_point, g.data.pvp_point);
+    ui_set_int(g_win, 0);
+    ui_set_int(g_point, 0);
     s_fill_gen = g.data_ver;             // 这一代快照已经填过了
     s_refill = 0;
     // 队列的推进不在这里：page_gm_pump 每 tick 都会调，和本页刷不刷新无关
@@ -496,13 +497,35 @@ static HWND gm_field(int id) {
     }
 }
 
+// 数值框是一次性的设定框：填好 → 失焦提交 → 框自己清回 0。
+// 所以框里的 0 表示「这次没有要设的值」，不能当成「设为 0」——否则用户点一下
+// 空框再离开、什么都没改，金币就被清零了。当前值只从左边角色信息看。
+static void gm_take(HWND e) {
+    if (e) ui_set_i64(e, 0);
+}
+
+// 快照里的当前值：+ 按钮在它上面加，而不是在框里加（框里恒为 0）。
+static i64 gm_value(int id) {
+    switch (id) {
+        case G_LEV:       return g.cur.lev;
+        case G_MONEY:     return (i64)g.data.money;
+        case G_COIN:      return (i64)g.data.coin;
+        case G_ACCM:      return (i64)g.data.account_money;
+        case G_CERA:      return (i64)g.data.cera;
+        case G_POINT:     return (i64)g.data.cera_point;
+        case G_WIN:       return g.data.pvp_win;
+        case G_PVP_POINT: return g.data.pvp_point;
+        default:          return 0;
+    }
+}
+
 // 失焦即写：只有值真的变了才发一条 UPDATE（点来点去、来回切页都不产生流量）。
-// 校验不过就退回快照里的值，不弹框打断——失焦时弹模态框会跟焦点切换打架。
+// 校验不过不弹框打断——失焦时弹模态框会跟焦点切换打架，状态栏说一句就够了。
 static void gm_commit(int id) {
     if (!g.char_ok) return;
     if (g.cur.online) {
         app_status("角色在线，改动未写入——请先退出游戏");
-        gm_refill();
+        gm_refill();                     // 顺便把刚填的值清掉
         return;
     }
     Ctx c;
@@ -510,9 +533,10 @@ static void gm_commit(int id) {
     switch (id) {
         case G_LEV: {
             int v = ui_int(c_lev);
+            gm_take(c_lev);
+            if (v == 0) return;                    // 没填
             if (v < 1 || v > GM_LEV_MAX) {
-                app_status("等级范围 1~%d，已退回原值", GM_LEV_MAX);
-                gm_refill();
+                app_status("等级范围 1~%d，未写入", GM_LEV_MAX);
                 return;
             }
             if (v == g.cur.lev) return;
@@ -526,6 +550,8 @@ static void gm_commit(int id) {
         }
         case G_MONEY: {
             i64 v = gm_u32(c_money);
+            gm_take(c_money);
+            if (v == 0) return;
             if (v == (i64)g.data.money) return;
             c.u1 = (u64)v;
             gm_push(K_MONEY, &c);
@@ -533,6 +559,8 @@ static void gm_commit(int id) {
         }
         case G_COIN: {
             i64 v = gm_u32(c_coin);
+            gm_take(c_coin);
+            if (v == 0) return;
             if (v == (i64)g.data.coin) return;
             c.u1 = (u64)v;
             gm_push(K_COIN, &c);
@@ -541,6 +569,11 @@ static void gm_commit(int id) {
         case G_CERA:          // 点券和赠送点券是一条 UPDATE，两个框谁失焦都一起提交
         case G_POINT: {
             i64 ce = gm_u32(c_cera), pt = gm_u32(c_point);
+            gm_take(c_cera);
+            gm_take(c_point);
+            // 只填了一个就只改一个，另一个沿用当前值
+            if (ce == 0) ce = (i64)g.data.cera;
+            if (pt == 0) pt = (i64)g.data.cera_point;
             if (ce == (i64)g.data.cera && pt == (i64)g.data.cera_point) return;
             c.u1 = (u64)ce;
             c.u2 = (u64)pt;
@@ -549,6 +582,8 @@ static void gm_commit(int id) {
         }
         case G_ACCM: {
             i64 v = gm_u32(c_accm);
+            gm_take(c_accm);
+            if (v == 0) return;
             if (v == (i64)g.data.account_money) return;
             c.u1 = (u64)v;
             gm_push(K_ACCM, &c);
@@ -577,13 +612,16 @@ static void gm_commit(int id) {
         case G_GRADE:
         case G_WIN:
         case G_PVP_POINT: {
-            // 段位是下拉（绝对值），胜场/胜点也是绝对值框：三样同属一条 UPDATE
+            // 段位是下拉（选中的就是目标值），胜场/胜点是设定框：框里 0 表示
+            // 这一项不动，沿用当前值 —— 只改段位时不用把另外两个数字再抄一遍。
             int gr = ui_combo_sel(g_grade), win = ui_int(g_win), pt = ui_int(g_point);
+            gm_take(g_win);
+            gm_take(g_point);
             if (gr < 0) gr = 0;
             if (gr > kPvpMax) gr = kPvpMax;
-            if (win < 0) win = 0;
+            if (win <= 0) win = g.data.pvp_win;
             if (win > GM_PVP_MAX) win = GM_PVP_MAX;
-            if (pt < 0) pt = 0;
+            if (pt <= 0) pt = g.data.pvp_point;
             if (pt > GM_PVP_MAX) pt = GM_PVP_MAX;
             if (gr == g.data.pvp_grade && win == g.data.pvp_win && pt == g.data.pvp_point) return;
             c.i1 = gr;
@@ -612,8 +650,9 @@ static void gm_commit(int id) {
 }
 
 // ---------------- 数值框的「+数量」快捷按钮 ----------------
-// 按钮只写「+数量」：在当前值上加这么多，把结果写回框再走同一条提交路径，
-// 所以框里显示的始终是库里那份数字，而不是「待加的增量」。
+// 按钮只写「+数量」：在当前值上加这么多，立刻写库。
+// 加法的起点是快照里的当前值（左栏那份），不是输入框 —— 框里恒为 0，
+// 拿它当起点等于每次都从 0 加到同一个数，点两下也只有一份。
 #define QADD_N 8
 static HWND s_qadd[QADD_N];
 static const struct {
@@ -645,16 +684,15 @@ static void gm_quick_add(int i) {
     i64 cap = (tgt == G_LEV) ? GM_LEV_MAX
             : (tgt == G_WIN || tgt == G_PVP_POINT) ? GM_PVP_MAX
                                                    : GM_U32_MAX;
-    i64 cur = ui_i64(e);
+    i64 cur = gm_value(tgt);           // 当前值来自快照（框里恒为 0）
     if (cur < 0) cur = 0;
     if (cur >= cap) {
         app_status("%s 已经是上限 %lld 了", kQAdd[i].name, (long long)cap);
-        ui_set_i64(e, cap);        // 顺手规范化：别让框里留着超出上限的数字
         return;
     }
     i64 v = cur + (i64)kQAdd[i].step;
     if (v > cap) v = cap;
-    ui_set_i64(e, v);
+    ui_set_i64(e, v);                  // 借框走一遍统一的校验/提交，提交完框自己回 0
     gm_commit(tgt);
 }
 
@@ -976,7 +1014,9 @@ static void gm_build(Page *p, HWND parent) {
 
     c_name = ui_edit(parent, "", G_NAME, 0);
     c_lev = ui_edit(parent, "", G_LEV, 0);
-    ui_num(c_lev, 1, GM_LEV_MAX);          // 1~100，越界不进框（也挡在提交前）
+    // 下限 0：框里恒为 0 表示「这次没有要设的值」，等级也走这条 —— 若下限卡 1，
+    // 用户点一下空框再离开，ui_num 会把 0 兜成 1，等于把角色打成 1 级。
+    ui_num(c_lev, 0, GM_LEV_MAX);
     job_labels();
     c_job = ui_combo(parent, G_JOB, 1);
     ui_combo_fill(c_job, kJobLbl, COUNT_OF(kJobList), 0);
@@ -1062,34 +1102,36 @@ static void gm_build(Page *p, HWND parent) {
     // 数值框收的是「设成多少」，和库里当前值一致：填好点到别处就按这个数写库。
     // 要「加一笔」走右边的 + 按钮，那条路会把加法结果写回框，两个语义不混。
     ui_tip(parent, c_name, "改完点到别处即写入库；重名会退回原值。角色在线时改会被服务端存档覆盖——要改先退出游戏");
+    // 这些框都是「一次性设定框」：填好点到别处就写库，然后框自己清回 0。
+    // 提示必须把这两点说清（留 0 = 不改），否则用户会以为框里应该显示当前值。
     ui_tip(parent, c_lev,
-           "填的是等级本身（1~100），改完点到别处就按这个数写库，经验清零；"
-           "要往上加几级用右边的 +10。角色在线时改了会被存档覆盖");
+           "填「设成几级」（1~100），点到别处按这个数写库、经验清零，框随即回 0。"
+           "留 0 = 不改；要往上加几级用右边 +10。当前等级看左边角色信息");
     ui_tip(parent, c_money,
-           "填的是金币总额，改完点到别处就按这个数写库（0~4294967295）；"
-           "要在现有金币上加一笔用右边 +1000万。角色在线时改了会被服务端存档覆盖");
+           "填「设成多少金币」（0~4294967295），点到别处写库，框随即回 0。"
+           "留 0 = 不改；要加一笔用右边 +1000万。当前值看左边角色信息");
     ui_tip(parent, c_coin,
-           "填的是复活币总数，改完点到别处就按这个数写库；要加一笔用右边 +100");
+           "填「设成多少复活币」，点到别处写库，框随即回 0。留 0 = 不改；要加一笔用右边 +100");
     ui_tip(parent, c_accm,
-           "账号级金币，同账号所有角色共用。填的是总额，改完点到别处写库；"
-           "要加一笔用右边 +1000万。账号金库记录不存在时会自动建一条");
+           "账号级金币，同账号所有角色共用。填「设成多少」，点到别处写库，框随即回 0。"
+           "留 0 = 不改；要加一笔用右边 +1000万。账号金库记录不存在时会自动建一条");
     ui_tip(parent, c_vip,
            "账号级 VIP 标记（d_taiwan.accounts.VIP），同账号所有角色共用。"
            "勾上写 1，取消勾选写 0 —— 不用自己填。"
            "角色在线时改了会被服务端存档覆盖");
     ui_tip(parent, c_cera,
-           "填的是点券总额，改完点到别处就按这个数写库；要加一笔用右边 +1万。"
-           "点券和赠送点券是同一条 UPDATE，两边一起去写");
+           "填「设成多少点券」，点到别处写库，框随即回 0；留 0 = 这一项不改。"
+           "点券和赠送点券是同一条 UPDATE，只填一个就只改那一个");
 
-    // 快捷按钮上只有「+数量」：点一下在当前值上加，并把结果写回旁边的框
-    ui_tip(parent, s_qadd[0], "在当前等级上加 10 级（封顶 100），立刻写库，结果回写进框");
-    ui_tip(parent, s_qadd[1], "在当前金币上加 1000 万，立刻写库，结果回写进框（上限 4294967295）");
-    ui_tip(parent, s_qadd[2], "在当前复活币上加 100，立刻写库，结果回写进框");
-    ui_tip(parent, s_qadd[3], "在当前账号金币上加 1000 万，立刻写库，结果回写进框");
-    ui_tip(parent, s_qadd[4], "在当前点券上加 1 万，立刻写库，结果回写进框；赠送点券一起提交");
-    ui_tip(parent, s_qadd[5], "在当前赠送点券上加 1 万，立刻写库，结果回写进框；点券一起提交");
-    ui_tip(parent, s_qadd[6], "在当前胜场上加 100，立刻写库，结果回写进框");
-    ui_tip(parent, s_qadd[7], "在当前胜点上加 1000，立刻写库，结果回写进框");
+    // 快捷按钮上只有「+数量」：点一下在「当前值」上加，不经过输入框
+    ui_tip(parent, s_qadd[0], "在当前等级上加 10 级（封顶 100），立刻写库；不动输入框");
+    ui_tip(parent, s_qadd[1], "在当前金币上加 1000 万，立刻写库；不动输入框（上限 4294967295）");
+    ui_tip(parent, s_qadd[2], "在当前复活币上加 100，立刻写库；不动输入框");
+    ui_tip(parent, s_qadd[3], "在当前账号金币上加 1000 万，立刻写库；不动输入框");
+    ui_tip(parent, s_qadd[4], "在当前点券上加 1 万，立刻写库；赠送点券一起提交");
+    ui_tip(parent, s_qadd[5], "在当前赠送点券上加 1 万，立刻写库；点券一起提交");
+    ui_tip(parent, s_qadd[6], "在当前胜场上加 100，立刻写库；不动输入框");
+    ui_tip(parent, s_qadd[7], "在当前胜点上加 1000，立刻写库；不动输入框");
 
     ui_set_int(g_win, 0);
     ui_set_int(g_point, 0);

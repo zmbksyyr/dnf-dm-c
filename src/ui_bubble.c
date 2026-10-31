@@ -102,9 +102,13 @@ typedef struct {
 static void bub_place_row(HWND pw, int bx, int ry, int w1, const char *lab, HWND ctl,
                           const char *unit, int lbh, int lgap, int rh) {
     int uw = unit && unit[0] ? ui_text_w(unit) + ui_scale(6) : 0;
+    int cw = w1 - uw;
+    // 框不跟着格子拉满：这一页最长只填 10 位数字（4294967295），
+    // 半格宽的输入框一个字都装得下，右半边空着，看着像能填一大段东西。
+    if (cw > ui_scale(150)) cw = ui_scale(150);
     ui_place(ui_lbl_at(pw, lab), bx, ry, w1 - uw, lbh);
-    ui_place(ctl, bx, ry + lbh + lgap, w1 - uw, rh);
-    if (uw) ui_place(ui_lbl_at(pw, unit), bx + w1 - uw + ui_scale(4), ry + lbh + lgap, uw, rh);
+    ui_place(ctl, bx, ry + lbh + lgap, cw, rh);
+    if (uw) ui_place(ui_lbl_at(pw, unit), bx + cw + ui_scale(4), ry + lbh + lgap, uw, rh);
 }
 
 static void bub_field_rows(HWND pw, int bx, int by, int bw, int bh, const BubRow *r, int n) {

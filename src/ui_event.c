@@ -207,7 +207,6 @@ static void ev_layout(Page *p, int w, int h) {
     // 「下拉里翻不到」在 e_eid 上），页面上再写一遍只是占地方。
     // 按钮也不再贴窗口右边：贴右会跟前面的字段隔开半屏空白，看着像另一个功能。
     // 两个操作按钮共用同一个左边界，右端对齐成一条竖线。
-    const int right = ix + cw - ui_scale(20);      // 活动下拉的右边界
     const int bwx = ui_scale(96);
 
     // ---- 组一：启用活动 ----
@@ -217,13 +216,7 @@ static void ev_layout(Page *p, int w, int h) {
     ui_place(GetDlgItem(p->wnd, E_GRP1), x0, y, cw, g1h);
 
     int iy = y + ui_scale(24);
-    // 行 1：活动下拉。宽度算到整页右边界为止，不用 -1 —— ui_add(-1) 是按「页面客户区」
-    // 撑到右边，而组框比页面窄一圈（左右各 12），结果下拉会顶穿组框边框。
-    ui_row(&r, p->wnd, ix, iy, rowh);
-    ui_add(&r, ui_lbl_at(p->wnd, "活动"), ui_scale(34));
-    int cw1 = right - r.x - r.gap;
-    if (cw1 < ui_scale(160)) cw1 = ui_scale(160);
-    ui_add(&r, e_combo, cw1);
+    const int iy1 = iy;
 
     // 行 2：参数 / 持续天数 / 启用（按钮紧跟字段，不推到窗口最右）
     iy += rowh + g;
@@ -239,6 +232,7 @@ static void ev_layout(Page *p, int w, int h) {
     ui_gap(&r, ui_scale(16));
     const int bx = r.x;                            // 两个按钮共用的左边界
     ui_add(&r, ui_btn_at(p->wnd, E_ADD, "启用活动"), bwx);
+    const int btn_right = bx + bwx;                // 启用活动按钮的右端
 
     // 行 3：按编号启用（下拉里翻不到时走这条）
     iy += rowh + g;
@@ -247,6 +241,16 @@ static void ev_layout(Page *p, int w, int h) {
     ui_add(&r, e_eid, ui_scale(70));
     r.x = bx;
     ui_add(&r, ui_btn_at(p->wnd, E_EIDADD, "按编号启用"), bwx);
+
+    // 行 1：活动下拉。右端对齐到「启用活动」按钮的右端 —— 拉满整页时这一行横穿
+    // 整个窗口，下面两行只到一半，右边缘差出半屏，看着像两套版面拼在一起。
+    // 所以先摆完下面两行拿到按钮右端，再回头摆这一行。
+    // 不用 ui_add(-1)：那是按「页面客户区」撑到右边，组框比页面窄一圈，会顶穿边框。
+    ui_row(&r, p->wnd, ix, iy1, rowh);
+    ui_add(&r, ui_lbl_at(p->wnd, "活动"), ui_scale(34));
+    int cw1 = btn_right - r.x - r.gap;
+    if (cw1 < ui_scale(160)) cw1 = ui_scale(160);
+    ui_add(&r, e_combo, cw1);
 
     // ---- 组二：新增活动定义 ----
     y += g1h + g;

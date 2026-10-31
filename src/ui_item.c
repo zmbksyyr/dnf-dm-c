@@ -539,6 +539,7 @@ enum {
 };
 
 static HWND q_kw, q_list, q_info, q_sep;
+static void q_fit_cols(void);      // 按列表实际客户区摊列宽，见下
 
 // 列表行的附带数据：低 32 位是物品编号，高 32 位是「这道工序要几个」。
 // LPARAM 在 x64 上是 64 位，一个字段装得下，不用再挂一张跟行号对齐的并排数组
@@ -588,8 +589,29 @@ static void common_list(const unsigned char *data, size_t len, const char *what)
         hit++;
     }
     ui_batch(q_list, 0);
+    q_fit_cols();                       // 数据多了才有竖滚动条，客户区变窄，重新摊一次
     ui_text(q_info, fmt_new("%s %d 条 · PVF 里没有 %d 条", what, hit, miss));
     app_status("已列出%s %d 条", what, hit);
+}
+
+// 列宽按列表「实际客户区」摊：编号、数量定宽，名称/说明吃掉剩下的宽。
+// 不能按页面宽度算 —— 列表带边框，出了竖向滚动条还要再让出一条，差这十几像素
+// 列表底下就会多一条横向滚动条，看着像多出一条白带。填充完数据后还要再算一次：
+// 数据多了才出现竖向滚动条，那时客户区比布局时窄。
+static void q_fit_cols(void) {
+    if (!q_list) return;
+    RECT rc;
+    if (!GetClientRect(q_list, &rc)) return;
+    int usable = (int)(rc.right - rc.left) - ui_scale(1);
+    int c0 = ui_scale(72), c2 = ui_scale(56);
+    int rest = usable - c0 - c2;
+    if (rest < ui_scale(160)) rest = ui_scale(160);
+    int c1 = rest * 40 / 100;
+    int c3 = rest - c1;
+    SendMessageW(q_list, LVM_SETCOLUMNWIDTH, 0, MAKELPARAM(c0, 0));
+    SendMessageW(q_list, LVM_SETCOLUMNWIDTH, 1, MAKELPARAM(c1, 0));
+    SendMessageW(q_list, LVM_SETCOLUMNWIDTH, 2, MAKELPARAM(c2, 0));
+    SendMessageW(q_list, LVM_SETCOLUMNWIDTH, 3, MAKELPARAM(c3, 0));
 }
 
 // 「加载任务材料」：把 PVF 里所有收集类任务要的物品列出来。
@@ -620,6 +642,7 @@ static void query_task_mats(void) {
         shown++;
     }
     ui_batch(q_list, 0);
+    q_fit_cols();
     free(v);
     ui_text(q_info, fmt_new("任务材料 %d 条 · 数量随行进队列", shown));
     app_status("任务材料：%d 种", shown);
@@ -688,6 +711,7 @@ static void query_do(void) {
         hit++;
     }
     ui_batch(q_list, 0);
+    q_fit_cols();
     ui_text(q_info, fmt_new("命中 %d 条（最多显示 800）", hit));
 }
 
@@ -747,22 +771,8 @@ static void query_layout(Page *p, int w, int h) {
 
     int ly = y + rowh + g;                    // 按钮和列表之间断一刀
     ui_place(q_sep, pad, ly, w - pad * 2, ui_scale(2));
-    // 列宽按列表实际宽度摊：编号、数量是定宽，名称/说明吃掉剩下的。
-    // 写死像素（80+300+60+520=960）在 780 宽的页面上会撑出横向滚动条，列表底下多一条白带。
-    int listw = w - pad * 2 - ui_scale(8);
-    int c0 = ui_scale(72), c2 = ui_scale(56);
-    int rest = listw - c0 - c2;
-    if (rest < ui_scale(160)) rest = ui_scale(160);
-    int c1 = rest * 40 / 100, c3 = rest - c1;
-    static int s_qcw = -1;
-    if (listw != s_qcw) {
-        s_qcw = listw;
-        SendMessageW(q_list, LVM_SETCOLUMNWIDTH, 0, MAKELPARAM(c0, 0));
-        SendMessageW(q_list, LVM_SETCOLUMNWIDTH, 1, MAKELPARAM(c1, 0));
-        SendMessageW(q_list, LVM_SETCOLUMNWIDTH, 2, MAKELPARAM(c2, 0));
-        SendMessageW(q_list, LVM_SETCOLUMNWIDTH, 3, MAKELPARAM(c3, 0));
-    }
     ui_fill_rest(p->wnd, q_list, ly + ui_scale(8));
+    q_fit_cols();
 }
 
 static void query_lock(Page *p) {
