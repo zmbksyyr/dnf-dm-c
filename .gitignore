@@ -16,7 +16,8 @@ config/
 __pycache__/
 *.pyc
 tools/out/
-shots/          # 验证脚本的截图（DNF_GM_BUILD 指向树内时会落在这里）
+# 验证脚本的截图（DNF_GM_BUILD 指向树内时会落在这里）
+shots/
 
 # 临时
 *.tmp
