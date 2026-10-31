@@ -27,9 +27,13 @@ static void ban_fill_chars(void) {
     s_char_n = 0;
     for (int i = 0; i < g.ban_chars.n && s_char_n < 5000; i++) {
         Charac *c = VEC_AT(&g.ban_chars, Charac, i);
+        // label 是 UTF-8，CB_ADDSTRING 走的是 W 版接口，必须先转 UTF-16，
+        // 否则那串字节会被当成 UTF-16 读，下拉里就是一堆乱码。
         char label[128];
+        WCHAR w[160];
         fmt(label, sizeof(label), "%s (No.%u) · %s", c->name, c->no, c->account);
-        SendMessageW(b_char, CB_ADDSTRING, 0, (LPARAM)label);
+        utf16(label, w, COUNT_OF(w));
+        SendMessageW(b_char, CB_ADDSTRING, 0, (LPARAM)w);
         SendMessageW(b_char, CB_SETITEMDATA, (WPARAM)s_char_n, (LPARAM)s_char_n);
         s_char_no[s_char_n] = c->no;
         s_char_mid[s_char_n] = c->mid;
