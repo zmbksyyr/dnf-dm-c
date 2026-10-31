@@ -238,10 +238,29 @@ HWND ui_edit(HWND parent, const char *text, int id, int ro) {
     return h;
 }
 
+// 点完按钮把焦点交还父窗口。
+// 不交还的话焦点就留在按钮上，按钮会一直画焦点矩形 —— Win11 下是蓝色外框，
+// 经典主题下是黑色点线，看起来就是「按下去变了个颜色，再也回不来」。
+// 系统自带的按钮也这样（资源管理器里点一次按钮，焦点同样留着），只是那里的
+// 焦点框不明显；这个工具几乎全靠鼠标点，留着只会让人以为按坏了。
+static LRESULT CALLBACK btn_proc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR ref) {
+    (void)id;
+    (void)ref;
+    LRESULT r = DefSubclassProc(h, m, wp, lp);   // 先让按钮把 BN_CLICKED 发出去
+    if (m == WM_LBUTTONUP) {
+        HWND par = GetParent(h);
+        // 动作里可能已经重建/销毁了页面，交还前确认父窗口还在。
+        if (par && IsWindow(par)) SetFocus(par);
+    }
+    return r;
+}
+
 HWND ui_button(HWND parent, const char *text, int id) {
     WCHAR w[256];
     utf16(text, w, COUNT_OF(w));
-    return ui_make(parent, L"BUTTON", w, WS_TABSTOP | BS_PUSHBUTTON, 0, id);
+    HWND h = ui_make(parent, L"BUTTON", w, WS_TABSTOP | BS_PUSHBUTTON, 0, id);
+    if (h) SetWindowSubclass(h, btn_proc, 1, 0);
+    return h;
 }
 
 HWND ui_check(HWND parent, const char *text, int id, int on) {
