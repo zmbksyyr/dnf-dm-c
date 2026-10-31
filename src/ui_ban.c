@@ -8,10 +8,14 @@
 
 // ================================================================ 封停页
 enum { B_LIST = PAGE_ID(PAGE_BAN, 1), B_CHAR, B_BANTYPE, B_DAYS, B_REASON, B_BAN, B_UNBAN,
-       B_REFRESH, B_INFO, B_PWD, B_RESETPWD, B_Q1, B_Q3, B_Q7, B_Q30,
-       B_LOADALL, B_LOADON };
+       B_REFRESH, B_INFO, B_PWD, B_RESETPWD, B_LOADALL, B_LOADON };
 
 static HWND b_list, b_char, b_bantype, b_days, b_reason, b_info, b_pwd;
+
+// 封禁时长：下拉里 0 = 永久。原来「类型」下拉里也有一个「永久封禁」，
+// 和这里重复 —— 两个地方都能表达永久，选错一个就封错时长，现在只留这一处。
+static const char *kBanDaysLbl[] = {"1 天", "3 天", "7 天", "30 天", "永久"};
+static const int   kBanDaysVal[] = {1, 3, 7, 30, 0};
 
 // 角色下拉选择器：数据源 g.ban_chars（Vec<Charac>）
 // 用平行数组存 charac_no / mid，CB_SETITEMDATA 存索引
@@ -167,10 +171,6 @@ static LRESULT ban_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             return 0;
         case B_LOADALL: return ban_load(p, 0);
         case B_LOADON:  return ban_load(p, 1);
-        case B_Q1:  SetWindowTextA(b_days, "1");  return 0;
-        case B_Q3:  SetWindowTextA(b_days, "3");  return 0;
-        case B_Q7:  SetWindowTextA(b_days, "7");  return 0;
-        case B_Q30: SetWindowTextA(b_days, "30"); return 0;
         case B_BAN: {
             int idx = ban_sel_idx();
             char reason[160];
@@ -179,12 +179,12 @@ static LRESULT ban_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             if (idx < 0) { app_info("请先在列表中选一个角色。"); return 0; }
             u32 mid = s_char_mid[idx];
             u32 charac_no = s_char_no[idx];
-            // 封禁类型：0=账号封禁 1=角色封禁 2=永久封禁
+            // 封禁类型：0=账号封禁 1=角色封禁；永久由「时长」下拉里的「永久」表达
             int sel = (int)SendMessageW(b_bantype, CB_GETCURSEL, 0, 0);
             int is_char_ban = (sel == 1);
-            int is_perm     = (sel == 2);
-            int days = is_perm ? 0 : ui_int(b_days);
-            if (!is_perm && days < 1) days = 1;   // 非永久至少 1 天，避免误封永久
+            int di = (int)SendMessageW(b_days, CB_GETCURSEL, 0, 0);
+            int days = (di >= 0 && di < COUNT_OF(kBanDaysVal)) ? kBanDaysVal[di] : 7;
+            int is_perm = (days == 0);
             const char *dur = is_perm ? "永久" : fmt_new("%d 天", days);
 
             if (is_char_ban) {
@@ -268,19 +268,21 @@ static void ban_layout(Page *p, int w, int h) {
     ui_add(&r, b_info, -1);
 
     int y = pad + rowh + g;
-    // 列表 + 底部操作区（4 行）
-    int btm = rc.bottom - pad - rowh * 4 - g * 4;
+    // 列表 + 底部操作区（3 行：字段 / 按钮 / 提示）
+    int btm = rc.bottom - pad - rowh * 3 - g * 3;
     MoveWindow(b_list, pad, y, rc.right - pad * 2, btm - y, TRUE);
 
-    // 第一行：角色选择 + 封禁类型 + 天数 + 原因
+    // 第一行：角色选择 + 封禁类型 + 时长 + 原因
+    // 角色下拉收窄到 200：原先把「原因」挤成一小格，而原因才是每次都要填的；
+    // 角色名太长时下拉展开就能看全，不必靠输入框宽度撑。
     y = btm + g;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "角色"), ui_scale(34));
-    ui_add(&r, b_char, ui_scale(280));
+    ui_add(&r, b_char, ui_scale(200));
     ui_add(&r, ui_lbl_at(p->wnd, "类型"), ui_scale(34));
-    ui_add(&r, b_bantype, ui_scale(90));
-    ui_add(&r, ui_lbl_at(p->wnd, "天数"), ui_scale(34));
-    ui_add(&r, b_days, ui_scale(56));
+    ui_add(&r, b_bantype, ui_scale(96));
+    ui_add(&r, ui_lbl_at(p->wnd, "时长"), ui_scale(34));
+    ui_add(&r, b_days, ui_scale(76));
     ui_add(&r, ui_lbl_at(p->wnd, "原因"), ui_scale(34));
     ui_add(&r, b_reason, -1);
 
@@ -293,28 +295,19 @@ static void ban_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, B_RESETPWD, "重置密码"), ui_scale(76));
     ui_add(&r, ui_lbl_at(p->wnd, "（账号级操作在 GM 页）"), -1);
 
-    // 第三行：快捷时长
-    y += rowh + g;
-    ui_row(&r, p->wnd, pad, y, rowh);
-    ui_add(&r, ui_lbl_at(p->wnd, "快捷"), ui_scale(40));
-    ui_add(&r, ui_btn_at(p->wnd, B_Q1, "1天"), ui_scale(48));
-    ui_add(&r, ui_btn_at(p->wnd, B_Q3, "3天"), ui_scale(48));
-    ui_add(&r, ui_btn_at(p->wnd, B_Q7, "7天"), ui_scale(48));
-    ui_add(&r, ui_btn_at(p->wnd, B_Q30, "30天"), ui_scale(56));
-    ui_add(&r, ui_lbl_at(p->wnd, "（选「永久封禁」忽略天数，封到 2099）"), -1);
-
-    // 第四行：提示
+    // 第三行：提示
     y += rowh + g;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_lbl_at(p->wnd,
-        "封禁类型：账号 = 封停整个账号登录；角色 = 只禁该角色，账号仍可登录其它角色；永久 = 封到 2099"), -1);
+        "类型：账号 = 封停整个账号登录；角色 = 只禁该角色，账号仍可登录其它角色。"
+        "时长选「永久」时封到 2099"), -1);
 }
 
 static void ban_lock(Page *p) {
     (void)p;
     int on = g.db_ok;
     int ids[] = {B_BAN, B_UNBAN, B_REFRESH, B_LOADALL, B_LOADON, B_CHAR, B_BANTYPE, B_DAYS,
-                 B_REASON, B_PWD, B_RESETPWD, B_Q1, B_Q3, B_Q7, B_Q30};
+                 B_REASON, B_PWD, B_RESETPWD};
     for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
 }
 
@@ -323,14 +316,17 @@ static void ban_build(Page *p, HWND parent) {
     b_info = ui_label(parent, "请先连接数据库", B_INFO);
     b_char = ui_combo(parent, B_CHAR, 1);   // droplist：只能从下拉选
     b_bantype = ui_combo(parent, B_BANTYPE, 1);
-    b_days = ui_edit(parent, "7", B_DAYS, 0);
+    b_days = ui_combo(parent, B_DAYS, 1);
     b_reason = ui_edit(parent, "", B_REASON, 0);
     b_pwd = ui_edit(parent, "123456", B_PWD, 0);
-    // 封禁类型下拉
+    // 封禁类型下拉：永久已挪进「时长」，这里只区分封谁
     SendMessageW(b_bantype, CB_ADDSTRING, 0, (LPARAM)L"账号封禁");
     SendMessageW(b_bantype, CB_ADDSTRING, 0, (LPARAM)L"角色封禁");
-    SendMessageW(b_bantype, CB_ADDSTRING, 0, (LPARAM)L"永久封禁");
     SendMessageW(b_bantype, CB_SETCURSEL, 0, 0);
+    // 时长下拉
+    ui_combo_fill(b_days, kBanDaysLbl, COUNT_OF(kBanDaysLbl), 2);   // 默认 7 天
+    // 原因给个默认值：现场处置十次有九次是「违规」，留空会让人以为必填
+    ui_text(b_reason, "违规");
     // 列表主体是角色（「加载全服 / 加载在线」决定范围），右侧几列是该角色生效中的封停
     ui_cols(b_list, (const char *const[]){"账号", "mid", "封禁", "角色", "开始", "结束", "原因"},
             (const int[]){110, 56, 48, 160, 125, 125, 160}, 7);
@@ -340,10 +336,6 @@ static void ban_build(Page *p, HWND parent) {
     ui_button(parent, "解除封停", B_UNBAN);
     ui_button(parent, "执行封停", B_BAN);
     ui_button(parent, "重置密码", B_RESETPWD);
-    ui_button(parent, "1天", B_Q1);
-    ui_button(parent, "3天", B_Q3);
-    ui_button(parent, "7天", B_Q7);
-    ui_button(parent, "30天", B_Q30);
     ui_tip(parent, GetDlgItem(parent, B_REFRESH), "按当前范围（全服 / 在线）重新读取角色和封停状态");
     ui_tip(parent, GetDlgItem(parent, B_LOADALL),
            "把全服所有角色加载到上方列表，右侧附带各人当前的封停状态；点一行即填到下方");
@@ -351,16 +343,15 @@ static void ban_build(Page *p, HWND parent) {
            "只加载当前在线的角色（账号在线且正在玩这个角色）。"
            "现场处置时用这个，不用在一堆离线角色里翻");
     ui_tip(parent, b_char, "要处置的角色；也可以直接点上方列表的某一行，会自动切到这里");
-    ui_tip(parent, b_bantype, "账号封禁 = 封停整个账号登录；角色封禁 = 只禁该角色，账号仍可登录其它角色；永久封禁 = 封到 2099");
-    ui_tip(parent, GetDlgItem(parent, B_BAN), "按选中的角色和封禁类型写入一条封停记录");
+    ui_tip(parent, b_bantype, "账号封禁 = 封停整个账号登录；角色封禁 = 只禁该角色，账号仍可登录其它角色。"
+                              "永久封禁选下面的时长「永久」");
+    ui_tip(parent, b_days, "封禁时长：1/3/7/30 天，或「永久」（封到 2099）");
+    ui_tip(parent, b_reason, "写进封停记录的原因，现场默认「违规」，可按实际情况改");
+    ui_tip(parent, GetDlgItem(parent, B_BAN), "按选中的角色、封禁类型和时长写入一条封停记录");
     ui_tip(parent, GetDlgItem(parent, B_UNBAN),
            "解除选中角色身上生效的封停（账号封禁优先，其次角色封禁）；"
            "没被封的角色点这个会提示没有记录");
     ui_tip(parent, GetDlgItem(parent, B_RESETPWD), "把选中角色所属账号的登录密码改成「新密码」里的值");
-    ui_tip(parent, GetDlgItem(parent, B_Q1), "设时长为 1 天");
-    ui_tip(parent, GetDlgItem(parent, B_Q3), "设时长为 3 天");
-    ui_tip(parent, GetDlgItem(parent, B_Q7), "设时长为 7 天");
-    ui_tip(parent, GetDlgItem(parent, B_Q30), "设时长为 30 天");
 }
 
 void page_ban_create(Page *p) {
