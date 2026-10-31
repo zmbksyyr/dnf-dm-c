@@ -39,8 +39,9 @@ static int  s_scan_open;         // 扫完自动弹窗（首次点按钮时）
 static HWND s_slv, s_sinfo;
 
 // 职业/觉醒都做成下拉：值→文字，避免让人对着裸数字猜
+// 职业名沿用参考工具（x/2026.3.14GMTOOL源码）的叫法：6 号职业叫「刺客」而不是「盗贼」
 static const char *kJobList[] = {"未转职", "鬼剑士", "格斗家", "神枪手", "魔法师", "圣职者",
-                                 "盗贼",   "男法师", "缔造者", "黑暗武士", "影舞者"};
+                                 "刺客",   "男法师", "缔造者", "黑暗武士", "影舞者"};
 static char kJobBuf[COUNT_OF(kJobList)][32];
 static const char *kJobLbl[COUNT_OF(kJobList)];
 
@@ -764,6 +765,7 @@ static void gm_layout(Page *p, int w, int h) {
     int wL[3], wR[3];
     for (int i = 0; i < 3; i++) wL[i] = padY + 2 * natF;
     wL[1] = padY + 3 * natF;        // 资产组三行（多了 VIP），按行数给高才不会挤成一团
+    wL[2] = padY + 3 * natF;        // PVP 组也三行（段位/胜场/胜点纵向排）
     wR[0] = padY + rowsOnce * natB;
     wR[1] = padY + COUNT_OF(kAcct) * natB;
     wR[2] = padY + rowsMisc * natB;
@@ -801,13 +803,17 @@ static void gm_layout(Page *p, int w, int h) {
         {"账号金币", c_accm,  "VIP",      c_vip},
         {"点券",     c_cera,  "赠送点券", c_point},
     };
-    GmRow pvp[2] = {
-        {"段位", g_grade, "胜场", g_win},
-        {"分数", g_point, NULL,   NULL},
+    // PVP 三项纵向排（段位 / 胜场 / 胜点），和参考工具一致。
+    // 原来是「段位│胜场 / 分数│空」，两个数字框左右并排、下面还空半边，
+    // 读的时候眼睛要在两列之间来回跳；纵向一行一项，扫下来就是一条线。
+    GmRow pvp[3] = {
+        {"段位", g_grade, NULL, NULL},
+        {"胜场", g_win,   NULL, NULL},
+        {"胜点", g_point, NULL, NULL},
     };
     gm_rows(pw, &L[0], role, 2);
     gm_rows(pw, &L[1], asset, 3);
-    gm_rows(pw, &L[2], pvp, 2);
+    gm_rows(pw, &L[2], pvp, COUNT_OF(pvp));
     gm_btns(pw, &R[0], kOnce, COUNT_OF(kOnce), 2);
     gm_btns(pw, &R[1], kAcct, COUNT_OF(kAcct), 1);
     gm_btns(pw, &R[2], kMisc, COUNT_OF(kMisc), 2);
@@ -886,15 +892,18 @@ static void gm_build(Page *p, HWND parent) {
     // 「库已连接」不再单独挂个标签：状态栏右侧本来就写着库/PVF/同步状态，
     // 页面上再放一个只是同一句话说两遍，还占掉维护组半行宽度
 
-    static const char *kBtn[] = {"满 SP/TP", "满 QP", "无限负重", "开装备槽", "解锁装备",
-                                 "副职业满级", "补满疲劳", "解锁全图", "清除惩罚", "清空任务"};
+    // 按钮文字统一用参考工具（x/2026.3.14GMTOOL源码）的叫法：
+    // 开装备槽→开启左右槽、解锁装备→取消装备等级限制、解锁全图→开启全图全难度、
+    // 副职业满级→设置副职业满级。玩家在两边看到的是同一件事，叫法该一致。
+    static const char *kBtn[] = {"满 SP/TP", "满 QP", "无限负重", "开启左右槽", "取消装备等级限制",
+                                 "设置副职业满级", "补满疲劳", "开启全图全难度", "清除惩罚", "清空任务"};
     for (int i = 0; i < COUNT_OF(kBtn); i++)
         ui_button(parent, kBtn[i], G_SP + i);
     ui_button(parent, "导出任务模版", G_QEXP);
     ui_button(parent, "导入任务模版", G_QIMP);
 
     // 同上：解除建角限制在账号组里，位置比维护组那排按钮高，先建它
-    ui_button(parent, "解除建角限制", G_UNLCREATE);
+    ui_button(parent, "解除账号限制", G_UNLCREATE);
     ui_button(parent, "备份整库", G_DUMP);
     ui_button(parent, "备份角色", G_CDUMP);
     ui_button(parent, "还原备份", G_RESTORE);
