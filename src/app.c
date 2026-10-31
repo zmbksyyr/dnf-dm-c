@@ -826,6 +826,25 @@ void app_grant_add(u32 id) {
     app_status("已加入队列：%s", nm);
 }
 
+int app_grant_has(u32 id) {
+    for (int i = 0; i < g.grant.n; i++)
+        if (VEC_AT(&g.grant, NamedId, i)->id == id) return 1;
+    return 0;
+}
+
+// 常用物品批量入队：类型由调用方给（装备要 IT_EQUIP，材料/时装是 IT_STACK），
+// 不刷状态栏 —— 一次几百条，逐条刷只会让最后一条盖住别的，没有意义。
+void app_grant_add_ex(u32 id, u8 type) {
+    if (app_grant_has(id)) return;
+    char buf[64];
+    const char *nm = app_item_name(id, buf, sizeof(buf));
+    NamedId *n = VEC_ADD(&g.grant, NamedId);   // vec_add 已清零
+    n->id = id;
+    n->num = 1;
+    n->type = type;
+    snprintf(n->name, sizeof(n->name), "%s", nm);
+}
+
 // 发放队列快照：w_grant 在 job 线程跑，g.grant 在 UI 线程可被增删——直接遍历
 // g.grant 是竞态（realloc 后指针悬空 / 删项后越界）。发前拷一份，job 只读快照。
 // 快照放独立静态数组（不在 GrantCtx 里）：GrantCtx 要塞进 app_act 的 768B 队列缓冲，

@@ -1,6 +1,8 @@
 // ui_item：物品页（背包 6 子页 + 清除错误物品）、物品编辑弹窗、查询页、发放页。
 #include "ui.h"
 #include <commdlg.h>
+// 常用物品编号表（内置，运行时不需要任何 ini）。663 个编号压到 689 字节。
+#include "items_data.h"
 
 // ================================================================ 物品编辑弹窗
 typedef struct {
@@ -627,7 +629,8 @@ void page_query_create(Page *p) {
 enum {
     G_ID = PAGE_ID(PAGE_GRANT, 1), G_NUM, G_TYPE, G_ENH, G_INC, G_INCV, G_FORGE,
     G_SEAL, G_SEALC, G_DUR, G_ADD, G_LIST, G_DEL, G_CLR, G_MAIL, G_INV, G_INFO,
-    G_EXPORT, G_IMPORT, G_GAUTO
+    G_EXPORT, G_IMPORT, G_GAUTO,
+    G_MAT, G_EQU, G_AVA          // 加载常用材料 / 装备 / 时装
 };
 
 static HWND g_id, g_num, g_type, g_enh, g_inc, g_incv, g_forge, g_seal, g_sealc, g_dur, g_list, g_info;
@@ -766,6 +769,57 @@ static void grant_add_manual(void) {
         ui_row_sel_set(g_list, last);
         g_bind = last;
     }
+}
+
+// ---- 常用物品：内置编号表 → 逐条查 PVF，当前 PVF 里有的才入队 ----
+// 表在 items_data.h（tools/gen_items.py 生成）。只存编号不存名字，有两个好处：
+// 体积小（663 个编号 689 字节），而且名字是显示时从 PVF 取的，不会出现 ini 里
+// 的名字和实际 PVF 对不上（比如 8387 手写成「天空礼盒」，PVF 里叫「稀有装扮自选礼盒」）。
+// 查不到名字 = 当前这版 PVF 里根本没这件东西，正好跳过。
+static u32 varint_rd(const unsigned char **pp) {
+    const unsigned char *p = *pp;
+    u32 v = 0;
+    int sh = 0;
+    for (;;) {
+        unsigned char b = *p++;
+        v |= (u32)(b & 0x7F) << sh;
+        if (!(b & 0x80)) break;
+        sh += 7;
+    }
+    *pp = p;
+    return v;
+}
+
+static void common_load(const unsigned char *data, size_t len, u8 type, const char *what) {
+    if (!g.pvf_ok) {
+        app_info("还没加载 PVF。\n\n"
+                 "常用物品只存了编号，名字和「当前 PVF 里有没有这件」都得查 PVF 索引，"
+                 "所以得先在左上角把 Script.pvf 选好。");
+        return;
+    }
+    if (!g.char_ok) {
+        app_info("请先选择角色 —— 队列是攒给这个角色的。");
+        return;
+    }
+
+    const unsigned char *p = data, *end = data + len;
+    u32 id = 0;
+    int add = 0, no_pvf = 0, dup = 0;
+    while (p < end) {
+        id += varint_rd(&p);
+        const char *nm = pvf_item_name(&g.pvf, id);
+        if (!nm || !*nm) { no_pvf++; continue; }   // 这版 PVF 里没有，跳过
+        if (app_grant_has(id)) { dup++; continue; }  // 已经在队列里，不重复加
+        app_grant_add_ex(id, type);
+        add++;
+    }
+    if (add) {
+        g_bind = -1;
+        grant_reload(NULL);
+    }
+    app_status("已加载%s %d 条 · PVF 里没有 %d 条 · 队列里已有 %d 条", what, add, no_pvf, dup);
+    app_log("加载常用%s：新增 %d，PVF 无 %d，已存在 %d（队列共 %d 项）",
+            what, add, no_pvf, dup, (int)g.grant.n);
 }
 
 static void grant_load_sel(void) {
@@ -987,6 +1041,11 @@ static LRESULT grant_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         }
         switch (id) {
             case G_ADD: grant_add_manual(); return 0;
+            case G_MAT: common_load(kCommonMat, sizeof(kCommonMat), IT_STACK, "常用材料"); return 0;
+            case G_EQU: common_load(kCommonEquip, sizeof(kCommonEquip), IT_EQUIP, "常用装备"); return 0;
+            // 时装表里 2600000/10000000 段那批，PVF 里是「装扮礼包」不是可穿部位，
+            // 按可堆叠发出去，玩家自己开 —— 按时装部位发会得到一堆空槽。
+            case G_AVA: common_load(kCommonAvatar, sizeof(kCommonAvatar), IT_STACK, "常用时装"); return 0;
             case G_TYPE:
                 if (code == CBN_SELCHANGE) grant_sync();
                 return 0;
@@ -1080,6 +1139,11 @@ static void grant_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, G_CLR, "清空队列"), ui_scale(84));
     ui_add(&r, ui_btn_at(p->wnd, G_EXPORT, "导出"), ui_scale(56));
     ui_add(&r, ui_btn_at(p->wnd, G_IMPORT, "导入"), ui_scale(56));
+    // 和上面「导入/导出」之间留个空档：前者是整张队列的进出，后者是一次灌一批
+    ui_gap(&r, ui_scale(16));
+    ui_add(&r, ui_btn_at(p->wnd, G_MAT, "加载常用材料"), ui_scale(100));
+    ui_add(&r, ui_btn_at(p->wnd, G_EQU, "加载常用装备"), ui_scale(100));
+    ui_add(&r, ui_btn_at(p->wnd, G_AVA, "加载常用时装"), ui_scale(100));
 
     int listtop = y + rowh + g + rowh + g;   // 按钮行下面再留一行说明
     ui_place(g_hint, pad, y + rowh + g, rc.right - pad * 2, rowh);
@@ -1097,6 +1161,12 @@ static void grant_lock(Page *p) {
     int ids[] = {G_ID, G_NUM, G_TYPE, G_ENH, G_INC, G_INCV, G_FORGE, G_SEAL, G_SEALC, G_DUR,
                  G_ADD, G_DEL, G_CLR, G_MAIL, G_INV, G_EXPORT, G_IMPORT};
     for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
+    // 三个常用物品按钮还多一个条件：已加载 PVF。表里只有编号，没有 PVF 索引
+    // 既查不出名字、也判断不了这件东西在不在。
+    int pv = on && g.pvf_ok;
+    ui_enable(GetDlgItem(p->wnd, G_MAT), pv);
+    ui_enable(GetDlgItem(p->wnd, G_EQU), pv);
+    ui_enable(GetDlgItem(p->wnd, G_AVA), pv);
     if (on) grant_sync();
 }
 
@@ -1125,6 +1195,10 @@ static void grant_build(Page *p, HWND parent) {
     // 创建顺序就是 Tab 顺序：这一行照视觉排（…清空队列→导出→导入）
     ui_button(parent, "导出", G_EXPORT);
     ui_button(parent, "导入", G_IMPORT);
+    // 三个常用物品按钮：点了会一次往队列里灌几十到几百条
+    ui_button(parent, "加载常用材料", G_MAT);
+    ui_button(parent, "加载常用装备", G_EQU);
+    ui_button(parent, "加载常用时装", G_AVA);
     // 列表建在按钮行后面；底部那一对（邮件发放/直接入包）建在最后，视觉上也在最下面
     g_list = ui_list(parent, G_LIST);
     ui_cols(g_list, (const char *const[]){"物品名", "编号", "数量", "强化", "增幅", "锻造", "封装", "耐久"},
