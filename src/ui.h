@@ -138,6 +138,12 @@ HWND ui_dlg_new(HWND owner, const char *title, int w, int h, UiDlgProc proc, voi
 int  ui_dlg_run(HWND dlg, HWND owner);   // 返回 1=确定 0=取消
 void ui_dlg_end(int ok);
 
+// ---- 按类浏览 PVF 物品 ----
+// 材料 / 消耗品 / 装备 / 宠物 / 时装 都是成千上万条，所以单开一个窗口、用虚拟列表，
+// 挑好（双击一行或多选）直接灌进发放队列。cat 取 BR_*。
+enum { BR_NONE = 0, BR_MAT, BR_STACK, BR_EQUIP, BR_PET, BR_AVATAR };
+void ui_browse_open(HWND owner, int cat);
+
 // ---- 各页实现 ----
 void page_item_create(Page *p);
 void page_query_create(Page *p);
