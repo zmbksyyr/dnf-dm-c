@@ -238,21 +238,129 @@ HWND ui_edit(HWND parent, const char *text, int id, int ro) {
     return h;
 }
 
-// 点完按钮把焦点交还父窗口。
-// 不交还的话焦点就留在按钮上，按钮会一直画焦点矩形 —— Win11 下是蓝色外框，
-// 经典主题下是黑色点线，看起来就是「按下去变了个颜色，再也回不来」。
-// 系统自带的按钮也这样（资源管理器里点一次按钮，焦点同样留着），只是那里的
-// 焦点框不明显；这个工具几乎全靠鼠标点，留着只会让人以为按坏了。
+// ---------------- 按钮：接管绘制 ----------------
+// 主题按钮的悬停高亮（蓝框）点完不消失：它由 uxtheme 自己缓存，按钮即便收到
+// WM_MOUSELEAVE 也未必清得掉。实测真实点击后按钮区的蓝像素从 44 涨到 344，
+// 之后把鼠标移进移出都回不到 44；而同样一次点击改用 BM_CLICK 触发就一点残留
+// 都没有 —— 说明问题出在系统那层状态，代码没法从外部复位。
+//
+// 所以这里不问系统要状态了，两个状态源都自己管：
+//   · 光标在不在客户区 —— 自己 SetProp 记，自己 TrackMouseEvent
+//   · 按钮是不是按下   —— 自己跟 WM_LBUTTONDOWN / UP / CAPTURECHANGED
+// 画法照系统那套灰底 + 1px 边框，只把悬停/按下的配色换成 Win11 的蓝。
+// 焦点框不画：这个工具几乎全靠鼠标点，留着只会让人以为按钮卡住了。
+#define BTN_HOT(s)   ((s) & 1)
+#define BTN_DOWN(s)  ((s) & 2)
+static const WCHAR kBtnProp[] = L"dnfbtn";
+
+static int btn_st(HWND h) { return (int)(INT_PTR)GetPropW(h, kBtnProp); }
+
+static void btn_st_set(HWND h, int v) {
+    if (btn_st(h) == v) return;
+    SetPropW(h, kBtnProp, (HANDLE)(INT_PTR)v);   // v=0 即移除属性
+    InvalidateRect(h, NULL, FALSE);
+}
+
+static void btn_paint(HWND h) {
+    PAINTSTRUCT ps;
+    HDC dc = BeginPaint(h, &ps);
+    if (!dc) return;
+    RECT rc;
+    GetClientRect(h, &rc);
+    int en = IsWindowEnabled(h);
+    int st = en ? btn_st(h) : 0;
+    int hot = BTN_HOT(st);
+    // 按下态问两个来源：鼠标按的是自己记的，空格键按的是按钮内部的 BST_PUSHED。
+    int down = BTN_DOWN(st) || (DefSubclassProc(h, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0;
+
+    COLORREF bg, bd, tx = RGB(0x1A, 0x1A, 0x1A);
+    if (!en) {
+        bg = RGB(0xF2, 0xF2, 0xF2);
+        bd = RGB(0xD8, 0xD8, 0xD8);
+        tx = GetSysColor(COLOR_GRAYTEXT);
+    } else if (down) {
+        bg = RGB(0xCA, 0xE0, 0xF5);
+        bd = RGB(0x00, 0x54, 0x99);
+    } else if (hot) {
+        bg = RGB(0xE5, 0xF1, 0xFB);
+        bd = RGB(0x00, 0x78, 0xD7);
+    } else {
+        bg = RGB(0xF0, 0xF0, 0xF0);
+        bd = RGB(0xAD, 0xAD, 0xAD);
+    }
+
+    HBRUSH br = CreateSolidBrush(bg);
+    FillRect(dc, &rc, br);
+    DeleteObject(br);
+
+    HPEN pen = CreatePen(PS_SOLID, 1, bd);
+    HGDIOBJ op = SelectObject(dc, pen);
+    HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    Rectangle(dc, rc.left, rc.top, rc.right, rc.bottom);
+    SelectObject(dc, op);
+    SelectObject(dc, ob);
+    DeleteObject(pen);
+
+    WCHAR t[256];
+    int n = GetWindowTextW(h, t, COUNT_OF(t));
+    if (n > 0) {
+        HFONT of = (HFONT)SelectObject(dc, ui_font());
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, tx);
+        RECT tr = rc;
+        if (down) OffsetRect(&tr, 1, 1);
+        DrawTextW(dc, t, n, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, of);
+    }
+    EndPaint(h, &ps);
+}
+
 static LRESULT CALLBACK btn_proc(HWND h, UINT m, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR ref) {
     (void)id;
     (void)ref;
-    LRESULT r = DefSubclassProc(h, m, wp, lp);   // 先让按钮把 BN_CLICKED 发出去
-    if (m == WM_LBUTTONUP) {
-        HWND par = GetParent(h);
-        // 动作里可能已经重建/销毁了页面，交还前确认父窗口还在。
-        if (par && IsWindow(par)) SetFocus(par);
+    switch (m) {
+        case WM_PAINT:
+            btn_paint(h);
+            return 0;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_SIZE:
+            InvalidateRect(h, NULL, FALSE);
+            break;
+        case WM_MOUSEMOVE: {
+            if (!BTN_HOT(btn_st(h))) btn_st_set(h, btn_st(h) | 1);
+            TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, h, 0};
+            TrackMouseEvent(&tme);
+            break;
+        }
+        case WM_MOUSELEAVE:
+            btn_st_set(h, btn_st(h) & ~1);
+            break;
+        case WM_LBUTTONDOWN:
+            btn_st_set(h, btn_st(h) | 2);
+            break;
+        case WM_LBUTTONUP: {
+            HWND par = GetParent(h);
+            LRESULT r = DefSubclassProc(h, m, wp, lp);   // 先让按钮把 BN_CLICKED 发出去
+            // 动作里可能已经把页面重建掉，后面每一步都要重新确认窗口还在。
+            if (IsWindow(h)) {
+                // 悬停位一起清掉：动作跑完鼠标常常已经不在按钮上了，而这条
+                // MOUSELEAVE 未必还送得到，留着就是那个「点过的按钮一直亮着」。
+                btn_st_set(h, 0);
+            }
+            if (par && IsWindow(par)) SetFocus(par);
+            return r;
+        }
+        case WM_CAPTURECHANGED:
+            btn_st_set(h, btn_st(h) & ~2);
+            break;
+        case WM_ENABLE:
+            InvalidateRect(h, NULL, FALSE);
+            break;
+        default:
+            break;
     }
-    return r;
+    return DefSubclassProc(h, m, wp, lp);
 }
 
 HWND ui_button(HWND parent, const char *text, int id) {
