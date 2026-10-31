@@ -84,6 +84,16 @@ typedef struct {
 
 const char *pvf_item_name(const Pvf *p, u32 id);
 int         pvf_quest_info(Pvf *p, u32 id, QuestInfo *out);
+
+// 任务材料（收集类任务要的东西）。同一件材料按「单个任务最多要多少个」记，
+// 不累加 —— 不可能同时接所有任务。
+typedef struct {
+    u32 id;
+    u32 cnt;      // 单个任务最多要多少个
+    u32 quests;   // 有多少个任务要它
+} QuestMat;
+
+int pvf_quest_materials(Pvf *p, QuestMat **out);   // 返回条数，*out 由调用方 free
 const char *pvf_job_name(const Pvf *p, int job);
 const char *pvf_seal_name(const Pvf *p, int id);
 u32         pvf_exp_for(const Pvf *p, int lev);

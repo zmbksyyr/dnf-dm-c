@@ -826,6 +826,21 @@ void app_grant_add(u32 id) {
     app_status("已加入队列：%s", nm);
 }
 
+// 批量入队用：已经在队列里的直接跳过（不叠数量），也不刷状态栏 —— 一次几百条，
+// 逐条刷只会被最后一条盖住。返回 1 表示这次真的加进去了。
+int app_grant_add_new(u32 id) {
+    for (int i = 0; i < g.grant.n; i++)
+        if (VEC_AT(&g.grant, NamedId, i)->id == id) return 0;
+    char buf[64];
+    const char *nm = app_item_name(id, buf, sizeof(buf));
+    NamedId *n = VEC_ADD(&g.grant, NamedId);
+    n->id = id;
+    n->num = 1;
+    n->type = IT_STACK;
+    snprintf(n->name, sizeof(n->name), "%s", nm);
+    return 1;
+}
+
 // 发放队列快照：w_grant 在 job 线程跑，g.grant 在 UI 线程可被增删——直接遍历
 // g.grant 是竞态（realloc 后指针悬空 / 删项后越界）。发前拷一份，job 只读快照。
 // 快照放独立静态数组（不在 GrantCtx 里）：GrantCtx 要塞进 app_act 的 768B 队列缓冲，

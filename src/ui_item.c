@@ -515,8 +515,8 @@ void page_item_create(Page *p) {
 
 // ================================================================ 查询页
 enum {
-    Q_KW = PAGE_ID(PAGE_QUERY, 1), Q_LIST, Q_INFO, Q_GO, Q_ADD,
-    Q_MAT, Q_EQU, Q_AVA          // 加载常用材料 / 装备 / 时装
+    Q_KW = PAGE_ID(PAGE_QUERY, 1), Q_LIST, Q_INFO, Q_GO, Q_ADD, Q_ALL,
+    Q_MAT, Q_EQU, Q_AVA, Q_TASK       // 加载 常用材料 / 装备 / 时装 / 任务材料
 };
 
 static HWND q_kw, q_list, q_info;
@@ -564,6 +564,55 @@ static void common_list(const unsigned char *data, size_t len, const char *what)
     ui_batch(q_list, 0);
     ui_text(q_info, fmt_new("%s %d 条 · PVF 里没有 %d 条", what, hit, miss));
     app_status("已列出%s %d 条", what, hit);
+}
+
+// 「加载任务材料」：把 PVF 里所有收集类任务要的物品列出来。
+// 数量是「单个任务最多要多少个」—— 同一件材料被几十个任务要，累加没有意义。
+static void query_task_mats(void) {
+    if (!g.pvf_ok) {
+        app_info("还没加载 PVF。\n\n任务材料是从任务文件里读的，得先选好 Script.pvf。");
+        return;
+    }
+    HCURSOR old = SetCursor(LoadCursorW(NULL, IDC_WAIT));   // 要翻几千个任务文件
+    QuestMat *v = NULL;
+    int n = pvf_quest_materials(&g.pvf, &v);
+    SetCursor(old);
+
+    ui_rows_clear(q_list);
+    ui_batch(q_list, 1);
+    int shown = 0;
+    for (int i = 0; i < n; i++) {
+        const char *nm = pvf_item_name(&g.pvf, v[i].id);
+        if (!nm || !*nm) continue;      // 任务里引用了但 PVF 没这件东西，跳过
+        char ids[16], note[96];
+        fmt(ids, sizeof(ids), "%u", v[i].id);
+        fmt(note, sizeof(note), "需要 %u 个 · %u 个任务要用", v[i].cnt, v[i].quests);
+        const char *cells[3] = {ids, nm, note};
+        ui_row_add(q_list, cells, 3, (LPARAM)v[i].id);
+        shown++;
+    }
+    ui_batch(q_list, 0);
+    free(v);
+    ui_text(q_info, fmt_new("任务材料 %d 条", shown));
+    app_status("任务材料：%d 种", shown);
+}
+
+// 「全部加入」：把列表里所有行灌进发放队列，已在队列里的跳过。
+static void query_add_all(void) {
+    int n = (int)SendMessageW(q_list, LVM_GETITEMCOUNT, 0, 0);
+    if (n <= 0) {
+        app_status("列表是空的，先查一批出来");
+        return;
+    }
+    int add = 0, dup = 0;
+    for (int i = 0; i < n; i++) {
+        u32 id = (u32)ui_row_data(q_list, i);
+        if (!id) continue;
+        if (app_grant_add_new(id)) add++;
+        else dup++;
+    }
+    ui_pages_reload(PAGE_GRANT);
+    app_status("已加入发放队列 %d 项 · 队列里已有 %d 项", add, dup);
 }
 
 static void query_reload(Page *p) {
@@ -624,10 +673,12 @@ static LRESULT query_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         int id = LOWORD(wp);
         if (id == Q_GO) { query_do(); return 0; }
         if (id == Q_ADD) { query_add(); return 0; }
-        // 三个常用物品按钮：把清单填进结果列表（每次先清空），看中了再双击进队列
+        if (id == Q_ALL) { query_add_all(); return 0; }
+        // 常用物品按钮：把清单填进结果列表（每次先清空），看中了再双击进队列
         if (id == Q_MAT) { common_list(kCommonMat, sizeof(kCommonMat), "常用材料"); return 0; }
         if (id == Q_EQU) { common_list(kCommonEquip, sizeof(kCommonEquip), "常用装备"); return 0; }
         if (id == Q_AVA) { common_list(kCommonAvatar, sizeof(kCommonAvatar), "常用时装"); return 0; }
+        if (id == Q_TASK) { query_task_mats(); return 0; }
         if (id == Q_KW && HIWORD(wp) == EN_CHANGE) return 0;
     }
     if (m == WM_NOTIFY) {
@@ -650,15 +701,17 @@ static void query_layout(Page *p, int w, int h) {
     ui_add(&r, q_kw, ui_scale(180));
     ui_add(&r, ui_btn_at(p->wnd, Q_GO, "搜索"), ui_scale(60));
     ui_add(&r, ui_btn_at(p->wnd, Q_ADD, "加入发放"), ui_scale(80));
+    ui_add(&r, ui_btn_at(p->wnd, Q_ALL, "全部加入"), ui_scale(80));
     ui_add(&r, q_info, -1);
 
-    // 第二行：三个批量灌队列的按钮。放在查询页是因为「先查后发」是这条链路的
-    // 起点 —— 查不到的东西不会有事，灌进去的都是 PVF 里真有的。
+    // 第二行：四个批量抽屉。放在查询页是因为「先查后发」是这条链路的起点 ——
+    // 查不到的东西不会有事，灌进去的都是 PVF 里真有的。
     int y = pad + rowh + g;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_btn_at(p->wnd, Q_MAT, "加载常用材料"), ui_scale(100));
     ui_add(&r, ui_btn_at(p->wnd, Q_EQU, "加载常用装备"), ui_scale(100));
     ui_add(&r, ui_btn_at(p->wnd, Q_AVA, "加载常用时装"), ui_scale(100));
+    ui_add(&r, ui_btn_at(p->wnd, Q_TASK, "加载任务材料"), ui_scale(100));
     ui_gap(&r, ui_scale(8));   // 说明文字和按钮挤一起会看成按钮的一部分
     ui_add(&r, ui_lbl_at(p->wnd, "列出当前 PVF 里有的，双击某行加入发放队列"), -1);
 
@@ -670,10 +723,12 @@ static void query_lock(Page *p) {
     ui_enable(q_kw, g.pvf_ok);
     ui_enable(GetDlgItem(p->wnd, Q_GO), g.pvf_ok);
     ui_enable(GetDlgItem(p->wnd, Q_ADD), g.pvf_ok && g.char_ok);
-    // 常用物品按钮只往列表里填东西，不碰队列，所以只要有 PVF 就够
+    ui_enable(GetDlgItem(p->wnd, Q_ALL), g.pvf_ok && g.char_ok);
+    // 加载类按钮只往列表里填东西，不碰队列，所以只要有 PVF 就够
     ui_enable(GetDlgItem(p->wnd, Q_MAT), g.pvf_ok);
     ui_enable(GetDlgItem(p->wnd, Q_EQU), g.pvf_ok);
     ui_enable(GetDlgItem(p->wnd, Q_AVA), g.pvf_ok);
+    ui_enable(GetDlgItem(p->wnd, Q_TASK), g.pvf_ok);
 }
 
 static void query_build(Page *p, HWND parent) {
@@ -683,10 +738,12 @@ static void query_build(Page *p, HWND parent) {
     ui_cols(q_list, (const char *const[]){"编号", "名称", "说明"}, (const int[]){80, 240, 160}, 3);
     ui_button(parent, "搜索", Q_GO);
     ui_button(parent, "加入发放", Q_ADD);
-    // 创建顺序就是 Tab 顺序，所以紧跟在「加入发放」后面
+    ui_button(parent, "全部加入", Q_ALL);
+    // 创建顺序就是 Tab 顺序，所以紧跟在这一行后面
     ui_button(parent, "加载常用材料", Q_MAT);
     ui_button(parent, "加载常用装备", Q_EQU);
     ui_button(parent, "加载常用时装", Q_AVA);
+    ui_button(parent, "加载任务材料", Q_TASK);
 }
 
 void page_query_create(Page *p) {

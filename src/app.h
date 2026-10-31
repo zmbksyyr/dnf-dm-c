@@ -194,8 +194,8 @@ int  app_bubble_plan_ver(void);                // 每次增减都 +1，页面据
 
 // 发放
 void app_grant_add(u32 id);
-// 批量加载用：指定类型、不刷状态栏（一次加载几百条，逐条刷只会把状态栏刷花，
-// 最后统一写一句汇总）。已有同编号时数量累加。
+// 批量入队：队列里已有的跳过（不叠数量）、不刷状态栏。返回 1 = 本次新增。
+int  app_grant_add_new(u32 id);
 int  app_grant_send(int by_mail);
 
 // 整库备份 / 还原（后台执行）

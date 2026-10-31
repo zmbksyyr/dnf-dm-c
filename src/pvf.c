@@ -1032,17 +1032,10 @@ static int stk_ints(Pvf *p, const Buf *c, const char *want, u32 *out, int max) {
     return got;
 }
 
-int pvf_quest_info(Pvf *p, u32 id, QuestInfo *out) {
+// 解析一个任务文件。路径由调用方给：按 id 查是一遍线性扫，全量扫描时直接
+// 拿索引里的路径，省掉那层查找。
+static int quest_parse(Pvf *p, const char *path, QuestInfo *out) {
     memset(out, 0, sizeof(*out));
-    out->id = id;
-    out->lev_min = out->lev_max = 0;
-    if (!p->opened) return 0;
-    quest_index(p);
-    const char *path = NULL;
-    for (int i = 0; i < g_qn; i++)
-        if (g_qp[i].id == id) { path = g_qp[i].path; break; }
-    if (!path) return 0;
-
     const Leaf *lf = pvf_find(p, path);
     if (!lf) return 0;
     Buf b = {0};
@@ -1077,4 +1070,67 @@ int pvf_quest_info(Pvf *p, u32 id, QuestInfo *out) {
     }
     buf_free(&b);
     return 1;
+}
+
+static int cmp_questmat(const void *a, const void *b) {
+    u32 x = ((const QuestMat *)a)->id, y = ((const QuestMat *)b)->id;
+    return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+int pvf_quest_info(Pvf *p, u32 id, QuestInfo *out) {
+    memset(out, 0, sizeof(*out));
+    out->id = id;
+    out->lev_min = out->lev_max = 0;
+    if (!p->opened) return 0;
+    quest_index(p);
+    const char *path = NULL;
+    for (int i = 0; i < g_qn; i++)
+        if (g_qp[i].id == id) { path = g_qp[i].path; break; }
+    if (!path) return 0;
+    if (!quest_parse(p, path, out)) return 0;
+    out->id = id;
+    return 1;
+}
+
+// 「加载任务材料」用：把全部任务过一遍，收「收集类」任务要的东西。
+// 同一件材料常被几十个任务要，这里只记两件事：单个任务最多要多少个（取最大，
+// 不是累加 —— 不可能同时接所有任务）、一共有多少个任务要它。
+int pvf_quest_materials(Pvf *p, QuestMat **out) {
+    *out = NULL;
+    if (!p || !p->opened) return 0;
+    quest_index(p);
+    if (!g_qn) return 0;
+
+    int cap = 64, n = 0;
+    QuestMat *v = calloc((size_t)cap, sizeof(QuestMat));
+    if (!v) return 0;
+    for (int i = 0; i < g_qn; i++) {
+        QuestInfo qi;
+        if (!quest_parse(p, g_qp[i].path, &qi)) continue;
+        if (strcmp(qi.kind, "[seeking]") != 0) continue;
+        for (int k = 0; k < qi.nitem; k++) {
+            u32 id = qi.item[k], cnt = qi.cnt[k];
+            int j = 0;
+            for (; j < n; j++)
+                if (v[j].id == id) break;
+            if (j < n) {
+                if (cnt > v[j].cnt) v[j].cnt = cnt;
+                v[j].quests++;
+                continue;
+            }
+            if (n == cap) {
+                cap *= 2;
+                QuestMat *nv = realloc(v, (size_t)cap * sizeof(QuestMat));
+                if (!nv) break;
+                v = nv;
+            }
+            v[n].id = id;
+            v[n].cnt = cnt ? cnt : 1;
+            v[n].quests = 1;
+            n++;
+        }
+    }
+    qsort(v, (size_t)n, sizeof(QuestMat), cmp_questmat);
+    *out = v;
+    return n;
 }
