@@ -132,8 +132,6 @@ static void card_build(HWND parent) {
     g_chlist = ui_list(parent, IDC_CHLIST);
     ui_cols(g_chlist, (const char *const[]){"名称", "账号", "等级 · 职业 · 状态"},
             (const int[]){92, 90, 112}, 3);
-    ui_tip(parent, g_chlist, "按角色名或账号名搜索；同一账号的多个角色会一起列出；"
-                             "列表随库里的角色表自动刷新");
     for (int i = 0; i < CARD_N; i++) {
         g_ck[i] = ui_label(parent, kCardKey[i], 0);
         g_cv[i] = ui_label(parent, "—", 0);

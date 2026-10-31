@@ -324,8 +324,6 @@ void ui_browse_open(HWND owner, int cat) {
     ui_place(c.msg, pad, by, xp - pad - gap, h);
 
     ui_tip(d, c.kw, "按物品名或编号过滤，边打边筛，不用回车");
-    ui_tip(d, c.lv, "这类条目数量大，列表是虚拟的：只有看得见的那几十行才去读内容。"
-                    "双击一行，或 Ctrl / Shift 多选后点「加入所选」");
     ui_tip(d, GetDlgItem(d, B_ALL), "把当前列表全部加进发放队列（受筛选影响）；有上限，太多了会提示先筛");
     ui_tip(d, GetDlgItem(d, B_SEL), "选中当前列表的所有行，再点「加入所选」");
     ui_tip(d, GetDlgItem(d, B_ADD), "把选中的行加进发放队列，每项数量 1");

@@ -137,7 +137,12 @@ static void tab_show(void) {
     ui_cols(t_list, (const char *const[]){"表", "角色编号", "角色", "实例ID", "物品", "原因"},
             (const int[]){56, 80, 120, 110, 170, 60}, 6);
     ui_idtip_bind(t_list, 4);          // 「物品」列放的是 it_id
-    ui_place(t_list, pad, pad + rowh + g2, 640 - pad * 2, ui_scale(280));
+    // 列表让一行给下面的说明：悬停气泡会跟编号悬浮卡撞，写成常驻一句更省事
+    int lt = pad + rowh + g2;
+    int lh = ui_scale(280) - rowh - g2;
+    ui_place(t_list, pad, lt, 640 - pad * 2, lh);
+    ui_place(ui_label(d, "只列 it_id 非法或为 0 的记录；it_id=0 的空行算正常，不动", 0),
+            pad, lt + lh + g2, 640 - pad * 2, rowh);
 
     int y = pad + rowh + g2 + ui_scale(280) + g2;
     URow r;
@@ -145,8 +150,6 @@ static void tab_show(void) {
     ui_add(&r, ui_btn_at(d, 6301, "删除所选"), ui_scale(84));
     ui_add(&r, ui_btn_at(d, 6302, "全部删除"), ui_scale(84));
     ui_add(&r, ui_btn_at(d, 6303, "重新扫描"), ui_scale(84));
-    // 「it_id=0 的空行不算错误」这类说明挂在列表提示上，不单独占一行
-    ui_tip(d, t_list, "扫的是宠物/时装表里 it_id 非法或为 0 的记录；it_id=0 的空行算正常，不会列出也不会动");
 
     ui_place(ui_button(d, "关闭", IDCANCEL), 640 - pad - ui_scale(90),
              420 - pad - rowh, ui_scale(90), rowh);

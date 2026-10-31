@@ -436,7 +436,6 @@ static void scan_show(void) {
     ui_place(ui_button(d, "清除全部", 6002), ui_scale(496), ui_scale(402), ui_scale(88), ui_scale(26));
     ui_place(ui_button(d, "重新扫描", 6003), ui_scale(592), ui_scale(402), ui_scale(88), ui_scale(26));
     ui_place(ui_button(d, "关闭", IDCANCEL), ui_scale(688), ui_scale(402), ui_scale(80), ui_scale(26));
-    ui_tip(d, s_slv, "下面是扫出来的错误物品，一行一处");
     ui_tip(d, GetDlgItem(d, 6002),
            "容器里的错误槽位写成空槽（原数据自动备份到 config/backup）；"
            "时装/宠物表删行；邮件只清附件、金币保留");

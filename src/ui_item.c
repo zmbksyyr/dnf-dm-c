@@ -541,7 +541,7 @@ enum {
     Q_BMAT, Q_BSTK, Q_BEQU, Q_BPET, Q_BAVA   // 浏览：材料 / 消耗品 / 装备 / 宠物 / 时装
 };
 
-static HWND q_kw, q_list, q_info, q_sep;
+static HWND q_kw, q_list, q_info, q_sep, q_tip;
 static void q_fit_cols(void);      // 按列表实际客户区摊列宽，见下
 
 // 列表行的附带数据：低 32 位是物品编号，高 32 位是「这道工序要几个」。
@@ -740,7 +740,6 @@ static LRESULT query_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 static void query_layout(Page *p, int w, int h) {
-    (void)h;
     int pad = ui_scale(6), rowh = ui_scale(23), g = ui_scale(6);
     URow r;
     ui_row(&r, p->wnd, pad, pad, rowh);
@@ -779,7 +778,11 @@ static void query_layout(Page *p, int w, int h) {
 
     int ly = y2 + rowh + g;                   // 按钮和列表之间断一刀
     ui_place(q_sep, pad, ly, w - pad * 2, ui_scale(2));
-    ui_fill_rest(p->wnd, q_list, ly + ui_scale(8));
+    // 底部让一行给操作说明：悬停气泡会跟编号悬浮卡撞，写成常驻一句更省事
+    int listtop = ly + ui_scale(8);
+    int tipy    = h - pad - rowh;
+    ui_place(q_tip, pad, tipy, w - pad * 2, rowh);
+    ui_place(q_list, pad, listtop, w - pad * 2, tipy - g - listtop);
     q_fit_cols();
 }
 
@@ -809,6 +812,7 @@ static void query_build(Page *p, HWND parent) {
     q_list = ui_list(parent, Q_LIST);
     q_info = ui_label(parent, "未加载 PVF", Q_INFO);
     q_sep = ui_hline(parent);
+    q_tip = ui_label(parent, "双击一行 = 加入发放，「数量」列一起进队列", 0);
     ui_cols(q_list, (const char *const[]){"编号", "名称", "数量", "说明"},
             (const int[]){80, 300, 60, 520}, 4);
     ui_idtip_bind(q_list, 0);
@@ -826,8 +830,6 @@ static void query_build(Page *p, HWND parent) {
     ui_button(parent, "装备", Q_BEQU);
     ui_button(parent, "宠物", Q_BPET);
     ui_button(parent, "时装", Q_BAVA);
-    ui_tip(parent, q_list, "列出当前 PVF 里真有的物品；双击某行等于「加入发放」，"
-                           "「数量」列（任务材料要的个数）一起进队列");
     ui_tip(parent, GetDlgItem(parent, Q_GO), "按物品名或编号在当前 PVF 里模糊查，最多列 800 条");
     ui_tip(parent, GetDlgItem(parent, Q_ADD), "把选中的那一行加入发放队列，数量按「数量」列");
     ui_tip(parent, GetDlgItem(parent, Q_ALL), "把列表里所有行加进发放队列；队列里已有的不重复加行，只把数量补大");
@@ -1410,8 +1412,6 @@ static void grant_build(Page *p, HWND parent) {
     ui_tip(parent, GetDlgItem(parent, G_IMPORT), "从 .tsv 导入队列（默认预填上次导出的文件）");
     ui_tip(parent, GetDlgItem(parent, G_MAIL), "把队列里的物品以邮件附件发给目标角色（≤10 件/封）");
     ui_tip(parent, GetDlgItem(parent, G_INV), "把队列里的物品直接写入背包空槽，要求角色离线");
-    ui_tip(parent, g_list, "单击某行把它的配置载回上方表单；改完点到别处就自动写回该行。"
-                           "要从头建一件新物品，点「加入队列」，用的是表单当前的值");
     (void)p;
 }
 

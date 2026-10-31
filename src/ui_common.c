@@ -700,54 +700,11 @@ static HWND tip_of(HWND host) {
     return t;
 }
 
-// 列表的说明提示：整块悬停都弹的话，会和「编号悬浮卡」在行上撞成一团。
-// 改成只在鼠标停在列头（栏目顶部那条）上时才显示，跟按行弹的卡片各占一块，互不遮挡。
-#define LVTIP_MAX 24
-typedef struct {
-    HWND host, tip, lv;
-    char text[512];
-} LvTip;
-static LvTip g_lvt[LVTIP_MAX];
-static int   g_nlvt;
-static int   g_lvt_on = -1;      // 当前正显示的那一条（下标，-1 = 没有）
-
-static int is_listview(HWND h) {
-    WCHAR c[32];
-    if (!h || !GetClassNameW(h, c, COUNT_OF(c))) return 0;
-    for (int i = 0; c[i]; i++)
-        if (c[i] >= 'A' && c[i] <= 'Z') c[i] = (WCHAR)(c[i] + 32);
-    return wcscmp(c, WC_LISTVIEWW) == 0;
-}
-
+// 悬浮提示：host 每个窗口共用一个 tooltip，ctl 上悬停时显示说明。
+// 列表上不挂提示 —— 鼠标停在行上时会弹「编号悬浮卡」，两个气泡撞在一起。
+// 列表的用法说明统一写成列表下方一行常驻小字。
 void ui_tip(HWND host, HWND ctl, const char *text) {
     if (!host || !ctl || !text || !text[0]) return;
-    if (is_listview(ctl)) {
-        for (int i = 0; i < g_nlvt; i++)          // 同一个列表重复挂：以新文案为准
-            if (g_lvt[i].lv == ctl) {
-                snprintf(g_lvt[i].text, sizeof(g_lvt[i].text), "%s", text);
-                return;
-            }
-        if (g_nlvt == LVTIP_MAX) return;
-        HWND t = tip_of(host);
-        if (!t) return;
-        LvTip *e = &g_lvt[g_nlvt];
-        e->host = host;
-        e->tip = t;
-        e->lv = ctl;
-        snprintf(e->text, sizeof(e->text), "%s", text);
-        // 只登记工具，不挂 TTF_SUBCLASS —— 显示时机完全由 ui_tip_tick 决定。
-        // 列表销毁后槽位由 tick 回收。
-        TOOLINFOW ti;
-        memset(&ti, 0, sizeof(ti));
-        ti.cbSize = sizeof(ti);
-        ti.hwnd = host;
-        ti.uId = (UINT_PTR)ctl;
-        ti.uFlags = TTF_IDISHWND;
-        ti.lpszText = L"";
-        SendMessageW(t, TTM_ADDTOOLW, 0, (LPARAM)&ti);
-        g_nlvt++;
-        return;
-    }
     HWND t = tip_of(host);
     if (!t) return;
     WCHAR w[512];
@@ -761,63 +718,6 @@ void ui_tip(HWND host, HWND ctl, const char *text) {
     ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
     ti.lpszText = w;
     SendMessageW(t, TTM_ADDTOOLW, 0, (LPARAM)&ti);
-}
-
-// 主窗口定时器里调：决定列表说明气泡什么时候出来。
-void ui_tip_tick(void) {
-    for (int i = g_nlvt - 1; i >= 0; i--)        // 回收已销毁列表的槽位
-        if (!IsWindow(g_lvt[i].lv)) {
-            memmove(&g_lvt[i], &g_lvt[i + 1], sizeof(LvTip) * (size_t)(g_nlvt - i - 1));
-            g_nlvt--;
-        }
-    if (!g_nlvt) return;
-
-    POINT pt;
-    GetCursorPos(&pt);
-    HWND top = WindowFromPoint(pt);     // 光标下真正最上层的窗口：被弹窗盖住的列表不算
-    int hit = -1;
-    for (int i = 0; i < g_nlvt && hit < 0; i++) {
-        // 所属顶层窗口被禁用的（正被模态弹窗盖着）就别接了：那种窗口用户点不到，
-        // 说明也无从谈起，还会让卡片停在旧内容上。
-        if (!IsWindowEnabled(GetAncestor(g_lvt[i].lv, GA_ROOT))) continue;
-        // 列头是个独立的子窗口（SysHeader32），比列表顶部高出一条。
-        // 命中测试直接按它的矩形判，不用去猜表头有多高。
-        HWND hd = (HWND)SendMessageW(g_lvt[i].lv, LVM_GETHEADER, 0, 0);
-        RECT hr;
-        if (hd && GetWindowRect(hd, &hr)) {
-            if (pt.x >= hr.left && pt.x < hr.right && pt.y >= hr.top && pt.y < hr.bottom) hit = i;
-        } else {
-            RECT lr;                        // 没有列头：退回列表顶部一条
-            if (GetWindowRect(g_lvt[i].lv, &lr) && pt.x >= lr.left && pt.x < lr.right &&
-                pt.y >= lr.top && pt.y < lr.top + ui_scale(20))
-                hit = i;
-        }
-    }
-
-    if (hit >= 0) {
-        LvTip *e = &g_lvt[hit];
-        TOOLINFOW ti;
-        memset(&ti, 0, sizeof(ti));
-        ti.cbSize = sizeof(ti);
-        ti.hwnd = e->host;
-        ti.uId = (UINT_PTR)e->lv;
-        WCHAR wt[512];
-        utf16(e->text, wt, COUNT_OF(wt));
-        ti.lpszText = wt;
-        SendMessageW(e->tip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
-        SendMessageW(e->tip, TTM_TRACKACTIVATE, (WPARAM)TRUE, (LPARAM)&ti);
-        SendMessageW(e->tip, TTM_TRACKPOSITION, 0,
-                    (LPARAM)(DWORD)MAKELONG(pt.x + ui_scale(16), pt.y + ui_scale(20)));
-    } else if (g_lvt_on >= 0 && g_lvt_on < g_nlvt) {
-        LvTip *e = &g_lvt[g_lvt_on];
-        TOOLINFOW ti;
-        memset(&ti, 0, sizeof(ti));
-        ti.cbSize = sizeof(ti);
-        ti.hwnd = e->host;
-        ti.uId = (UINT_PTR)e->lv;
-        SendMessageW(e->tip, TTM_TRACKACTIVATE, (WPARAM)FALSE, (LPARAM)&ti);
-    }
-    g_lvt_on = hit;
 }
 
 void ui_place(HWND w, int x, int y, int cw, int ch) {
@@ -1370,7 +1270,6 @@ static void tip_show(u32 id) {
 }
 
 void ui_idtip_tick(void) {
-    ui_tip_tick();          // 列表说明气泡（只在列头上弹）
     // 回收已销毁列表的绑定（页面对话框是动态建删的）
     for (int i = g_nbinds - 1; i >= 0; i--)
         if (!IsWindow(g_binds[i].lv)) {
