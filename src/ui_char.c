@@ -472,8 +472,15 @@ static void scan_show(void) {
 // 不会出现「框里是增量、点到别处却当成现值」的歧义。
 // 金币/复活币/账号金币/点券/赠送点券在库里都是 int unsigned，塞不进 2^32。
 #define GM_U32_MAX 4294967295LL
-#define GM_LEV_MAX 100
 #define GM_PVP_MAX 2000000000          // 胜场/胜点，库里是 int
+
+// 等级上限不写死：各端封顶不一样（多数是 85），写在 settings.ini 的 [gm] lev_max，
+// 缺省 85。以前硬编码 100，在 85 封顶的服上按 100 写会越界。
+static int gm_lev_max(void) {
+    int v = g.cfg.lev_max;
+    if (v < 1 || v > 255) v = 85;
+    return v;
+}
 
 static i64 gm_u32(HWND e) {
     i64 v = ui_i64(e);
@@ -535,8 +542,8 @@ static void gm_commit(int id) {
             int v = ui_int(c_lev);
             gm_take(c_lev);
             if (v == 0) return;                    // 没填
-            if (v < 1 || v > GM_LEV_MAX) {
-                app_status("等级范围 1~%d，未写入", GM_LEV_MAX);
+            if (v < 1 || v > gm_lev_max()) {
+                app_status("等级范围 1~%d，未写入", gm_lev_max());
                 return;
             }
             if (v == g.cur.lev) return;
@@ -661,7 +668,7 @@ static const struct {
     const char *txt;
     const char *name;      // 提示语里怎么称呼这个字段
 } kQAdd[QADD_N] = {
-    {G_LEV,       10,       "+10",    "等级"},      // 95 -> 100 封顶
+    {G_LEV,       10,       "+10",    "等级"},      // 加到 gm_lev_max() 封顶（默认 85）
     {G_MONEY,     10000000, "+1000万", "金币"},
     {G_COIN,      100,      "+100",   "复活币"},
     {G_ACCM,      10000000, "+1000万", "账号金币"},
@@ -681,7 +688,7 @@ static void gm_quick_add(int i) {
     int tgt = kQAdd[i].target;
     HWND e = gm_field(tgt);
     if (!e) return;
-    i64 cap = (tgt == G_LEV) ? GM_LEV_MAX
+    i64 cap = (tgt == G_LEV) ? gm_lev_max()
             : (tgt == G_WIN || tgt == G_PVP_POINT) ? GM_PVP_MAX
                                                    : GM_U32_MAX;
     i64 cur = gm_value(tgt);           // 当前值来自快照（框里恒为 0）
@@ -1016,7 +1023,7 @@ static void gm_build(Page *p, HWND parent) {
     c_lev = ui_edit(parent, "", G_LEV, 0);
     // 下限 0：框里恒为 0 表示「这次没有要设的值」，等级也走这条 —— 若下限卡 1，
     // 用户点一下空框再离开，ui_num 会把 0 兜成 1，等于把角色打成 1 级。
-    ui_num(c_lev, 0, GM_LEV_MAX);
+    ui_num(c_lev, 0, gm_lev_max());
     job_labels();
     c_job = ui_combo(parent, G_JOB, 1);
     ui_combo_fill(c_job, kJobLbl, COUNT_OF(kJobList), 0);
@@ -1104,9 +1111,12 @@ static void gm_build(Page *p, HWND parent) {
     ui_tip(parent, c_name, "改完点到别处即写入库；重名会退回原值。角色在线时改会被服务端存档覆盖——要改先退出游戏");
     // 这些框都是「一次性设定框」：填好点到别处就写库，然后框自己清回 0。
     // 提示必须把这两点说清（留 0 = 不改），否则用户会以为框里应该显示当前值。
+    // 上限写进提示：不同端封顶不同，写死「1~100」会让人以为能填到 100
     ui_tip(parent, c_lev,
-           "填「设成几级」（1~100），点到别处按这个数写库、经验清零，框随即回 0。"
-           "留 0 = 不改；要往上加几级用右边 +10。当前等级看左边角色信息");
+           fmt_new("填「设成几级」（1~%d，上限在 settings.ini 的 [gm] lev_max），"
+                   "点到别处按这个数写库、经验清零，框随即回 0。"
+                   "留 0 = 不改；要往上加几级用右边 +10。当前等级看左边角色信息",
+                   gm_lev_max()));
     ui_tip(parent, c_money,
            "填「设成多少金币」（0~4294967295），点到别处写库，框随即回 0。"
            "留 0 = 不改；要加一笔用右边 +1000万。当前值看左边角色信息");
@@ -1124,7 +1134,8 @@ static void gm_build(Page *p, HWND parent) {
            "点券和赠送点券是同一条 UPDATE，只填一个就只改那一个");
 
     // 快捷按钮上只有「+数量」：点一下在「当前值」上加，不经过输入框
-    ui_tip(parent, s_qadd[0], "在当前等级上加 10 级（封顶 100），立刻写库；不动输入框");
+    ui_tip(parent, s_qadd[0], fmt_new("在当前等级上加 10 级（封顶 %d），立刻写库；不动输入框",
+                                      gm_lev_max()));
     ui_tip(parent, s_qadd[1], "在当前金币上加 1000 万，立刻写库；不动输入框（上限 4294967295）");
     ui_tip(parent, s_qadd[2], "在当前复活币上加 100，立刻写库；不动输入框");
     ui_tip(parent, s_qadd[3], "在当前账号金币上加 1000 万，立刻写库；不动输入框");

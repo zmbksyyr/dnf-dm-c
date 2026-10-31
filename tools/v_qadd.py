@@ -75,10 +75,24 @@ def db_exp(cno):
     return cur.fetchone()[0]
 
 
+# 等级上限读配置：settings.ini [gm] lev_max，缺省 85（源码 app.c 同款默认值）
+import configparser
+_cp = configparser.RawConfigParser()   # 密码里带 %，普通 ConfigParser 会插值报错
+_cp.read(os.path.join(os.path.dirname(EXE), "config", "settings.ini"), encoding="utf-8")
+LEV_MAX = _cp.getint("gm", "lev_max", fallback=85)
+print("等级上限（配置）= %d" % LEV_MAX)
+
 CNO = 1
 m0, c0 = db_money(CNO)
-l0 = db_lev(CNO)
+l0_orig = db_lev(CNO)
 e0 = db_exp(CNO)
+l0 = l0_orig
+# 上限改成 85 了，而库里这个号可能停在旧测试留下的 100：先压回一个正常值，
+# 否则一上来「+10」就撞上限，测的是另一条分支。还原仍按原值 l0_orig。
+if l0 > LEV_MAX or l0 < 1:
+    cur.execute("UPDATE taiwan_cain.charac_info SET lev=70 WHERE charac_no=%d" % CNO)
+    db.commit()
+    l0 = 70
 print("原值：金币 %d 复活币 %d 等级 %d 经验 %d" % (m0, c0, l0, e0))
 
 p = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
@@ -137,7 +151,7 @@ press(2, "复活币 +100")
 ok &= check("复活币库值", db_money(CNO)[1], c0 + 100)
 
 press(0, "等级 +10")
-ok &= check("等级库值", db_lev(CNO), min(l0 + 10, 100))
+ok &= check("等级库值", db_lev(CNO), min(l0 + 10, LEV_MAX) if l0 < LEV_MAX else l0)
 ok &= check("经验清零", db_exp(CNO), 0)
 
 # 3) 连点三次金币：每次都在上一次结果上加
@@ -192,10 +206,26 @@ blur(le)
 ok &= check("等级设为 60", db_lev(CNO), 60)
 ok &= check("等级框回 0", text(ctl(main, G_LEV)), "0")
 
+# 11) 越上限：和金币一样夹到上限再写（ui_num 的上限），不是静默截断成别的数。
+#     关键是别再出现老行为：写死 100 的端上把 85 封顶的服写成 90+。
+set_text(le, str(LEV_MAX + 1))
+blur(le)
+ok &= check("等级填 %d 夹到上限 %d" % (LEV_MAX + 1, LEV_MAX), db_lev(CNO), LEV_MAX)
+ok &= check("被拒后框回 0", text(ctl(main, G_LEV)), "0")
+
+# 12) 正好等于上限：可以写
+set_text(le, str(LEV_MAX))
+blur(le)
+ok &= check("等级填上限 %d 写入" % LEV_MAX, db_lev(CNO), LEV_MAX)
+
+# 13) 已经在上限时 +10 不动库
+press(0, "等级 +10（已在上限）")
+ok &= check("已到上限再 +10 不动库", db_lev(CNO), LEV_MAX)
+
 # 还原
 cur.execute("UPDATE taiwan_cain_2nd.inventory SET money=%d, coin=%d WHERE charac_no=%d"
             % (m0, c0, CNO))
-cur.execute("UPDATE taiwan_cain.charac_info SET lev=%d WHERE charac_no=%d" % (l0, CNO))
+cur.execute("UPDATE taiwan_cain.charac_info SET lev=%d WHERE charac_no=%d" % (l0_orig, CNO))
 cur.execute("UPDATE taiwan_cain.charac_stat SET exp=%d WHERE charac_no=%d" % (e0, CNO))
 print("已还原：金币 %d 复活币 %d 等级 %d 经验 %d" % (m0, c0, l0, e0))
 p.kill()

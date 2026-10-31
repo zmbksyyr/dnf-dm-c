@@ -13,6 +13,9 @@ typedef struct {
     char pvf[MAX_PATH];
     int  font;          // 字号（pt）
     int  poll_sec;
+    int  lev_max;       // 等级上限（GM 页「设成几级」和 +10 的封顶）。默认 85 —— 各端
+                        // 版本不同，写死 100 会在 85 封顶的服上把等级写过头。
+                        // settings.ini [gm] lev_max，范围 1~255
     char hotkey[32];
     int  grab_auto;
     char grab_proc[64];

@@ -45,6 +45,9 @@ static void cfg_load(Config *c, const char *path) {
     c->charset = ini_int(L"db", L"charset", 33, w);
 
     ini_str(L"pvf", L"path", c->pvf, sizeof(c->pvf), w);
+    // 等级上限默认 85：多数端在这个版本封顶 85，之前写死 100 会把等级写到超出范围
+    c->lev_max = ini_int(L"gm", L"lev_max", 85, w);
+    if (c->lev_max < 1 || c->lev_max > 255) c->lev_max = 85;
     c->font = ini_int(L"ui", L"font", 9, w);
     c->poll_sec = ini_int(L"ui", L"poll_sec", 3, w);
     ini_str(L"ui", L"hotkey", c->hotkey, sizeof(c->hotkey), w);
@@ -90,6 +93,7 @@ static void cfg_save(const Config *c, const char *path) {
     ini_set(L"db", L"pwd", c->pwd, w);
     ini_set(L"db", L"charset", fmt_new("%d", c->charset), w);
     ini_set(L"pvf", L"path", c->pvf, w);
+    ini_set(L"gm", L"lev_max", fmt_new("%d", c->lev_max), w);
     ini_set(L"ui", L"font", fmt_new("%d", c->font), w);
     ini_set(L"ui", L"poll_sec", fmt_new("%d", c->poll_sec), w);
     ini_set(L"ui", L"hotkey", c->hotkey, w);
