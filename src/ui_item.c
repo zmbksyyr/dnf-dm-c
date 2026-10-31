@@ -834,20 +834,35 @@ static HWND g_gauto;   // 连续取码开关
 static HWND g_sep;     // 表单区 / 队列区之间的分隔线
 static int g_sync;      // 重填队列时屏蔽 LVN_ITEMCHANGED
 static int g_bind = -1; // 表单当前绑定的队列行；-1 = 未绑定（只填表单，不写回）
+static u8  s_gtype = IT_STACK;   // 当前编号对应的物品类型字节（由 PVF 决定，见 grant_type_sync）
 
+// ---------------- 类型：从 PVF 来，没 PVF 也有默认值 ----------------
+// 类型字节决定这件东西在库里算哪一类（装备 1 / 消耗品 2 / 材料 3 / 任务材料 4 …），
+// 填错的后果是这一格按另一套规则解析，轻则显示成别的东西，重则整格报错。
+// 所以这一格只读，用户能改的只有编号；PVF 不在时兜成消耗品，不阻塞发放。
 static void grant_sync(void) {
-    int t = sel_to_type(ui_combo_sel(g_type));
-    int is_eq = (t == IT_EQUIP || t == IT_CREATURE_EQUIP);
+    int is_eq = (s_gtype == IT_EQUIP || s_gtype == IT_CREATURE_EQUIP);
     ui_enable(g_dur, is_eq);      // 装备看耐久
     ui_enable(g_num, !is_eq);     // 堆叠物看数量
     ui_enable(g_sealc, SendMessageW(g_seal, BM_GETCHECK, 0, 0) == BST_CHECKED);
+}
+
+// 类型那格跟着编号走：编号一变就重新判一次，并顺手把数量/耐久的可用状态拨对。
+static void grant_type_sync(void) {
+    u32 id = (u32)ui_int(g_id);
+    // 没 PVF 也照样出结果：app_item_type 兜的是消耗品，不会给 0，
+    // 所以不存在「这一格空着、东西发不出去」的状态
+    s_gtype = app_item_type(id);
+    ui_text(g_type, app_item_type_text(id));
+    grant_sync();
 }
 
 static void grant_form_get(NamedId *v) {
     memset(v, 0, sizeof(*v));
     v->id = (u32)ui_int(g_id);
     v->num = (u32)(ui_int(g_num) > 0 ? ui_int(g_num) : 1);
-    v->type = (u8)sel_to_type(ui_combo_sel(g_type));
+    // 类型每次都现判一遍，不信界面上那格缓存：切角色/换 PVF 之后旧值就过期了
+    v->type = app_item_type(v->id);
     v->enhance = (u8)ui_int(g_enh);
     v->inc_type = (u8)(ui_combo_sel(g_inc) < 0 ? 0 : ui_combo_sel(g_inc));
     v->inc_val = (u16)ui_int(g_incv);
@@ -862,7 +877,6 @@ static void grant_form_get(NamedId *v) {
 static void grant_form_set(const NamedId *v) {
     ui_set_int(g_id, (int)v->id);
     ui_set_int(g_num, (int)(v->num ? v->num : 1));
-    ui_combo_set(g_type, type_to_sel(v->type));
     ui_set_int(g_enh, v->enhance);
     ui_combo_set(g_inc, v->inc_type > 4 ? 0 : v->inc_type);
     ui_set_int(g_incv, v->inc_val);
@@ -870,7 +884,7 @@ static void grant_form_set(const NamedId *v) {
     SendMessageW(g_seal, BM_SETCHECK, v->seal ? BST_CHECKED : BST_UNCHECKED, 0);
     ui_set_int(g_sealc, v->seal_cnt);
     ui_set_int(g_dur, v->dur);
-    grant_sync();
+    grant_type_sync();
 }
 
 // 一行的显示文本：整表重填与单行刷新共用，保证两处长得一样
@@ -946,6 +960,8 @@ static void grant_reload(Page *p) {
         ui_row_sel_set(g_list, keep);
     }
     g_sync = 0;
+    // PVF 是异步加载的：编号早就填好、那时只能显示「未加载」，加载完这里跟着补上
+    grant_type_sync();
     if (!g.char_ok) ui_text(g_info, "请先选择角色");
     else ui_text(g_info, fmt_new("目标：%s · 队列 %d 项 · 点行载入表单，改完点别处自动写回",
                                  g.cur.name, g.grant.n));
@@ -986,15 +1002,8 @@ static void grant_load_sel(void) {
 }
 
 // ---- 队列导出 / 导入：TSV，列名可读，人能直接拿记事本改 ----
-static int type_from_text(const char *s) {
-    for (int i = 0; i < (int)COUNT_OF(kTypeList); i++)
-        if (strcmp(s, kTypeList[i]) == 0) return i;
-    int v = atoi(s);
-    for (int i = 0; i < (int)COUNT_OF(kTypeList); i++)
-        if (sel_to_type(i) == v) return i;
-    return -1;
-}
-
+// 导出时把类型名写出来，是为了让人拿到记事本里能看懂；导入时这一列不看 ——
+// 类型只认 PVF，写上去也改不了。
 static int inc_from_text(const char *s) {
     for (int i = 0; i < (int)COUNT_OF(kIncList); i++)
         if (strcmp(s, kIncList[i]) == 0) return i;
@@ -1053,8 +1062,8 @@ static void grant_export(void) {
     str_cat(&s, "编号\t名称\t数量\t类型\t强化\t增幅\t增幅值\t锻造\t封装\t封印次数\t耐久\r\n");
     for (int i = 0; i < g.grant.n; i++) {
         NamedId *n = VEC_AT(&g.grant, NamedId, i);
-        int t = type_to_sel(n->type);
-        const char *tn = t >= 0 && t < (int)COUNT_OF(kTypeList) ? kTypeList[t] : "消耗品";
+        // 类型名按编号现查 PVF，队列里存的字节只作兜底
+        const char *tn = app_item_type_text(n->id);
         const char *in = n->inc_type <= 4 ? kIncList[n->inc_type] : kIncList[0];
         str_catf(&s, "%u\t%s\t%u\t%s\t%d\t%s\t%u\t%d\t%s\t%d\t%u\r\n", n->id, n->name, n->num, tn,
                  n->enhance, in, n->inc_val, n->forge, n->seal ? "是" : "否", n->seal_cnt, n->dur);
@@ -1142,8 +1151,7 @@ static void grant_import(void) {
         memset(&v, 0, sizeof(v));
         v.id = id;
         v.num = (u32)(atoi(f2) > 0 ? atoi(f2) : 1);
-        int t = type_from_text(f3);
-        v.type = (u8)sel_to_type(t < 0 ? 2 : t);      // 缺省按消耗品
+        v.type = app_item_type(id);              // 第 4 列（类型）只导出给人看，不回读
         v.enhance = (u8)atoi(f4);
         int inc = inc_from_text(f5);
         v.inc_type = (u8)(inc < 0 ? 0 : inc);
@@ -1182,7 +1190,12 @@ static LRESULT grant_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             grant_commit();
             return 0;
         }
-        if ((id == G_TYPE || id == G_INC) && code == CBN_KILLFOCUS && !focus_is_add()) {
+        // 编号边敲边更新「类型」那格：类型只能跟着 PVF 走，早一拍显示也是真值
+        if (id == G_ID && code == EN_CHANGE) {
+            grant_type_sync();
+            return 0;
+        }
+        if (id == G_INC && code == CBN_KILLFOCUS && !focus_is_add()) {
             grant_commit();
             return 0;
         }
@@ -1192,9 +1205,6 @@ static LRESULT grant_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         }
         switch (id) {
             case G_ADD: grant_add_manual(); return 0;
-            case G_TYPE:
-                if (code == CBN_SELCHANGE) grant_sync();
-                return 0;
             case G_SEAL:
                 grant_sync();
                 return 0;
@@ -1300,18 +1310,24 @@ static void grant_layout(Page *p, int w, int h) {
 static void grant_lock(Page *p) {
     (void)p;
     int on = g.char_ok;
-    int ids[] = {G_ID, G_NUM, G_TYPE, G_ENH, G_INC, G_INCV, G_FORGE, G_SEAL, G_SEALC, G_DUR,
+    int ids[] = {G_ID, G_NUM, G_ENH, G_INC, G_INCV, G_FORGE, G_SEAL, G_SEALC, G_DUR,
                  G_ADD, G_DEL, G_CLR, G_MAIL, G_INV, G_EXPORT, G_IMPORT};
+    // 类型那格是只读的，跟着物品走：没选角色时它也没内容可显示，和其它字段一起灰掉
+    ui_enable(g_type, on);
     for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
     if (on) grant_sync();
+    else grant_type_sync();          // 灰掉时也填默认值，别留着上一件物品的类型
 }
 
 static void grant_build(Page *p, HWND parent) {
     // 创建顺序就是 Tab 顺序：这一行照视觉排（编号 → 类型 → 数量 → 强化 …），
-    // g_num 原来建在 g_type 前面，Tab 会从编号直接跳到数量再绕回类型
+    // g_num 原来建在 g_type 前面，Tab 会从编号直接跳到数量再绕回类型。
+    // 类型做成只读框：内容按编号从 PVF 判出来的，用户改不了，改编号就行。
+    // 仍然保留 WS_TABSTOP（ui_edit 的 ro=0），Tab 能顺着整行走过去。
     g_id = ui_edit(parent, "", G_ID, 0);
-    g_type = ui_combo(parent, G_TYPE, 1);
-    ui_combo_fill(g_type, kTypeList, COUNT_OF(kTypeList), 2);
+    g_type = ui_edit(parent, "", G_TYPE, 0);
+    SendMessageW(g_type, EM_SETREADONLY, TRUE, 0);
+    grant_type_sync();                 // 建好就填默认值，不等用户敲编号
     g_num = ui_edit(parent, "1", G_NUM, 0);
     g_dur = ui_edit(parent, "0", G_DUR, 0);   // 耐久在第一行末尾，跟着建
     g_enh = ui_edit(parent, "0", G_ENH, 0);
@@ -1348,6 +1364,11 @@ static void grant_build(Page *p, HWND parent) {
     // 按钮名短，含义挂在悬浮提示上
     ui_tip(parent, GetDlgItem(parent, G_ADD),
            "把表单里的物品作为新的一项追加到队列；点了某行之后改表单会自动写回该行，点此按钮则把当前表单当新项入队");
+    ui_tip(parent, g_id, "物品编号。类型格会跟着这个编号自动判，不用自己选");
+    ui_tip(parent, g_type,
+           "只读。按编号从 PVF 里查目录判出来的：equipment/ → 装备、avatar/ → 时装、"
+           "stackable/quest → 任务材料、creature/ → 宠物，其余堆叠物算消耗品。"
+           "没加载 PVF 或编号查不到时兜成「消耗品(默认)」，东西照样能发出去");
     ui_tip(parent, g_gauto,
            "默认开启。开启后持续读取游戏里鼠标悬停的物品，每取到一件就整行追加到队列；队列里已有的编号自动跳过。"
            "开着工具才算，关掉不补。热键可以随时开关");

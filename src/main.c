@@ -103,7 +103,8 @@ static void card_refresh(void) {
     card_put(9, b);
     fmt(b, sizeof(b), "%d", d->qp);
     card_put(10, b);
-    fmt(b, sizeof(b), "%s · %d 胜 · %d 分", app_pvp_text(d->pvp_grade), d->pvp_win, d->pvp_point);
+    // 胜」是段位场次，第二个是胜点；两边单位不一样，分开写才对得上游戏里的说法
+    fmt(b, sizeof(b), "%s · %d 胜 · %d 点", app_pvp_text(d->pvp_grade), d->pvp_win, d->pvp_point);
     card_put(11, b);
 
     int used = 0;

@@ -261,7 +261,7 @@ static void bub_build(Page *p, HWND parent) {
 
     // 初值来自 settings.ini
     if (g.cfg.bubble_on) SendMessageW(b_on, BM_SETCHECK, BST_CHECKED, 0);
-    ui_set_int(b_sec, g.cfg.bubble_sec >= 5 ? g.cfg.bubble_sec : 60);
+    ui_set_int(b_sec, g.cfg.bubble_sec >= 5 ? g.cfg.bubble_sec : 600);
     ui_combo_set(b_target, g.cfg.bubble_target < 0 || g.cfg.bubble_target > 3 ? 0 : g.cfg.bubble_target);
     if (g.cfg.bubble_target >= 2 && g.cfg.bubble_tno) ui_set_int(b_tno, (int)g.cfg.bubble_tno);
     ui_set_int(b_hours, g.cfg.bubble_hours > 0 ? g.cfg.bubble_hours : 0);

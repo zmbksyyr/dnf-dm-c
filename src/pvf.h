@@ -60,6 +60,8 @@ typedef struct {
     int    nexp;
     StrTab avatar_hidden;
     IdTab  nstr;         // n_string id → .str 路径
+    u8    *kind;         // 与 items.key 平行：物品在 PVF 里属于哪类（PK_*）
+    IdTab  cre;          // creature/pet 表：宠物编号（只用来认「这个编号是宠物」）
 
     unsigned str_cp;     // stringtable 解码代码页（936/950）
     int      opened;
@@ -81,6 +83,21 @@ typedef struct {
     int  nitem;
     int  lev_min, lev_max;
 } QuestInfo;
+
+// 物品类别：不是界面选的，是从 PVF 目录推出来的。
+// 装备 / 时装 / 宠物在库里是不同的表（inventory / user_items / creature_items），
+// 类型字节填错就是把一件东西当成另一件发出去，所以这一列只读、且以 PVF 为准。
+enum {
+    PK_NONE = 0,     // 这个 PVF 里没有这个编号
+    PK_EQUIP,        // equipment/                          → 装备
+    PK_STACK,        // stackable/                          → 消耗品
+    PK_MATERIAL,     // stackable/material                  → 材料
+    PK_QUEST,        // stackable/quest                     → 任务材料
+    PK_AVATAR,       // equipment/character/*/avatar/       → 时装
+    PK_CREATURE,     // creature/ 或 pet/ 表里的            → 宠物
+};
+int         pvf_item_kind(const Pvf *p, u32 id);
+const char *pvf_kind_name(int kind);
 
 const char *pvf_item_name(const Pvf *p, u32 id);
 int         pvf_quest_info(Pvf *p, u32 id, QuestInfo *out);

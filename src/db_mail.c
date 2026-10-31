@@ -29,6 +29,32 @@ int db_list_mails(Db *d, const Charac *c, Vec *out, Err err) {
     return 1;
 }
 
+// 宠物编号清单：dnf_creature_info 是「it_id ↔ creature_id」的对照表，
+// 也就是「哪些编号是宠物」的唯一权威来源 —— PVF 的 creature/ 目录按键值是
+// creature_id（佛拉斯=1），跟道具编号根本不在一个空间里，照它判会把编号 1
+// （复活币）当成宠物。所以这里按 it_id 收一份清单给界面用。
+// 有的私服没有这两个 web 库，查不到就当清单为空，不影响其它功能。
+int db_creature_ids(Db *d, Vec *out, Err err) {
+    vec_clear(out);
+    static const char *kd[] = {"taiwan_cain_web.dnf_creature_info",
+                               "taiwan_main_web.dnf_creature_info"};
+    for (int i = 0; i < 2; i++) {
+        Str s = {0};
+        MyResult r = {0};
+        str_catf(&s, "SELECT it_id FROM %s WHERE it_id>0", kd[i]);
+        int ok = select1(d, &s, &r);
+        str_free(&s);
+        if (!ok) { err[0] = 0; d->err[0] = 0; continue; }
+        for (int k = 0; k < r.nrow; k++) {
+            u32 id = (u32)my_u64(&r, k, 0, 0);
+            if (id) *VEC_ADD(out, u32) = id;
+        }
+        my_free(&r);
+        return out->n;
+    }
+    return out->n;
+}
+
 // 邮件本身只是软删（delete_flag=1）；但它附带的时装/宠物是真实行，
 // 不跟着清掉就成了占格的孤儿记录。add_info 就是那行的 ui_id。
 void mail_drop_attach(Db *d, u64 postal_id) {

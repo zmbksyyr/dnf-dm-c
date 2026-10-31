@@ -1,8 +1,18 @@
 name: build
 
-# 只在手动触发时跑，push 不自动出包
+# 推到主分支就出包，不用再去 Actions 页面点一下。手动触发也留着：
+# 改了 workflow 本身、或者想在没提交的情况下重跑一次时用得上。
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
+
+# 连续推送只会让后一次白等：中间那些提交注定要被覆盖掉的，不如直接取消。
+# cancel-in-progress=false 是故意的 —— 正在上传的那次必须跑完，
+# 半路掐断会让 Release 上留着上一个版本的包。
+concurrency:
+  group: release-latest
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -90,7 +100,7 @@ jobs:
           # Release 不存在就建（tag 固定，永远只有这一个）
           gh release view $env:RELEASE_TAG *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $env:RELEASE_TAG --title "Release" --notes "由 Actions 手动触发，每次覆盖"
+            gh release create $env:RELEASE_TAG --title "Release" --notes "首次构建占位，随后被覆盖"
             if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败" }
           }
 

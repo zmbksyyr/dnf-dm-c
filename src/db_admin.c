@@ -180,7 +180,10 @@ int db_ban(Db *d, u32 mid, int days, int type, int value, const char *reason, Er
                  st.wMinute, st.wSecond);
     }
 
-    set_names(d, "latin1");
+    // reason 列是 utf8（整表 DEFAULT CHARSET=utf8），这里必须走正常的 utf8 连接。
+    // 早先照搬 db_set_name 用了 latin1 连接，MySQL 会把送进去的 UTF-8 字节当成
+    // latin1 再转一次码：库里存的是 C3A8C2BF… 这种二次编码，界面回读就是一坨乱码。
+    // 角色名要 latin1 是因为服务端那条链路认的是原始字节，reason 没有这个包袱。
     char *e = mysql_escape(reason ? reason : "");
     Str s = {0};
     str_catf(&s,
@@ -191,7 +194,6 @@ int db_ban(Db *d, u32 mid, int days, int type, int value, const char *reason, Er
     free(e);
     int ok = run(d, &s);
     str_free(&s);
-    set_names(d, "utf8");
     if (!ok) snprintf(err, ERRBUF, "%s", d->err);
     return ok;
 }

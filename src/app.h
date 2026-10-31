@@ -99,6 +99,7 @@ typedef struct {
     Vec    ban_chars;      // Charac：封停页的角色选择器数据源
     Vec    events;         // EventRow
     Vec    event_info;     // EventInfo
+    Vec    cre_ids;        // u32：宠物编号清单（来自 dnf_creature_info）
 
     char   status[512];    // 状态栏
     // 表/列自检报告：连接作业在后台线程里写，job_poll 等到线程结束才由 UI 读，
@@ -161,6 +162,11 @@ void app_save_draft(void);                       // 同上，旧名字，别处�
 
 // 展示
 const char *app_item_name(u32 id, char *buf, int cap);
+// 物品类型由 PVF 目录决定（equipment/ → 装备、stackable/quest → 任务材料 …），
+// 不是界面上给人挑的选项：类型字节错了，同一个编号会被按另一套规则解析，
+// 轻则显示成别的东西，重则整格读不出来。
+u8          app_item_type(u32 id);       // IT_* 字节；没 PVF / 查不到时兜消耗品，不会返回 0
+const char *app_item_type_text(u32 id);  // 「装备」「消耗品」…；兜底时带括号说明来源
 const char *app_job_text(int job);
 const char *app_pvp_text(int grade);   // PVP 段位名（0=10级 … 34=斗神）
 void app_money_text(u64 v, char *buf, int cap);

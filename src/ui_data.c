@@ -719,22 +719,29 @@ static void log_load(void) {
         return;
     }
     size_t start = b.n > 100000 ? b.n - 100000 : 0;
+
+    // 文件是顺序追写的，直接顺下来就是「最早那条在最上面」，看日志等于每次都要拖到
+    // 最后。倒着拼：先把行首偏移收一遍（倒着走才知道每段到哪收尾），再从后往前取。
+    Vec ln;
+    vec_init(&ln, sizeof(size_t));
+    *(size_t *)VEC_ADD(&ln, size_t) = start;
+    for (size_t i = start; i + 1 < b.n; i++)
+        if (b.p[i] == '\n') *(size_t *)VEC_ADD(&ln, size_t) = i + 1;
+
     Str s = {0};
-    for (size_t i = start; i < b.n; i++) {
-        if (b.p[i] == '\n') str_cat(&s, "\r\n");
-        else str_catn(&s, (const char *)b.p + i, 1);
+    for (int k = ln.n - 1; k >= 0; k--) {
+        size_t at = *(size_t *)VEC_AT(&ln, size_t, k);
+        size_t to = (size_t)(k + 1 < ln.n ? *(size_t *)VEC_AT(&ln, size_t, k + 1) - 1 : b.n);
+        if (to > at) str_catn(&s, (const char *)b.p + at, (int)(to - at));
+        str_cat(&s, "\r\n");
     }
     int first = (int)SendMessageW(l_text, EM_GETFIRSTVISIBLELINE, 0, 0);
-    int total = (int)SendMessageW(l_text, EM_GETLINECOUNT, 0, 0);
-    int at_tail = (first + 2 >= total);
     ui_text(l_text, str_c(&s));
-    // 重写整段文本后光标回到开头，等于永远停在最早那几行 —— 日志页最该看见的
-    // 恰恰是最后一条。只在原本就贴着底部时才跟到底：用户正往上翻历史时别拽他回来。
-    if (at_tail) {
-        SendMessageW(l_text, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
-        SendMessageW(l_text, EM_SCROLLCARET, 0, 0);
-    }
+    // 重写整段文本会把视口拽回第一行 —— 这版第一行恰恰是最新的，正是想看的，所以
+    // 不用再做「跟到底」。只有正在往下翻历史的人要还原位置，别给他掀回开头。
+    if (first > 0) SendMessageW(l_text, EM_LINESCROLL, 0, (LPARAM)first);
     str_free(&s);
+    vec_free(&ln);
     buf_free(&b);
     // 只显示文件名，绝对路径太长会把按钮挤走
     const char *nm = strrchr(path, '\\');

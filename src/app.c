@@ -55,7 +55,7 @@ static void cfg_load(Config *c, const char *path) {
     c->grab_auto = ini_int(L"grab", L"auto", 1, w);   // 默认开启连续取码
 
     c->bubble_on = ini_int(L"bubble", L"on", 0, w);
-    c->bubble_sec = ini_int(L"bubble", L"sec", 60, w);
+    c->bubble_sec = ini_int(L"bubble", L"sec", 600, w);
     c->bubble_target = ini_int(L"bubble", L"target", 0, w);
     c->bubble_coin = ini_int(L"bubble", L"coin", 0, w);
     c->bubble_dpoint = ini_int(L"bubble", L"dpoint", 0, w);
@@ -390,6 +390,40 @@ const char *app_item_name(u32 id, char *buf, int cap) {
     return buf;
 }
 
+// 类型字节：以 PVF 为准，界面上不可选。
+// PK_AVATAR 归到 IT_EQUIP —— 时装在游戏里同样占装备格子，真正分开发的是邮件附件
+// （avata_flag 那一列），由 ui_mail 按 pvf_item_kind 直接判。
+// 兜底类型是消耗品（IT_STACK）：绝大多数要发的东西（药水、材料盒、礼盒、兑换券）
+// 都是这一类。没有 PVF、或者 PVF 里查不到这个编号时按它走，至少东西能发得出去、
+// 也能叠起来 —— 比留个 0 让物品格子整个失效要好。
+u8 app_item_type(u32 id) {
+    if (!g.pvf_ok || !id) return IT_STACK;
+    switch (pvf_item_kind(&g.pvf, id)) {
+        case PK_EQUIP:
+        case PK_AVATAR:   return IT_EQUIP;
+        case PK_MATERIAL: return IT_MATERIAL;
+        case PK_QUEST:    return IT_QUEST;
+        case PK_CREATURE: return IT_CREATURE;
+        case PK_STACK:    return IT_STACK;
+        default:          return IT_STACK;
+    }
+}
+
+// 显示用。括号里那几个字是给操作的人看的交代：类型到底是 PVF 说的还是兜底来的，
+// 一眼要能分出来 —— 发错类型不像发错数量，改回来要清背包。
+const char *app_item_type_text(u32 id) {
+    if (!g.pvf_ok || !id) return "消耗品(默认)";
+    switch (pvf_item_kind(&g.pvf, id)) {
+        case PK_EQUIP:    return "装备";
+        case PK_AVATAR:   return "时装";
+        case PK_MATERIAL: return "材料";
+        case PK_QUEST:    return "任务材料";
+        case PK_CREATURE: return "宠物";
+        case PK_STACK:    return "消耗品";
+        default:          return "消耗品(未知编号)";
+    }
+}
+
 const char *app_job_text(int job) {
     static const char *kJ[] = {"未转职", "鬼剑士", "格斗家", "神枪手", "魔法师", "圣职者",
                                "刺客",   "男法师", "缔造者", "黑暗武士", "影舞者"};
@@ -435,6 +469,11 @@ static int w_connect(void *ctx, Err err) {
     // 连上先自查一遍表结构。私服之间差得很多（少表、少列、把 LONGBLOB 建成 BLOB），
     // 以前这些差异都表现为「改完弹回去」；现在一次说清楚，写进日志。
     // 自检本身的失败不算连接失败——查不了结构不该让人连不上库。
+    // 宠物编号清单要在连库时一次性收齐：界面判定「这个编号是宠物」要用，
+    // 而 UI 线程不做查询（避免和后台任务抢同一个连接）。查不到就留空。
+    g.cre_ids.n = 0;
+    db_creature_ids(&g.db, &g.cre_ids, err);
+    err[0] = 0;
     g.self_bad = db_selfcheck(&g.db, g.self, (int)sizeof(g.self), err);
     err[0] = 0;
     if (!db_list_chars(&g.db, &g.chars, 200, "", err)) return 0;
@@ -525,6 +564,7 @@ void app_disconnect(void) {
     g.sel = -1;
     g.pend_mask = g.write_mask = 0;
     vec_clear(&g.chars);
+    vec_clear(&g.cre_ids);          // 换库连就得换清单，留着旧的等于认错宠物
     db_free_data(&g.data);
     db_free_data(&g_load_ctx.d);      // 载入到一半断开时，暂存区里还有东西
     app_status("已断开数据库");
@@ -828,7 +868,7 @@ void app_grant_add(u32 id, u32 num) {
     NamedId *n = VEC_ADD(&g.grant, NamedId);
     n->id = id;
     n->num = num;
-    n->type = IT_STACK;
+    n->type = app_item_type(id);      // PVF 说了算；发出去那一刻再兜 IT_STACK
     snprintf(n->name, sizeof(n->name), "%s", nm);
     app_status("已加入队列：%s ×%u", nm, num);
 }
@@ -848,7 +888,7 @@ int app_grant_add_new(u32 id, u32 num) {
     NamedId *n = VEC_ADD(&g.grant, NamedId);
     n->id = id;
     n->num = num;
-    n->type = IT_STACK;
+    n->type = app_item_type(id);
     snprintf(n->name, sizeof(n->name), "%s", nm);
     return 1;
 }
@@ -1103,6 +1143,7 @@ void app_init(void) {
     vec_init(&g.bans, sizeof(BanRow));
     vec_init(&g.events, sizeof(EventRow));
     vec_init(&g.event_info, sizeof(EventInfo));
+    vec_init(&g.cre_ids, sizeof(u32));
     act_init();                              // 列表暂存 Vec（act.c 内部）
     vec_init(&s_poll, sizeof(Charac));
 

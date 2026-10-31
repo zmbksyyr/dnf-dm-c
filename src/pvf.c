@@ -2,7 +2,7 @@
 #include "pvf.h"
 
 #define XOR_KEY 0x81A79011u
-#define CACHE_MAGIC "PVFC4\0"
+#define CACHE_MAGIC "PVFC5\0"   // 5：物品表带分类、多一张宠物表；旧缓存直接作废重建
 #define CACHE_MAGIC_LEN 6
 
 // ---------------- 解密 ----------------
@@ -89,24 +89,34 @@ typedef struct {
     IdTab    *t;
     StabBuild sb;
     int       cap;
+    u8       *kind;      // 与 t->key 平行的分类标记（只有物品表要，见 want_kind）
+    u8        cur_kind;  // ib_add 时写进去的值，调用方在每张表/每个目录前设定
+    int       want_kind;
 } IdBuild;
 
-static void ib_init(IdBuild *b, IdTab *t) {
+static void ib_init2(IdBuild *b, IdTab *t, int want_kind) {
     memset(t, 0, sizeof(*t));
     b->t = t;
     sb_init(&b->sb, &t->names);
     b->cap = 0;
+    b->kind = NULL;
+    b->cur_kind = 0;
+    b->want_kind = want_kind;
 }
+
+static void ib_init(IdBuild *b, IdTab *t) { ib_init2(b, t, 0); }
 
 static void ib_add(IdBuild *b, u32 key, const char *name) {
     if (b->t->n + 1 > b->cap) {
         int c = b->cap ? b->cap * 2 : 64;
         b->t->key = (u32 *)xrealloc(b->t->key, sizeof(u32) * (size_t)c);
         b->t->stroff = (u32 *)xrealloc(b->t->stroff, sizeof(u32) * (size_t)c);
+        if (b->want_kind) b->kind = (u8 *)xrealloc(b->kind, (size_t)c);
         b->cap = c;
     }
     b->t->key[b->t->n] = key;
     b->t->stroff[b->t->n] = (u32)b->t->names.n;
+    if (b->kind) b->kind[b->t->n] = b->cur_kind;
     sb_add(&b->sb, name, (int)strlen(name));
     b->t->n++;
 }
@@ -129,12 +139,21 @@ static void ib_sort(IdBuild *b) {
     qsort(ki, (size_t)n, sizeof(KeyIdx), cmp_keyidx);
     u32 *nk = (u32 *)xalloc(sizeof(u32) * (size_t)n);
     u32 *ns = (u32 *)xalloc(sizeof(u32) * (size_t)n);
-    for (int i = 0; i < n; i++) { nk[i] = ki[i].key; ns[i] = b->t->stroff[ki[i].idx]; }
+    u8  *nd = b->kind ? (u8 *)xalloc((size_t)n) : NULL;
+    for (int i = 0; i < n; i++) {
+        nk[i] = ki[i].key;
+        ns[i] = b->t->stroff[ki[i].idx];
+        if (nd) nd[i] = b->kind[ki[i].idx];
+    }
     free(ki);
     free(b->t->key);
     free(b->t->stroff);
     b->t->key = nk;
     b->t->stroff = ns;
+    if (nd) {
+        free(b->kind);
+        b->kind = nd;
+    }
 }
 
 // ---------------- 路径索引 ----------------
@@ -449,8 +468,22 @@ static void stk_field_any(Pvf *p, const Buf *c, const char *want, Str *out) {
     str_free(&tmp);
 }
 
-// 把 lst 里每个 id 的名称塞进 ib
-static void lst_into_idtab(Pvf *p, const char *lst_path, const char *base_dir, IdBuild *ib) {
+// 物品分类只看文件落在哪个目录：PVF 没有「类型」字段，目录就是它唯一的分类依据。
+// 分界与游戏里的物品栏号段一一对应（装备 9-56 / 消耗品 57-104 / 材料 105-152 /
+// 任务材料 153-200），因此这里判错，发出去的物品格子就不合法。
+static u8 kind_of_equip(const char *path) {
+    return strstr(path, "/avatar/") ? PK_AVATAR : PK_EQUIP;
+}
+
+static u8 kind_of_stack(const char *path) {
+    if (strncmp(path, "stackable/material", 18) == 0) return PK_MATERIAL;
+    if (strncmp(path, "stackable/quest", 15) == 0) return PK_QUEST;
+    return PK_STACK;
+}
+
+// 把 lst 里每个 id 的名称塞进 ib。kof 非空时按文件路径顺手记下分类
+static void lst_into_idtab(Pvf *p, const char *lst_path, const char *base_dir, IdBuild *ib,
+                           u8 (*kof)(const char *path)) {
     const Leaf *lf = pvf_find(p, lst_path);
     if (!lf) return;
     Buf data = {0};
@@ -469,8 +502,10 @@ static void lst_into_idtab(Pvf *p, const char *lst_path, const char *base_dir, I
         if (!sub) continue;
         if (!pvf_read(p, sub, &c)) continue;
         stk_field(p, &c, "[name]", &name);
+        ib->cur_kind = kof ? kof(lp->path) : 0;
         ib_add(ib, lp->id, name.n ? name.p : "");
     }
+    ib->cur_kind = 0;
     str_free(&name);
     buf_free(&c);
     vec_free(&pairs);
@@ -571,12 +606,16 @@ static void build_dicts(Pvf *p, PvfProg prog) {
     if (prog.pct) *prog.pct = 55;
     if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "解析物品名称");
     idtab_free(&p->items);
+    free(p->kind);
+    p->kind = NULL;
     {
         IdBuild ib;
-        ib_init(&ib, &p->items);
-        lst_into_idtab(p, "equipment/equipment.lst", "equipment", &ib);
-        lst_into_idtab(p, "stackable/stackable.lst", "stackable", &ib);
+        ib_init2(&ib, &p->items, 1);    // 物品表要带分类，别的表不要
+        lst_into_idtab(p, "equipment/equipment.lst", "equipment", &ib, kind_of_equip);
+        lst_into_idtab(p, "stackable/stackable.lst", "stackable", &ib, kind_of_stack);
         ib_sort(&ib);
+        p->kind = ib.kind;
+        ib.kind = NULL;
     }
 
     if (prog.pct) *prog.pct = 8;
@@ -585,7 +624,19 @@ static void build_dicts(Pvf *p, PvfProg prog) {
     {
         IdBuild ib;
         ib_init(&ib, &p->jobs);
-        lst_into_idtab(p, "character/character.lst", "character", &ib);
+        lst_into_idtab(p, "character/character.lst", "character", &ib, NULL);
+        ib_sort(&ib);
+    }
+
+    if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "解析宠物");
+    idtab_free(&p->cre);
+    {
+        // 宠物编号不在物品表里（两边的编号会撞，比如 1 既是金币又是一只宠物的编号），
+        // 单独存一张表，只用来认「这个编号属于宠物」。
+        IdBuild ib;
+        ib_init(&ib, &p->cre);
+        lst_into_idtab(p, "creature/creature.lst", "creature", &ib, NULL);
+        lst_into_idtab(p, "pet/pet.lst", "pet", &ib, NULL);
         ib_sort(&ib);
     }
 
@@ -702,6 +753,9 @@ static void save_cache(Pvf *p) {
     }
     write_stab(&b, &p->strings);
     write_idtab(&b, &p->items);
+    buf_put32(&b, (u32)p->items.n);
+    for (int i = 0; i < p->items.n; i++) buf_putc(&b, p->kind ? p->kind[i] : 0);
+    write_idtab(&b, &p->cre);
     write_idtab(&b, &p->jobs);
     write_stab(&b, &p->seals);
     buf_put32(&b, (u32)p->nexp);
@@ -807,6 +861,15 @@ static int load_cache(Pvf *p) {
     }
     read_stab(&r, &p->strings);
     read_idtab(&r, &p->items);
+    {
+        int n = (int)r_u32(&r);
+        if (!r.ok || n != p->items.n || r.o + (size_t)n > r.n) { buf_free(&raw); return 0; }
+        free(p->kind);
+        p->kind = (u8 *)xalloc((size_t)n + 1);
+        memcpy(p->kind, r.p + r.o, (size_t)n);
+        r.o += (size_t)n;
+    }
+    read_idtab(&r, &p->cre);
     read_idtab(&r, &p->jobs);
     read_stab(&r, &p->seals);
     p->nexp = (int)r_u32(&r);
@@ -879,6 +942,9 @@ void pvf_close(Pvf *p) {
     p->nleaf = p->nby_path = 0;
     stab_free(&p->strings);
     idtab_free(&p->items);
+    free(p->kind);
+    p->kind = NULL;
+    idtab_free(&p->cre);
     idtab_free(&p->jobs);
     stab_free(&p->seals);
     stab_free(&p->avatar_hidden);
@@ -896,6 +962,44 @@ int pvf_loaded(const Pvf *p) { return p && p->opened; }
 
 const char *pvf_item_name(const Pvf *p, u32 id) { return idtab_get(&p->items, id); }
 
+// 物品编号在物品表里的下标（-1 = 没有这件）
+static int key_index(const IdTab *t, u32 key) {
+    if (!t || t->n == 0) return -1;
+    int lo = 0, hi = t->n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) >> 1;
+        if (t->key[mid] == key) return mid;
+        if (t->key[mid] < key) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return -1;
+}
+
+int pvf_item_kind(const Pvf *p, u32 id) {
+    if (!p || !p->opened) return PK_NONE;
+    int i = key_index(&p->items, id);
+    if (i >= 0) {
+        u8 k = p->kind ? p->kind[i] : 0;
+        return k ? (int)k : PK_STACK;
+    }
+    // 物品表里没有，再看是不是宠物：宠物编号自成一套，会和物品编号撞车
+    // （1 既是金币又是一种宠物），所以顺序不能反 —— 先认物品，认不出来才当宠物。
+    if (p->cre.n && key_index(&p->cre, id) >= 0) return PK_CREATURE;
+    return PK_NONE;
+}
+
+const char *pvf_kind_name(int kind) {
+    switch (kind) {
+        case PK_EQUIP: return "装备";
+        case PK_STACK: return "消耗品";
+        case PK_MATERIAL: return "材料";
+        case PK_QUEST: return "任务材料";
+        case PK_AVATAR: return "时装";
+        case PK_CREATURE: return "宠物";
+        default: return "未知";
+    }
+}
+
 const char *pvf_job_name(const Pvf *p, int job) { return idtab_get(&p->jobs, (u32)job); }
 
 const char *pvf_seal_name(const Pvf *p, int id) {
@@ -908,9 +1012,8 @@ u32 pvf_exp_for(const Pvf *p, int lev) {
 }
 
 int pvf_is_equip(const Pvf *p, u32 id) {
-    (void)p;
-    (void)id;
-    return 0;
+    int k = pvf_item_kind(p, id);
+    return k == PK_EQUIP || k == PK_AVATAR;
 }
 
 int pvf_item_count(const Pvf *p) { return p ? p->items.n : 0; }

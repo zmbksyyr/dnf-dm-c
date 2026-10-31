@@ -14,7 +14,49 @@ static HWND m_list, m_info, m_text, m_aid, m_anum, m_target, m_atype, m_hint;
 static HWND m_sep1, m_sep2;   // 列表上下的分隔线
 
 static const char *kMailTarget[] = {"当前角色", "全服", "在线玩家"};
-static const char *kMailAttach[] = {"普通物品", "时装(avata)", "宠物(creature)"};
+// 邮件附件落到哪张表，看 avata_flag / creature_flag 这两个开关：
+//   普通 → 直接把数量写进 postal.add_info
+//   时装 → 先在 user_items 建一行，拿 ui_id 当 add_info（avata_flag=1）
+//   宠物 → 先在 creature_items 建一行，拿 ui_id 当 add_info（creature_flag=1）
+// 三者的 ID 空间互相独立，选错就是把时装当普通道具发出去，收的人拿到一件废道具。
+// 所以这一格不由人填：填了 ID 就由 PVF 判定，判不出来一律按「普通」兜。
+enum { AK_ITEM = 0, AK_AVATA = 1, AK_CREATURE = 2 };
+
+// 宠物不落在 user_items，而是自成一表（creature_items）；但它在 PVF 里的编号
+// 长得和装备/消耗品一样 —— 63000「佛拉斯」按所在目录算就是件装备，光看 PVF
+// 分不出来。说得清的只有库里的 dnf_creature_info：it_id 那一列就是宠物清单，
+// 连库时收一次，这里照它对。清单为空（架服没带 web 库）时按普通物品发，不发宠物。
+static int id_in_list(Vec *v, u32 id) {
+    for (int i = 0; i < v->n; i++)
+        if (*VEC_AT(v, u32, i) == id) return 1;
+    return 0;
+}
+
+static int attach_kind_of(u32 id) {
+    if (!id) return AK_ITEM;                  // 没填附件：纯文本邮件，种类无从谈起
+    if (g.pvf_ok) {
+        switch (pvf_item_kind(&g.pvf, id)) {
+            case PK_AVATAR:   return AK_AVATA;
+            case PK_CREATURE: return AK_CREATURE;
+            default: break;
+        }
+    }
+    if (id_in_list(&g.cre_ids, id)) return AK_CREATURE;
+    return AK_ITEM;                           // 没 PVF 也照样出：默认普通，邮件照样发得出去
+}
+
+static const char *kAttachText[] = {"普通物品", "时装", "宠物"};
+static const char *kAttachIdLab[] = {"物品 ID", "时装 ID", "宠物 ID"};
+
+// 附件类型那格跟着附件 ID 走，并把左边那个叫法标签一并改成三种之一。
+// 每次都现问 PVF：主键ini 里的 ID 改了、或者 PVF 才刚加载完，旧结果就作废了。
+static void mail_type_sync(void) {
+    if (!m_aid || !m_atype) return;
+    u32 id = ui_int(m_aid) > 0 ? (u32)ui_int(m_aid) : 0;
+    int k = attach_kind_of(id);
+    ui_text(m_atype, kAttachText[k]);
+    ui_text(m_hint, kAttachIdLab[k]);
+}
 
 // ---- 异步动作 ----
 enum { A_LIST = 1, A_DEL, A_DELALL, A_SENDT, A_SENDI, A_DELALLS };
@@ -83,6 +125,8 @@ static void mail_refresh_list(void) {
 
 static void mail_reload(Page *p) {
     (void)p;
+    // PVF 可能是进页面之后才加载完的，每次刷新都重问一次类型
+    mail_type_sync();
     if (!g.char_ok) { ui_text(m_info, "请先选择角色"); return; }
     if (!(g.lists_ready & L_MAILS)) {
         if (!job_running(&g.job_act)) {
@@ -105,11 +149,10 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         mail_reload(p);
         return 0;
     }
-    if (LOWORD(wp) == M_ATYPE) {
-        // 换类型时把标签改掉（普通物品/时装/宠物 三者的 ID 空间不同，叫法要跟着变）
-        int a = ui_combo_sel(m_atype);
-        static const char *kLab[] = {"物品 ID", "时装 ID", "宠物 ID"};
-        ui_text(m_hint, kLab[a >= 0 && a <= 2 ? a : 0]);
+    if (LOWORD(wp) == M_AID && HIWORD(wp) == EN_CHANGE) {
+        // 附件 ID 一变就重新问 PVF：这格是只读的，用户改不了它，只能改 ID。
+        // 这里不接 m_atype 的 EN_CHANGE —— 那格正是本函数写的，再接就自己触发自己了。
+        mail_type_sync();
         return 0;
     }
     switch (LOWORD(wp)) {
@@ -140,8 +183,6 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         case M_SEND: {
             int target = ui_combo_sel(m_target);
             if (target < 0) target = 0;
-            int atype = ui_combo_sel(m_atype);
-            if (atype < 0) atype = 0;
             char idbuf[24];
             ui_get(m_aid, idbuf, sizeof(idbuf));
             str_trim(idbuf);
@@ -151,9 +192,11 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             str_trim(mc.text);
             if (!mc.text[0] && !id) { app_info("请填写正文，或填一个附件 ID。"); return 0; }
             mc.target = target;
-            mc.atype = atype;
-            mc.avata = (atype == 1);
-            mc.creature = (atype == 2);
+            // 附件种类按 PVF 对 ID 的分类定，不信界面上那格（那格只是把结论显示出来）。
+            // PVF 没加载时 attach_kind_of 一律给「普通」，照样能发出去。
+            mc.atype = attach_kind_of(id);
+            mc.avata = (mc.atype == AK_AVATA);
+            mc.creature = (mc.atype == AK_CREATURE);
             mc.iid = id;
             mc.inum = ui_int(m_anum) > 0 ? ui_int(m_anum) : 1;
             // 附件 ID 留空 = 纯文本邮件；当前角色才有「单发文本」这条路径，
@@ -202,8 +245,8 @@ static void mail_layout(Page *p, int w, int h) {
     ui_add(&r, ui_lbl_at(p->wnd, "目标"), ui_scale(34));
     ui_add(&r, m_target, ui_scale(96));
     ui_add(&r, ui_lbl_at(p->wnd, "附件类型"), ui_scale(58));
-    ui_add(&r, m_atype, ui_scale(130));
-    ui_add(&r, m_hint, ui_scale(58));          // 文字随类型变：物品 ID / 时装 ID / 宠物 ID
+    ui_add(&r, m_atype, ui_scale(96));           // 只读，跟着附件 ID 变
+    ui_add(&r, m_hint, ui_scale(58));            // 文字随类型变：物品 ID / 时装 ID / 宠物 ID
     ui_add(&r, m_aid, ui_scale(90));
     ui_add(&r, ui_lbl_at(p->wnd, "数量"), ui_scale(34));
     ui_add(&r, m_anum, ui_scale(50));
@@ -227,9 +270,9 @@ static void mail_lock(Page *p) {
     int ids[5] = {M_DEL, M_DELALL, M_AID, M_ANUM, M_TEXT};
     for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
     ui_enable(GetDlgItem(p->wnd, M_SEND), on || g.db_ok);
-    // 目标 / 附件类型 / 全服删除：连库即可用（不依赖选中角色）
+    // 目标 / 全服删除：连库即可用（不依赖选中角色）。附件类型是只读的跟随项，
+    // 随 ID 自己变，不参与这里的灰亮切换。
     ui_enable(m_target, g.db_ok);
-    ui_enable(m_atype, g.db_ok);
     ui_enable(GetDlgItem(p->wnd, M_DELALLS), g.db_ok);
 }
 
@@ -250,8 +293,11 @@ static void mail_build(Page *p, HWND parent) {
     m_hint = ui_label(parent, "物品 ID", M_HINT);
     m_target = ui_combo(parent, M_TARGET, 1);
     ui_combo_fill(m_target, kMailTarget, COUNT_OF(kMailTarget), 0);
-    m_atype = ui_combo(parent, M_ATYPE, 1);
-    ui_combo_fill(m_atype, kMailAttach, COUNT_OF(kMailAttach), 0);
+    // 类型做成只读的文本框而不是下拉：内容来自 PVF，下拉给人的错觉是"可以选一个"。
+    // 只读靠 EM_SETREADONLY（不是 ro=1），这样 Tab 还能走到它，整行的 Tab 顺序不断。
+    m_atype = ui_edit(parent, "", M_ATYPE, 0);
+    SendMessageW(m_atype, EM_SETREADONLY, TRUE, 0);
+    mail_type_sync();            // 建好就写上「普通物品」，不等用户输入 ID
     ui_cols(m_list, (const char *const[]){"邮件ID", "物品", "编号", "数量", "类型", "时间"},
             (const int[]){110, 200, 70, 56, 60, 130}, 6);
     ui_button(parent, "刷新", M_REFRESH);
@@ -260,7 +306,10 @@ static void mail_build(Page *p, HWND parent) {
     ui_button(parent, "删除全服邮件", M_DELALLS);
     ui_button(parent, "发送邮件", M_SEND);
     ui_tip(parent, m_target, "当前角色：只发给列表上方选中的角色；全服：所有未删角色；在线玩家：仅 login_status>=1 的账号");
-    ui_tip(parent, m_atype, "普通物品：作为可叠加道具入邮件；时装：先在 user_items 建行再以 avata_flag 发；宠物：先在 creature_items 建行再以 creature_flag 发");
+    ui_tip(parent, m_atype,
+           "附件种类按附件 ID 从 PVF 判定，不可手改：普通物品作为可叠加道具入邮件；"
+           "时装先建 user_items 行再以 avata_flag 发；宠物先建 creature_items 行再以 creature_flag 发。"
+           "PVF 未加载时按普通物品处理");
     ui_tip(parent, m_aid, "要附带的物品/时装/宠物 ID（PVF 里的编号）。留空 = 只发正文的纯文本邮件");
     ui_tip(parent, m_anum, "附件数量，留空按 1 发");
     ui_tip(parent, m_text, "邮件正文；正文和附件可以只给一个，但不能都没有");
