@@ -262,6 +262,62 @@ int db_poll_chars(Db *d, Vec *out, int limit, Err err) {
     return 1;
 }
 
+// 封停页的「加载全服 / 加载在线」：和 db_poll_chars 用同一套在线判定
+// （账号在线 且 正在玩该角色；拿不到当前角色映射时退回账号级），
+// 只是这里不需要分页，但要能在 SQL 之外按 online_only 过滤。
+int db_list_ban_chars(Db *d, Vec *out, int online_only, int limit, Err err) {
+    static const char *kCurTables[] = {"taiwan_game_event.event_1306_account_reward",
+                                       "taiwan_siroco.member_play_info"};
+    const char *cur_tab = NULL;
+    for (int i = 0; i < COUNT_OF(kCurTables) && !cur_tab; i++)
+        if (have_table(d, kCurTables[i])) cur_tab = kCurTables[i];
+    int have_login = have_table(d, "taiwan_login.login_account_3");
+
+    Str s = {0};
+    str_cat(&s, "SELECT c.charac_no,c.charac_name,c.job,c.grow_type,c.lev,c.m_id,a.accountname,");
+    if (have_login)
+        str_cat(&s,
+                "(SELECT MAX(l.login_status) FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id),");
+    else
+        str_cat(&s, "NULL,");
+    if (cur_tab)
+        str_catf(&s, "(SELECT MAX(1) FROM %s t WHERE t.m_id=c.m_id AND t.charac_no=c.charac_no)",
+                 cur_tab);
+    else
+        str_cat(&s, "NULL");
+    str_cat(&s, " FROM taiwan_cain.charac_info c"
+                " LEFT JOIN d_taiwan.accounts a ON a.UID=c.m_id"
+                " WHERE c.delete_flag=0 ORDER BY c.charac_no DESC");
+    if (limit > 0) str_catf(&s, " LIMIT %d", limit);
+
+    MyResult r = {0};
+    if (!select1(d, &s, &r)) {
+        snprintf(err, ERRBUF, "%s", d->err);
+        str_free(&s);
+        return 0;
+    }
+    str_free(&s);
+
+    vec_clear(out);
+    for (int i = 0; i < r.nrow; i++) {
+        int acct = (int)my_i64(&r, i, 7, 0);
+        int playing = cur_tab ? (int)my_i64(&r, i, 8, 0) : 1;
+        int online = acct == 1 && playing == 1;
+        if (online_only && !online) continue;       // 过滤在填的时候做，SQL 少一层子查询
+        Charac *c = VEC_ADD(out, Charac);
+        c->no = (u32)my_u64(&r, i, 0, 0);
+        cp_text(c->name, sizeof(c->name), &r, i, 1);
+        c->job = (int)my_i64(&r, i, 2, 0);
+        c->grow = (int)my_i64(&r, i, 3, 0);
+        c->lev = (int)my_i64(&r, i, 4, 0);
+        c->mid = (u32)my_u64(&r, i, 5, 0);
+        cp_text(c->account, sizeof(c->account), &r, i, 6);
+        c->online = online;
+    }
+    my_free(&r);
+    return 1;
+}
+
 int db_is_online(Db *d, u32 mid) {
     Str s = {0};
     str_catf(&s, "SELECT MAX(login_status) FROM taiwan_login.login_account_3 WHERE m_id=%u", mid);

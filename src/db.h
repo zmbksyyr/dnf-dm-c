@@ -98,6 +98,9 @@ int  db_list_chars(Db *d, Vec *out, int limit, const char *kw, Err err);   // Ve
 u32  db_count_chars(Db *d, const char *kw);
 int  db_poll_chars(Db *d, Vec *out, int limit, Err err);   // 列表+在线+当前角色，一条查询
 int  db_is_online(Db *d, u32 mid);
+// 封停页专用：全服角色 + 精确在线位（与 db_poll_chars 同口径）。
+// online_only=1 时只留「账号在线且正在玩该角色」的，用来做「加载在线」。
+int  db_list_ban_chars(Db *d, Vec *out, int online_only, int limit, Err err);   // Vec<Charac>
 
 // 数据容器 + 状态
 int  db_load_data(Db *d, const Charac *c, CharData *out, Err err);

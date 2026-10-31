@@ -99,9 +99,9 @@ static int char_do(void *ctx, Err err) {
             // 写暂存，不碰 g.bans——UI 线程可能正在遍历
             return db_list_bans(&g.db, &s_bans_next, err);
         case K_BANCHARS:
-            // 封停页角色选择器：加载全部角色（含已删除的，封禁操作可能针对任意角色）
+            // 封停页列表：i1=0 加载全服，i1=1 只加载在线
             InterlockedOr(&s_lists_dirty, L_BANCHARS);
-            return db_list_chars(&g.db, &s_ban_chars_next, 5000, NULL, err);
+            return db_list_ban_chars(&g.db, &s_ban_chars_next, c->i1 ? 1 : 0, 5000, err);
         case K_EVLIST:
             // 同上，写暂存。活动字典小，每次刷新都重拉，保证「新增定义」能立刻出现在下拉里
             if (!db_list_event_info(&g.db, &s_event_info_next, err)) return 0;
