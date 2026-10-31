@@ -1000,6 +1000,18 @@ typedef struct {
 } GrantCtx;
 static GrantCtx g_grant_ctx;
 
+// 背包是分段的，不是一整条：普通栏放装备/消耗品，材料栏放材料/任务材料。
+// 服务端逐槽校验，材料类物品只要落进普通栏区间，InventoryVerify 就判整个背包
+// 非法并断开连接 —— 而且一次只报第一个（ERROR_ITEM_LOG），删掉它只会让报错
+// 顺延到下一件，看起来就像"删了没用"。
+// 分界来自原生数据：装备/消耗品全在 0..152，材料/任务材料全在 153..248。
+#define INV_MATERIAL_SLOT 153
+
+// 这一类物品必须落材料栏
+static inline int inv_need_material(u8 t) {
+    return t == IT_MATERIAL || t == IT_QUEST;
+}
+
 static int w_grant(void *ctx, Err err) {
     GrantCtx *c = (GrantCtx *)ctx;
     // 硬校验：UI 线程的在线位是缓存，可能过期；发放前在 job 线程里查一次真值
@@ -1035,13 +1047,21 @@ static int w_grant(void *ctx, Err err) {
     int ok = 0;
     for (int i = 0; i < s_grant_snap_n; i++) {
         NamedId *n = &s_grant_snap[i];
+        u8 ty = n->type ? n->type : IT_STACK;
+        // 材料类只找材料栏，其它只找普通栏。放错区不是"位置不好看"，
+        // 是服务端直接拒绝加载、角色登不进去。
+        int lo = inv_need_material(ty) ? INV_MATERIAL_SLOT : 0;
+        int hi = inv_need_material(ty) ? b->n : INV_MATERIAL_SLOT;
         int slot = -1;
-        for (int k = 0; k < b->n; k++)
+        for (int k = lo; k < hi; k++)
             if (item_empty(&local[k])) { slot = k; break; }
-        if (slot < 0) { snprintf(err, ERRBUF, "背包已满"); goto done; }
+        if (slot < 0) {
+            snprintf(err, ERRBUF, inv_need_material(ty) ? "材料栏已满" : "背包已满");
+            goto done;
+        }
         Item it;
         memset(&it, 0, sizeof(it));
-        item_set_type(&it, n->type ? n->type : IT_STACK);
+        item_set_type(&it, ty);
         item_set_id(&it, n->id);
         item_set_num(&it, n->num);
         item_set_enhance(&it, n->enhance);

@@ -598,29 +598,71 @@ static void vec_free_strs(Vec *v) {
 // 只导一个角色（外加可选的账号共享数据），误删、误改时能定点回滚。
 // 生成的是标准 SQL，还原直接复用 db_restore_sql。
 typedef struct {
-    const char *db;
-    const char *tb;
-    int         by_mid;     // 0 = 按 charac_no，1 = 按 m_id
+    char db[64];
+    char tb[96];
+    int  by_mid;     // 0 = 按 charac_no，1 = 按 m_id
 } CharTab;
 
-static const CharTab kCharTabs[] = {
-    {"taiwan_cain",     "charac_stat",                  0},
-    {"taiwan_cain",     "charac_info",                  0},
-    {"taiwan_cain",     "new_charac_quest",             0},
-    {"taiwan_cain",     "charac_quest_shop",            0},
-    {"taiwan_cain",     "charac_titlebook",             0},
-    {"taiwan_cain",     "pvp_result",                   0},
-    {"taiwan_cain",     "charac_dimension_inout",       0},
-    {"taiwan_cain",     "charac_blood_dungeon_reward",  0},
-    {"taiwan_cain_2nd", "inventory",                    0},
-    {"taiwan_cain_2nd", "charac_inven_expand",          0},
-    {"taiwan_cain_2nd", "skill",                        0},
-    {"taiwan_cain_2nd", "user_items",                   0},
-    {"taiwan_cain_2nd", "creature_items",               0},
-    // 以下按账号归属，账号下其它角色会一起受影响，单独放在文件末尾并注释提示
-    {"taiwan_cain",     "account_cargo",                1},
-    {"taiwan_cain",     "member_dungeon",               1},
+// 按 m_id 归属的表必须手工列，不能自动发现：那一列只说明「属于某个账号」，
+// 里面混着封停记录（member_punish_info）、建角限制、计费数据。自动扫出来
+// 再复制过去，等于把封号一起克隆 —— 那不是备份，是复制故障。
+// 要跟着角色走的只有这两张：账号金库 + 已开图。
+static const CharTab kMidTabs[] = {
+    {"taiwan_cain", "account_cargo",  1},
+    {"taiwan_cain", "member_dungeon", 1},
 };
+
+// 日志 / 流水 / 回收站 / 审核镜像表不参与：行数动辄几百万，复制过去既没
+// 意义又会把备份文件撑爆、把克隆事务拖到超时。
+static int tab_excluded(const char *tb) {
+    static const char *kNoSuf[] = {"_log", "_del", "_history", "_backup", "_bak", "_old", "_mod"};
+    size_t n = strlen(tb);
+    for (int i = 0; i < COUNT_OF(kNoSuf); i++) {
+        size_t m = strlen(kNoSuf[i]);
+        if (n > m && strcmp(tb + n - m, kNoSuf[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+// 扫 information_schema 把「按 charac_no 归属」的表全捞出来，再接上手工
+// 白名单的账号级表。以前是一份写死的清单，漏了 11 张表 —— 克隆出的角色
+// 缺这些行，界面上看不出异常，进游戏却被服务端校验踢掉，极难定位。
+// 返回 1 = 成功，0 = 失败（err 已填）。
+static int char_tabs(Db *d, Vec *out, Err err) {
+    vec_clear(out);
+
+    Str s = {0};
+    MyResult r = {0};
+    str_cat(&s, "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.COLUMNS "
+                "WHERE COLUMN_NAME='charac_no' "
+                "  AND TABLE_SCHEMA IN ('taiwan_cain','taiwan_cain_2nd') "
+                "ORDER BY TABLE_SCHEMA,TABLE_NAME");
+    int ok = select1(d, &s, &r);
+    str_free(&s);
+    if (!ok) {
+        snprintf(err, ERRBUF, "扫角色归属表失败：%s", d->err);
+        my_free(&r);
+        return 0;
+    }
+    for (int i = 0; i < r.nrow; i++) {
+        const char *sc = my_text(&r, i, 0), *tn = my_text(&r, i, 1);
+        if (!sc || !tn || tab_excluded(tn)) continue;
+        CharTab *e = VEC_ADD(out, CharTab);
+        memset(e, 0, sizeof(*e));
+        snprintf(e->db, sizeof(e->db), "%s", sc);
+        snprintf(e->tb, sizeof(e->tb), "%s", tn);
+    }
+    my_free(&r);
+
+    for (int i = 0; i < COUNT_OF(kMidTabs); i++) {
+        CharTab *e = VEC_ADD(out, CharTab);
+        memset(e, 0, sizeof(*e));
+        snprintf(e->db, sizeof(e->db), "%s", kMidTabs[i].db);
+        snprintf(e->tb, sizeof(e->tb), "%s", kMidTabs[i].tb);
+        e->by_mid = 1;
+    }
+    return 1;
+}
 
 void db_backup_char_path(char *out, int cap, const Charac *c) {
     char dir[MAX_PATH], ts[32];
@@ -648,8 +690,15 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
 
     int nt = 0;
     u64 nr = 0;
-    for (int ti = 0; ti < COUNT_OF(kCharTabs); ti++) {
-        const CharTab *ct = &kCharTabs[ti];
+
+    // 表集运行时发现，不写死：库里凡带 charac_no 的表（日志类除外）都要跟着
+    // 角色走。以前写死 15 张、实际有 26 张，漏掉的 11 张让克隆出来的角色是
+    // 残的 —— 工具里看不出问题，游戏服务端一校验就把人踢了。
+    Vec tabs;
+    vec_init(&tabs, sizeof(CharTab));
+    if (!char_tabs(d, &tabs, err)) { str_free(&out); vec_free(&tabs); return 0; }
+    for (int ti = 0; ti < tabs.n; ti++) {
+        const CharTab *ct = VEC_AT(&tabs, CharTab, ti);
         Str q = {0};
         MyResult r = {0};
 
@@ -750,6 +799,7 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
         vec_free_strs(&names);
         vec_free_strs(&types);
     }
+    vec_free(&tabs);
     if (tables) *tables = nt;
     if (rows) *rows = nr;
     {   // 角色备份只留最近 6 份
@@ -965,8 +1015,12 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
     if (ok) {
         char kexpr[32];
         snprintf(kexpr, sizeof(kexpr), "%u", new_no);
-        for (int ti = 0; ti < COUNT_OF(kCharTabs) && ok; ti++) {
-            const CharTab *ct = &kCharTabs[ti];
+        // 同 db_backup_char：表集运行时发现，不写死清单
+        Vec tabs;
+        vec_init(&tabs, sizeof(CharTab));
+        if (!char_tabs(d, &tabs, err)) { ok = 0; }
+        for (int ti = 0; ok && ti < tabs.n; ti++) {
+            const CharTab *ct = VEC_AT(&tabs, CharTab, ti);
             if (ct->by_mid) continue;                        // 账号共享数据不复制
             if (!strcmp(ct->tb, "charac_info")) continue;    // 已经处理过
             u64 n2 = 0;
@@ -975,6 +1029,7 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
             if (ret == 0) { ok = 0; break; }
             if (ret == 1 && n2) { nt++; nr += n2; }
         }
+        vec_free(&tabs);
     }
 
     str_clear(&s);
