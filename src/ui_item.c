@@ -536,8 +536,7 @@ void page_item_create(Page *p) {
 enum {
     Q_KW = PAGE_ID(PAGE_QUERY, 1), Q_LIST, Q_INFO, Q_GO, Q_ADD, Q_ALL,
     Q_MAT, Q_EQU, Q_AVA, Q_TASK,      // 加载 常用材料 / 装备 / 时装 / 任务材料
-    Q_BMAT, Q_BSTK, Q_BEQU, Q_BPET, Q_BAVA,   // 浏览：材料 / 消耗品 / 装备 / 宠物 / 时装
-    Q_BHINT                                   // 浏览行右边那句随状态变的说明
+    Q_BMAT, Q_BSTK, Q_BEQU, Q_BPET, Q_BAVA   // 浏览：材料 / 消耗品 / 装备 / 宠物 / 时装
 };
 
 static HWND q_kw, q_list, q_info, q_sep;
@@ -767,27 +766,33 @@ static void query_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, Q_ALL, "全部加入"), ui_scale(80));
     ui_add(&r, q_info, -1);
 
-    // 第二行：四个批量抽屉。放在查询页是因为「先查后发」是这条链路的起点 ——
-    // 查不到的东西不会有事，灌进去的都是 PVF 里真有的。
-    // 「双击某行加入队列」这类说明不占版面了，挂在列表和按钮的提示里。
-    int y = pad + rowh + g;
-    ui_row(&r, p->wnd, pad, y, rowh);
-    ui_add(&r, ui_btn_at(p->wnd, Q_MAT, "加载常用材料"), ui_scale(100));
-    ui_add(&r, ui_btn_at(p->wnd, Q_EQU, "加载常用装备"), ui_scale(100));
-    ui_add(&r, ui_btn_at(p->wnd, Q_AVA, "加载常用时装"), ui_scale(100));
-    ui_add(&r, ui_btn_at(p->wnd, Q_TASK, "加载任务材料"), ui_scale(100));
-
-    // 第三行：按类打开浏览窗口。放在查询页而不是发放页 —— 这两行干的是同一件事的
-    // 前半段（从整个 PVF 里把东西找出来），发放页那张列表只该放已经挑定的东西。
-    int y2 = y + rowh + g;
-    ui_row(&r, p->wnd, pad, y2, rowh);
-    ui_add(&r, ui_lbl_at(p->wnd, "浏览"), ui_scale(34));
-    ui_add(&r, ui_btn_at(p->wnd, Q_BMAT, "材料"), ui_scale(60));
-    ui_add(&r, ui_btn_at(p->wnd, Q_BSTK, "消耗品"), ui_scale(64));
-    ui_add(&r, ui_btn_at(p->wnd, Q_BEQU, "装备"), ui_scale(60));
-    ui_add(&r, ui_btn_at(p->wnd, Q_BPET, "宠物"), ui_scale(60));
-    ui_add(&r, ui_btn_at(p->wnd, Q_BAVA, "时装"), ui_scale(60));
-    ui_add(&r, GetDlgItem(p->wnd, Q_BHINT), -1);
+    // 第二行：四个「加载常用」+ 五个「浏览」，九样东西排一行。宽度按页面可用宽度
+    // 整体缩放 —— 窗口拉窄时不缩会把最右边那几个顶出界外。
+    // 「浏览」两个字的标签是两组的分界：左边填结果列表，右边开独立窗口挑。
+    int y2 = pad + rowh + g;
+    struct { HWND h; int w; } b2[] = {
+        {ui_btn_at(p->wnd, Q_MAT, "加载常用材料"),  ui_scale(100)},
+        {ui_btn_at(p->wnd, Q_EQU, "加载常用装备"),  ui_scale(100)},
+        {ui_btn_at(p->wnd, Q_AVA, "加载常用时装"),  ui_scale(100)},
+        {ui_btn_at(p->wnd, Q_TASK, "加载任务材料"), ui_scale(100)},
+        {ui_lbl_at(p->wnd, "浏览"),                ui_scale(38)},
+        {ui_btn_at(p->wnd, Q_BMAT, "材料"),        ui_scale(60)},
+        {ui_btn_at(p->wnd, Q_BSTK, "消耗品"),      ui_scale(64)},
+        {ui_btn_at(p->wnd, Q_BEQU, "装备"),        ui_scale(60)},
+        {ui_btn_at(p->wnd, Q_BPET, "宠物"),        ui_scale(60)},
+        {ui_btn_at(p->wnd, Q_BAVA, "时装"),        ui_scale(60)},
+    };
+    int nb = COUNT_OF(b2);
+    int want = 0;
+    for (int i = 0; i < nb; i++) want += b2[i].w;
+    int avail = w - pad * 2 - r.gap * (nb - 1);
+    double f = (want > avail && avail > 0 && want > 0) ? (double)avail / (double)want : 1.0;
+    ui_row(&r, p->wnd, pad, y2, rowh);        // 重起一行，别接着第一行末尾的 x 往下排
+    for (int i = 0; i < nb; i++) {
+        int bw = (int)(b2[i].w * f);
+        if (bw < ui_scale(24)) bw = ui_scale(24);
+        ui_add(&r, b2[i].h, bw);
+    }
 
     int ly = y2 + rowh + g;                   // 按钮和列表之间断一刀
     ui_place(q_sep, pad, ly, w - pad * 2, ui_scale(2));
@@ -814,9 +819,6 @@ static void query_lock(Page *p) {
     ui_enable(GetDlgItem(p->wnd, Q_BEQU), g.pvf_ok);
     ui_enable(GetDlgItem(p->wnd, Q_BAVA), g.pvf_ok);
     ui_enable(GetDlgItem(p->wnd, Q_BPET), pet_ok);
-    ui_text(GetDlgItem(p->wnd, Q_BHINT),
-            g.pvf_ok ? "打开独立窗口挑，双击或多选后进发放队列"
-                     : "浏览需要 PVF：先在左上角选好 Script.pvf");
 }
 
 static void query_build(Page *p, HWND parent) {
@@ -840,7 +842,6 @@ static void query_build(Page *p, HWND parent) {
     ui_button(parent, "装备", Q_BEQU);
     ui_button(parent, "宠物", Q_BPET);
     ui_button(parent, "时装", Q_BAVA);
-    ui_label(parent, "", Q_BHINT);
     ui_tip(parent, q_list, "列出当前 PVF 里真有的物品；双击某行等于「加入发放」，"
                            "「数量」列（任务材料要的个数）一起进队列");
     ui_tip(parent, GetDlgItem(parent, Q_GO), "按物品名或编号在当前 PVF 里模糊查，最多列 800 条");
@@ -850,12 +851,12 @@ static void query_build(Page *p, HWND parent) {
     ui_tip(parent, GetDlgItem(parent, Q_EQU), "内置的常用装备编号，和当前 PVF 比对后只列真有的");
     ui_tip(parent, GetDlgItem(parent, Q_AVA), "内置的常用时装编号，和当前 PVF 比对后只列真有的");
     ui_tip(parent, GetDlgItem(parent, Q_TASK), "扫 PVF 里所有收集类任务，列出它们要的材料和个数");
-    // 浏览类按钮：这几类都是成千上万条（装备近 5 万、时装近 3.9 万），灌进列表没法用，
-    // 所以开独立窗口 + 虚拟列表挑
+    // 浏览类按钮：这几类都是成千上万条，灌进列表没法用，所以开独立窗口 + 虚拟列表挑。
+    // 提示里不写具体多少条 —— 每个版本的 PVF 数量都不一样，写死就是错数字。
     ui_tip(parent, GetDlgItem(parent, Q_BMAT), "PVF 里 stackable/material 下的材料；开浏览窗口按名字或编号筛");
-    ui_tip(parent, GetDlgItem(parent, Q_BSTK), "PVF 里 stackable/ 下的消耗品（药水、券…），两万多条");
-    ui_tip(parent, GetDlgItem(parent, Q_BEQU), "PVF 里 equipment/ 下的装备，近五万条；筛选后好找");
-    ui_tip(parent, GetDlgItem(parent, Q_BAVA), "PVF 里 equipment/character/*/avatar/ 下的时装，近三万九千条");
+    ui_tip(parent, GetDlgItem(parent, Q_BSTK), "PVF 里 stackable/ 下的消耗品（药水、券…）");
+    ui_tip(parent, GetDlgItem(parent, Q_BEQU), "PVF 里 equipment/ 下的装备，量大，筛选后再找");
+    ui_tip(parent, GetDlgItem(parent, Q_BAVA), "PVF 里 character/*/avatar/ 下的时装，量大，筛选后再找");
     ui_tip(parent, GetDlgItem(parent, Q_BPET), "宠物编号来自库里的 dnf_creature_info（如 63000 佛拉斯）；"
            "要先用账号连上服才认得出来");
 }

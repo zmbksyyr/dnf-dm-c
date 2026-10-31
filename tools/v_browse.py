@@ -38,7 +38,7 @@ GWL_STYLE = -16
 LVS_OWNERDATA = 0x1000
 
 # 浏览按钮在查询页（PAGE_QUERY=1 → 1100 起）
-Q_BMAT, Q_BSTK, Q_BEQU, Q_BPET, Q_BAVA, Q_BHINT = 1111, 1112, 1113, 1114, 1115, 1116
+Q_BMAT, Q_BSTK, Q_BEQU, Q_BPET, Q_BAVA = 1111, 1112, 1113, 1114, 1115
 G_LIST = 1212                  # 发放页的队列列表（安全：只取行数，不取文本）
 
 B_KW, B_LIST, B_CNT, B_MSG = 3001, 3002, 3003, 3004
@@ -165,7 +165,6 @@ def main():
         index_pages(P(mw), h)
     print("== 等 PVF 就绪 %ds · 装备按钮可用=%d" % (waited, enabled(h.get(Q_BEQU))))
     index_pages(P(mw), h)
-    print("== 浏览行说明：%s" % txt(h.get(Q_BHINT)))
     grab(mw, os.path.join(SHOTS, "q_browse_row.png"))
 
     cases = [("材料", Q_BMAT, "硬化"), ("消耗品", Q_BSTK, "药剂"), ("装备", Q_BEQU, "剑"),
