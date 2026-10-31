@@ -191,6 +191,11 @@ static void mail_layout(Page *p, int w, int h) {
 
     int y = bottom - sendh;
     ui_row(&r, p->wnd, pad, y, rowh);
+    // 末端的提示文字按「实际文字宽」给控件宽：这样它的右端就是文字右端，
+    // 下一行的「发送邮件」按钮能跟它对齐。给 -1 撑满的话控件右端在窗口边上，
+    // 文字却只占前面一小段，按钮对上去会偏出去一百多像素。
+    const char *tip = "（ID 留空 = 纯文本邮件）";
+    const int tipw = ui_text_w(tip);
     ui_add(&r, ui_lbl_at(p->wnd, "目标"), ui_scale(34));
     ui_add(&r, m_target, ui_scale(96));
     ui_add(&r, ui_lbl_at(p->wnd, "附件类型"), ui_scale(58));
@@ -199,16 +204,20 @@ static void mail_layout(Page *p, int w, int h) {
     ui_add(&r, m_aid, ui_scale(90));
     ui_add(&r, ui_lbl_at(p->wnd, "数量"), ui_scale(34));
     ui_add(&r, m_anum, ui_scale(50));
-    ui_add(&r, ui_lbl_at(p->wnd, "（ID 留空 = 纯文本邮件）"), -1);
+    int tipx = r.x;
+    ui_add(&r, ui_lbl_at(p->wnd, tip), tipw);
+    const int align = tipx + tipw;             // 两行共用的右边界
 
     y += rowh + g;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "正文"), ui_scale(34));
-    // 正文框不能用 -1：那是「撑到右边界」，加完它后面就没位置了，
-    // 「发送邮件」会被排到窗口外面（截图核对时发现的）。
-    // 右边缘跟列表对齐（列表用的是 pad*2），所以这里扣到 pad*3。
-    ui_add(&r, m_text, rc.right - pad * 3 - ui_scale(34 + 4 + 4 + 88));
-    ui_add(&r, ui_btn_at(p->wnd, M_SEND, "发送邮件"), ui_scale(88));
+    // 正文框按这个右边界反算，不再撑满整行：原来它横到窗口那头，一千多像素宽，
+    // 填一两句正文根本用不到，还把「发送邮件」推得离内容很远。
+    const int bw = ui_scale(88);
+    int tw = align - r.x - r.gap - bw;
+    if (tw < ui_scale(120)) tw = ui_scale(120);
+    ui_add(&r, m_text, tw);
+    ui_add(&r, ui_btn_at(p->wnd, M_SEND, "发送邮件"), bw);
 }
 
 static void mail_lock(Page *p) {
