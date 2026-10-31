@@ -25,8 +25,11 @@ typedef struct {
     u32  bubble_item;    // 物品 ID（0=不发）
     int  bubble_itemnum; // 物品数量
     u32  bubble_tno;     // 指定角色 charac_no / 指定账号 m_id
-    int  bubble_start;   // 泡点生效开始时间（距 0 点的分钟数，0-1439）
-    int  bubble_end;     // 泡点生效结束时间（同上；start==end 表示全天）
+    // 生效时长：原来存的是「每天几点到几点」（分钟），表达不了「这次活动跑 3 小时就停」。
+    // 现在存档位 + 绝对截止时刻：点「应用」那一刻算出 until，重启工具后仍按真实时间判断，
+    // 不会因为重开一次就把时长又续一遍。
+    int  bubble_hours;   // 档位：0=持续（不自动停），1/3/5/7 小时
+    u64  bubble_until;   // 绝对截止时刻（time_t 秒），0 = 持续
 } Config;
 
 // 一次性后台任务：UI 只轮询 state，不阻塞
@@ -167,11 +170,12 @@ int  app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz);
 int  app_act_idle(void);                 // 连接空闲且没有排队动作：能直接发
 #define app_act(what, fn, ctx) app_act_n((what), (fn), (void *)(ctx), (int)sizeof(*(ctx)))
 
-// 泡点：开关 / 间隔秒 / 目标人群 / 多奖励（赠送点券·D点·D币·物品）/ 生效时段。
+// 泡点：开关 / 间隔秒 / 目标人群 / 多奖励（赠送点券·D点·D币·物品）/ 生效时长。
 // 改完立即写回 settings.ini，计时从改的那一刻重来。
 // 结算由 app_tick 驱动，只在本工具开着、且连库期间发生（关掉不补算）。
+// hours：生效时长档位，0=持续，1/3/5/7 小时（从点「应用」这一刻起算）。
 void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dcoin,
-                      u32 item, int itemnum, u32 tno, int start_min, int end_min);
+                      u32 item, int itemnum, u32 tno, int hours);
 void app_bubble_status(char *out, int cap);   // 一行人话，给 GM 页底部标签用
 void app_bubble_export(void);                // 把泡点结算记录导出为 txt
 

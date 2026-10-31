@@ -2,6 +2,7 @@
 #include "app.h"
 #include "act.h"       // act_apply_lists（列表暂存搬入）
 #include <stdio.h>     // app_bubble_export 用 FILE/fopen
+#include <time.h>      // 泡点生效时长的绝对截止时刻
 
 App g;
 
@@ -62,8 +63,16 @@ static void cfg_load(Config *c, const char *path) {
     c->bubble_item = (u32)ini_int(L"bubble", L"item", 0, w);
     c->bubble_itemnum = ini_int(L"bubble", L"itemnum", 0, w);
     c->bubble_tno = (u32)ini_int(L"bubble", L"tno", 0, w);
-    c->bubble_start = ini_int(L"bubble", L"start", 0, w);
-    c->bubble_end = ini_int(L"bubble", L"end", 0, w);
+    c->bubble_hours = ini_int(L"bubble", L"hours", 0, w);
+    c->bubble_until = (u64)(u32)ini_int(L"bubble", L"until", 0, w);
+    if (c->bubble_hours != 1 && c->bubble_hours != 3 && c->bubble_hours != 5 &&
+        c->bubble_hours != 7)
+        c->bubble_hours = 0;
+    // 截止时刻已经过去 = 这次活动结束了，别把它当成「还要再跑」
+    if (c->bubble_until && c->bubble_until <= (u64)time(NULL)) {
+        c->bubble_until = 0;
+        c->bubble_on = 0;
+    }
     // 旧版只有单一 val（=D币），迁移到 dcoin
     if (c->bubble_coin==0 && c->bubble_dpoint==0 && c->bubble_dcoin==0)
         c->bubble_dcoin = ini_int(L"bubble", L"val", 1, w);
@@ -95,8 +104,8 @@ static void cfg_save(const Config *c, const char *path) {
     ini_set(L"bubble", L"item", fmt_new("%u", c->bubble_item), w);
     ini_set(L"bubble", L"itemnum", fmt_new("%d", c->bubble_itemnum), w);
     ini_set(L"bubble", L"tno", fmt_new("%u", c->bubble_tno), w);
-    ini_set(L"bubble", L"start", fmt_new("%d", c->bubble_start), w);
-    ini_set(L"bubble", L"end", fmt_new("%d", c->bubble_end), w);
+    ini_set(L"bubble", L"hours", fmt_new("%d", c->bubble_hours), w);
+    ini_set(L"bubble", L"until", fmt_new("%u", (unsigned)c->bubble_until), w);
 }
 
 // ---------------- 日志/提示 ----------------
@@ -383,7 +392,7 @@ const char *app_item_name(u32 id, char *buf, int cap) {
 
 const char *app_job_text(int job) {
     static const char *kJ[] = {"未转职", "鬼剑士", "格斗家", "神枪手", "魔法师", "圣职者",
-                               "盗贼",   "男法师", "缔造者", "黑暗武士", "影舞者"};
+                               "刺客",   "男法师", "缔造者", "黑暗武士", "影舞者"};
     if (g.pvf_ok) {
         const char *n = pvf_job_name(&g.pvf, job);
         if (*n) return n;
@@ -1124,7 +1133,7 @@ static int w_bubble(void *ctx, Err err) {
 }
 
 void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dcoin,
-                      u32 item, int itemnum, u32 tno, int start_min, int end_min) {
+                      u32 item, int itemnum, u32 tno, int hours) {
     if (sec < 5) sec = 5;             // 下限 5 秒：再快就是拿一条连接刷库
     if (sec > 86400) sec = 86400;
     if (coin < 0) coin = 0;
@@ -1132,11 +1141,7 @@ void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dco
     if (dcoin < 0) dcoin = 0;
     if (itemnum < 0) itemnum = 0;
     if (target < 0 || target > 3) target = 0;
-    // 时间窗口：0-1439 分钟；start==end 表示全天
-    if (start_min < 0) start_min = 0;
-    if (start_min > 1439) start_min = 1439;
-    if (end_min < 0) end_min = 0;
-    if (end_min > 1439) end_min = 1439;
+    if (hours != 1 && hours != 3 && hours != 5 && hours != 7) hours = 0;   // 0 = 持续
     g.cfg.bubble_on = on ? 1 : 0;
     g.cfg.bubble_sec = sec;
     g.cfg.bubble_target = target;
@@ -1146,13 +1151,12 @@ void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dco
     g.cfg.bubble_item = item;
     g.cfg.bubble_itemnum = itemnum;
     g.cfg.bubble_tno = tno;
-    g.cfg.bubble_start = start_min;
-    g.cfg.bubble_end = end_min;
+    g.cfg.bubble_hours = hours;
+    // 时长从「应用」这一刻起算，存绝对截止时刻。存「还剩几小时」的话，每次重开
+    // 工具都得重新数，等于把 3 小时续成无数遍。
+    g.cfg.bubble_until = (on && hours) ? (u64)time(NULL) + (u64)hours * 3600 : 0;
     s_bubble_next = 0;                // 从改的这一刻重新计时，别沿用旧时刻
     cfg_save(&g.cfg, g.cfg_path);
-    char t1[8], t2[8];
-    snprintf(t1, sizeof(t1), "%02d:%02d", start_min / 60, start_min % 60);
-    snprintf(t2, sizeof(t2), "%02d:%02d", end_min / 60, end_min % 60);
     const char *tg = target == 0 ? "仅在线" : target == 1 ? "全服" :
                      target == 2 ? "指定角色" : "指定账号";
     char rw[128] = "";
@@ -1162,27 +1166,17 @@ void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dco
     if (item)   snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "物品%d×%d ", item,
                          itemnum > 0 ? itemnum : 1);
     if (!rw[0]) snprintf(rw, sizeof(rw), "（无奖励）");
-    if (start_min == end_min)
-        app_status("泡点：%s · 每 %d 秒 · %s · %s · 全天生效", on ? "已启用" : "已停用", sec, tg, rw);
-    else
-        app_status("泡点：%s · 每 %d 秒 · %s · %s · %s~%s 生效",
-                   on ? "已启用" : "已停用", sec, tg, rw, t1, t2);
-    if (start_min == end_min)
-        app_log("泡点：%s · 每 %d 秒 · 目标%s · %s · 全天生效", on ? "已启用" : "已停用", sec, tg, rw);
-    else
-        app_log("泡点：%s · 每 %d 秒 · 目标%s · %s · %s~%s 生效",
-                on ? "已启用" : "已停用", sec, tg, rw, t1, t2);
+    const char *dur = hours == 0 ? "持续" : fmt_new("%d 小时", hours);
+    app_status("泡点：%s · 每 %d 秒 · %s · %s · 时长%s",
+               on ? "已启用" : "已停用", sec, tg, rw, dur);
+    app_log("泡点：%s · 每 %d 秒 · 目标%s · %s · 时长%s",
+            on ? "已启用" : "已停用", sec, tg, rw, dur);
 }
 
-// 当前是否在泡点生效时段内（start==end 表示全天）
+// 当前是否还在生效时长内（until==0 表示持续，不自动停）
 static int bubble_in_window(void) {
-    if (g.cfg.bubble_start == g.cfg.bubble_end) return 1;
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    int now_min = st.wHour * 60 + st.wMinute;
-    int s = g.cfg.bubble_start, e = g.cfg.bubble_end;
-    if (s < e) return now_min >= s && now_min < e;
-    return now_min >= s || now_min < e;   // 跨夜：如 22:00~08:00
+    if (!g.cfg.bubble_until) return 1;
+    return (u64)time(NULL) < g.cfg.bubble_until;
 }
 
 void app_bubble_status(char *out, int cap) {
@@ -1190,15 +1184,22 @@ void app_bubble_status(char *out, int cap) {
         snprintf(out, cap, "未启用");
         return;
     }
-    char tw[32] = "";
-    if (g.cfg.bubble_start != g.cfg.bubble_end) {
-        char t1[8], t2[8];
-        snprintf(t1, sizeof(t1), "%02d:%02d", g.cfg.bubble_start / 60, g.cfg.bubble_start % 60);
-        snprintf(t2, sizeof(t2), "%02d:%02d", g.cfg.bubble_end / 60, g.cfg.bubble_end % 60);
-        snprintf(tw, sizeof(tw), " · %s~%s", t1, t2);
+    // 生效时长：持续 或 「剩余 x 小时 y 分」
+    char tw[48] = "";
+    if (!g.cfg.bubble_until) {
+        snprintf(tw, sizeof(tw), " · 持续");
+    } else {
+        u64 now = (u64)time(NULL);
+        if (g.cfg.bubble_until <= now) {
+            snprintf(tw, sizeof(tw), " · 已到时长");
+        } else {
+            u64 r = g.cfg.bubble_until - now;
+            snprintf(tw, sizeof(tw), " · 剩余 %llu 小时 %llu 分",
+                     (unsigned long long)(r / 3600), (unsigned long long)(r % 3600 / 60));
+        }
     }
     if (!bubble_in_window()) {
-        snprintf(out, cap, "已启用 · 不在生效时段%s", tw);
+        snprintf(out, cap, "已启用 · 已到生效时长，停止结算%s", tw);
         return;
     }
     if (!g.db_ok) {
@@ -1339,7 +1340,7 @@ void app_tick(void) {
 
     // 泡点：到点才发，而且必须连接空闲、队列里也没人的操作 —— 不跟人抢那条连接。
     // 没连库或没启用就把计时清零，下次连上从整段间隔重新开始。
-    // 不在生效时段（起止时间设置）时暂停计时，进入时段后重新开始。
+    // 超出生效时长（bubble_until）时停止结算，时长内重新计时。
     if (!g.db_ok || !g.cfg.bubble_on || !bubble_in_window()) {
         s_bubble_next = 0;
     } else if (!db_busy() && !g_pq_n) {
