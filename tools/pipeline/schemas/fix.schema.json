@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "fix.json — 修复者产出",
+  "type": "object",
+  "required": ["round", "build", "fixed"],
+  "properties": {
+    "round": { "type": "integer", "minimum": 1 },
+    "build": { "enum": ["pass", "fail"] },
+    "build_tail": { "type": "string" },
+    "fixed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding_id", "status"],
+        "properties": {
+          "finding_id": { "type": "string" },
+          "status": { "enum": ["fixed", "wontfix", "invalid"] },
+          "files": { "type": "array", "items": { "type": "string" } },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "unfixed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding_id", "status", "reason"],
+        "properties": {
+          "finding_id": { "type": "string" },
+          "status": { "enum": ["wontfix", "invalid"] },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "extra_changes": { "type": "array", "items": { "type": "string" } },
+    "self_check": { "type": "string" }
+  }
+}
