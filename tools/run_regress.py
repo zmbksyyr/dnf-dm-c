@@ -199,8 +199,7 @@ def main():
                     help="跑之前把 charac_info 的 AUTO_INCREMENT 拽回 9919。"
                          "现在没有脚本认死这个数了（见文件头注释），只在你想把库摆回 "
                          "brief 里写的那个起点时才用；默认不拽：动自增计数器是一次 DDL")
-    ap.add_argument("--logdir", default=os.path.join(ROOT, "..", "_pipeline",
-                                                     "round-05", "regress-logs"))
+    ap.add_argument("--logdir", default=os.path.join(HERE, "regress-logs"))
     a = ap.parse_args()
 
     if a.only:

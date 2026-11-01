@@ -22,3 +22,6 @@ shots/
 # 临时
 *.tmp
 *.bak
+
+# 回归脚本日志（run_regress.py 默认落这里）
+tools/regress-logs/
