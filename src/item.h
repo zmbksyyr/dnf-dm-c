@@ -87,6 +87,10 @@ int  blob_unpack(const void *raw, size_t n, Blob *out, Err err);
 int  blob_pack(const Blob *b, Buf *out);
 void blob_free(Blob *b);
 
-// 错误物品判定。has 用来问「这个编号在不在名字表里」，传 NULL 则只做结构检查。
+// 错误物品判定。
+//   has  问「这个编号在不在名字表里」
+//   lim  问「这个编号的堆叠上限是多少」，返回 0 表示没声明（不查）
+// 两个都可以传 NULL，传 NULL 就跳过那一项检查。
 typedef int (*ItemHasName)(u32 id, void *ctx);
-int item_bad(const Item *it, ItemHasName has, void *ctx, char *why, int cap);
+typedef u32 (*ItemStackLim)(u32 id, void *ctx);
+int item_bad(const Item *it, ItemHasName has, ItemStackLim lim, void *ctx, char *why, int cap);

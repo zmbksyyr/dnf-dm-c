@@ -61,6 +61,7 @@ typedef struct {
     StrTab avatar_hidden;
     IdTab  nstr;         // n_string id → .str 路径
     u8    *kind;         // 与 items.key 平行：物品在 PVF 里属于哪类（PK_*）
+    u32   *stk;          // 与 items.key 平行：[stack limit] 堆叠上限，0 = 这条没声明
     int   *ileaf;         // 与 items.key 平行：物品文件在 leafs 里的下标（懒建，-1=没有）
     IdTab  cre;          // creature/pet 表：宠物编号（只用来认「这个编号是宠物」）
 
@@ -98,6 +99,7 @@ enum {
     PK_CREATURE,     // creature/ 或 pet/ 表里的            → 宠物
 };
 int         pvf_item_kind(const Pvf *p, u32 id);
+u32         pvf_item_stack_limit(const Pvf *p, u32 id);   // 0 = 没声明上限（装备多如此）
 const char *pvf_kind_name(int kind);
 
 const char *pvf_item_name(const Pvf *p, u32 id);

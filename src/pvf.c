@@ -2,7 +2,7 @@
 #include "pvf.h"
 
 #define XOR_KEY 0x81A79011u
-#define CACHE_MAGIC "PVFC6\0"   // 6：缓存校验从全量 md5 换成采样指纹；旧缓存直接作废重建
+#define CACHE_MAGIC "PVFC7\0"   // 7：物品表多存一份 [stack limit]；旧缓存直接作废重建
 #define CACHE_MAGIC_LEN 6
 
 // ---------------- 解密 ----------------
@@ -91,6 +91,8 @@ typedef struct {
     int       cap;
     u8       *kind;      // 与 t->key 平行的分类标记（只有物品表要，见 want_kind）
     u8        cur_kind;  // ib_add 时写进去的值，调用方在每张表/每个目录前设定
+    u32      *stk;       // 与 t->key 平行的堆叠上限 [stack limit]，0 = 这条没声明
+    u32       cur_stk;
     int       want_kind;
 } IdBuild;
 
@@ -101,22 +103,31 @@ static void ib_init2(IdBuild *b, IdTab *t, int want_kind) {
     b->cap = 0;
     b->kind = NULL;
     b->cur_kind = 0;
+    b->stk = NULL;
+    b->cur_stk = 0;
     b->want_kind = want_kind;
 }
 
 static void ib_init(IdBuild *b, IdTab *t) { ib_init2(b, t, 0); }
 
-static void ib_add(IdBuild *b, u32 key, const char *name) {
+// stk = 堆叠上限，0 表示这条没写 [stack limit]（装备一般没有，也确实不该堆叠）
+static void ib_add(IdBuild *b, u32 key, const char *name, u32 stk) {
     if (b->t->n + 1 > b->cap) {
         int c = b->cap ? b->cap * 2 : 64;
         b->t->key = (u32 *)xrealloc(b->t->key, sizeof(u32) * (size_t)c);
         b->t->stroff = (u32 *)xrealloc(b->t->stroff, sizeof(u32) * (size_t)c);
-        if (b->want_kind) b->kind = (u8 *)xrealloc(b->kind, (size_t)c);
+        if (b->want_kind) {
+            b->kind = (u8 *)xrealloc(b->kind, (size_t)c);
+            b->stk = (u32 *)xrealloc(b->stk, sizeof(u32) * (size_t)c);
+        }
         b->cap = c;
     }
     b->t->key[b->t->n] = key;
     b->t->stroff[b->t->n] = (u32)b->t->names.n;
-    if (b->kind) b->kind[b->t->n] = b->cur_kind;
+    if (b->kind) {
+        b->kind[b->t->n] = b->cur_kind;
+        b->stk[b->t->n] = stk;
+    }
     sb_add(&b->sb, name, (int)strlen(name));
     b->t->n++;
 }
@@ -140,10 +151,12 @@ static void ib_sort(IdBuild *b) {
     u32 *nk = (u32 *)xalloc(sizeof(u32) * (size_t)n);
     u32 *ns = (u32 *)xalloc(sizeof(u32) * (size_t)n);
     u8  *nd = b->kind ? (u8 *)xalloc((size_t)n) : NULL;
+    u32 *nt = b->stk ? (u32 *)xalloc(sizeof(u32) * (size_t)n) : NULL;
     for (int i = 0; i < n; i++) {
         nk[i] = ki[i].key;
         ns[i] = b->t->stroff[ki[i].idx];
         if (nd) nd[i] = b->kind[ki[i].idx];
+        if (nt) nt[i] = b->stk[ki[i].idx];
     }
     free(ki);
     free(b->t->key);
@@ -153,6 +166,10 @@ static void ib_sort(IdBuild *b) {
     if (nd) {
         free(b->kind);
         b->kind = nd;
+    }
+    if (nt) {
+        free(b->stk);
+        b->stk = nt;
     }
 }
 
@@ -261,7 +278,7 @@ static void load_nstring(Pvf *p) {
         if (b == 2) index = bb;
         else if (b == 7) sidx = bb;
         const char *s = stab_get(&p->strings, (int)sidx);
-        if (*s) ib_add(&ib, index, s);
+        if (*s) ib_add(&ib, index, s, 0);
     }
     ib_sort(&ib);
     buf_free(&c);
@@ -468,6 +485,30 @@ static void stk_field_any(Pvf *p, const Buf *c, const char *want, Str *out) {
     str_free(&tmp);
 }
 
+// 取当前段下的一串 u32（最多 max 个），返回实际个数。
+// 数字在 stk 里是 t=2/3 的单元，不是字符串 —— 拿 stk_field 去找 [stack limit]
+// 这类段只会一无所获，它眼里只有字符串单元。
+static int stk_ints(Pvf *p, const Buf *c, const char *want, u32 *out, int max) {
+    if (c->n < 7) return 0;
+    size_t n = (c->n - 2) / 5;
+    int in_want = 0, got = 0;
+    for (size_t i = 0; i < n; i++) {
+        u8 t = c->p[2 + i * 5];
+        u32 v = rd32(c->p + 2 + i * 5 + 1);
+        if (t >= 5 && t <= 8) {
+            const char *sv = stab_get(&p->strings, (int)v);
+            if (*sv && is_seg_name(sv)) { in_want = strcmp(sv, want) == 0; continue; }
+            continue;
+        }
+        if (t == 9) {                       // 引用型字符串，跳过它的键
+            if (i + 1 < n) i++;
+            continue;
+        }
+        if ((t == 2 || t == 3) && in_want && got < max) out[got++] = v;
+    }
+    return got;
+}
+
 // 物品分类只看文件落在哪个目录：PVF 没有「类型」字段，目录就是它唯一的分类依据。
 // 分界与游戏里的物品栏号段一一对应（装备 9-56 / 消耗品 57-104 / 材料 105-152 /
 // 任务材料 153-200），因此这里判错，发出去的物品格子就不合法。
@@ -502,8 +543,15 @@ static void lst_into_idtab(Pvf *p, const char *lst_path, const char *base_dir, I
         if (!sub) continue;
         if (!pvf_read(p, sub, &c)) continue;
         stk_field(p, &c, "[name]", &name);
+        // 堆叠上限只在物品表里要：旁的表（职业 / 宠物 / n_string）没有这个段，
+        // 为它们白扫一遍纯属浪费 —— 装备 stk 动辄上千单元，这是热路径。
+        u32 stk = 0;
+        if (ib->want_kind) {
+            u32 v[1] = {0};
+            if (stk_ints(p, &c, "[stack limit]", v, 1)) stk = v[0];
+        }
         ib->cur_kind = kof ? kof(lp->path) : 0;
-        ib_add(ib, lp->id, name.n ? name.p : "");
+        ib_add(ib, lp->id, name.n ? name.p : "", stk);
     }
     ib->cur_kind = 0;
     str_free(&name);
@@ -607,15 +655,19 @@ static void build_dicts(Pvf *p, PvfProg prog) {
     if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "解析物品名称");
     idtab_free(&p->items);
     free(p->kind);
+    free(p->stk);
     p->kind = NULL;
+    p->stk = NULL;
     {
         IdBuild ib;
-        ib_init2(&ib, &p->items, 1);    // 物品表要带分类，别的表不要
+        ib_init2(&ib, &p->items, 1);    // 物品表要带分类和堆叠上限，别的表不要
         lst_into_idtab(p, "equipment/equipment.lst", "equipment", &ib, kind_of_equip);
         lst_into_idtab(p, "stackable/stackable.lst", "stackable", &ib, kind_of_stack);
         ib_sort(&ib);
         p->kind = ib.kind;
+        p->stk = ib.stk;
         ib.kind = NULL;
+        ib.stk = NULL;
     }
 
     if (prog.pct) *prog.pct = 8;
@@ -755,6 +807,8 @@ static void save_cache(Pvf *p) {
     write_idtab(&b, &p->items);
     buf_put32(&b, (u32)p->items.n);
     for (int i = 0; i < p->items.n; i++) buf_putc(&b, p->kind ? p->kind[i] : 0);
+    buf_put32(&b, (u32)p->items.n);
+    for (int i = 0; i < p->items.n; i++) buf_put32(&b, p->stk ? p->stk[i] : 0);
     write_idtab(&b, &p->cre);
     write_idtab(&b, &p->jobs);
     write_stab(&b, &p->seals);
@@ -869,6 +923,14 @@ static int load_cache(Pvf *p) {
         memcpy(p->kind, r.p + r.o, (size_t)n);
         r.o += (size_t)n;
     }
+    {
+        int n = (int)r_u32(&r);
+        if (!r.ok || n != p->items.n || r.o + sizeof(u32) * (size_t)n > r.n) { buf_free(&raw); return 0; }
+        free(p->stk);
+        p->stk = (u32 *)xalloc(sizeof(u32) * (size_t)(n + 1));
+        memcpy(p->stk, r.p + r.o, sizeof(u32) * (size_t)n);
+        r.o += sizeof(u32) * (size_t)n;
+    }
     read_idtab(&r, &p->cre);
     read_idtab(&r, &p->jobs);
     read_stab(&r, &p->seals);
@@ -943,8 +1005,10 @@ void pvf_close(Pvf *p) {
     stab_free(&p->strings);
     idtab_free(&p->items);
     free(p->kind);
+    free(p->stk);
     free(p->ileaf);
     p->kind = NULL;
+    p->stk = NULL;
     p->ileaf = NULL;
     idtab_free(&p->cre);
     idtab_free(&p->jobs);
@@ -988,6 +1052,14 @@ int pvf_item_kind(const Pvf *p, u32 id) {
     // （1 既是金币又是一种宠物），所以顺序不能反 —— 先认物品，认不出来才当宠物。
     if (p->cre.n && key_index(&p->cre, id) >= 0) return PK_CREATURE;
     return PK_NONE;
+}
+
+// 堆叠上限 [stack limit]。返回 0 表示这个编号没声明上限 —— 装备大多没有这一段，
+// 而它们的「数量」位装的是别的东西，本来就不该按堆叠来判，见 item_bad 里的处理。
+u32 pvf_item_stack_limit(const Pvf *p, u32 id) {
+    if (!p || !p->opened || !p->stk) return 0;
+    int i = key_index(&p->items, id);
+    return i >= 0 ? p->stk[i] : 0;
 }
 
 const char *pvf_kind_name(int kind) {
@@ -1290,30 +1362,6 @@ static void quest_index(Pvf *p) {
             if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
     }
     buf_free(&b);
-}
-
-// 取当前段下的一串 u32（最多 max 个），返回实际个数
-static int stk_ints(Pvf *p, const Buf *c, const char *want, u32 *out, int max) {
-    if (c->n < 7) return 0;
-    size_t n = (c->n - 2) / 5;
-    int in_want = 0, got = 0;
-    Str tmp = {0};
-    for (size_t i = 0; i < n; i++) {
-        u8 t = c->p[2 + i * 5];
-        u32 v = rd32(c->p + 2 + i * 5 + 1);
-        if (t >= 5 && t <= 8) {
-            const char *sv = stab_get(&p->strings, (int)v);
-            if (*sv && is_seg_name(sv)) { in_want = strcmp(sv, want) == 0; continue; }
-            continue;
-        }
-        if (t == 9) {                       // 引用型字符串，跳过它的键
-            if (i + 1 < n) i++;
-            continue;
-        }
-        if ((t == 2 || t == 3) && in_want && got < max) out[got++] = v;
-    }
-    str_free(&tmp);
-    return got;
 }
 
 // 解析一个任务文件。路径由调用方给：按 id 查是一遍线性扫，全量扫描时直接

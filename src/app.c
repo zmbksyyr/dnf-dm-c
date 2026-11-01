@@ -42,7 +42,11 @@ static void cfg_load(Config *c, const char *path) {
     if (!c->user[0]) snprintf(c->user, sizeof(c->user), "game");
     ini_str(L"db", L"pwd", c->pwd, sizeof(c->pwd), w);
     if (!c->pwd[0]) snprintf(c->pwd, sizeof(c->pwd), "uu5!^%%jg");
-    c->charset = ini_int(L"db", L"charset", 33, w);
+    // 45 = utf8mb4。以前默认 33（utf8，也就是 utf8mb3），那种连接存不下 4 字节字符：
+    // 名字或邮件正文里带个 emoji / 扩展汉字，写进去就永久丢了，而且不打招呼。
+    // utf8mb4 是它的超集，读写 utf8(mb3) 的表完全没问题，所以默认值换成 45。
+    // 已经在用的 settings.ini 里仍是 33 的，在设置里存一次就会跟着更新。
+    c->charset = ini_int(L"db", L"charset", 45, w);
 
     ini_str(L"pvf", L"path", c->pvf, sizeof(c->pvf), w);
     ini_str(L"pvf", L"img", c->img_dir, sizeof(c->img_dir), w);
@@ -433,6 +437,14 @@ const char *app_item_type_text(u32 id) {
         case PK_STACK:    return "消耗品";
         default:          return "消耗品(未知编号)";
     }
+}
+
+// 堆叠上限。物品有 [stack limit]，一股脑往一个槽里塞 9999 就是「物品数量错误」——
+// 服务端 InventoryVerify 照样判整个背包非法，症状和放错分区一模一样（登不进去，
+// 且一次只报一件）。返回 0 表示这个编号没声明上限，调用方按「不拆」处理。
+u32 app_item_stack_limit(u32 id) {
+    if (!g.pvf_ok || !id) return 0;
+    return pvf_item_stack_limit(&g.pvf, id);
 }
 
 // 邮件附件该走哪张表。以 PVF 的种类为准；没 PVF 时退到库里的宠物清单
@@ -1012,6 +1024,9 @@ int app_grant_add_new(u32 id, u32 num) {
 #define GRANT_SNAP_MAX 256
 static NamedId s_grant_snap[GRANT_SNAP_MAX];
 static int     s_grant_snap_n;
+// 走邮件时一种物品最多拆成几封。一封一个附件，拆得太狠（比如发 9999 个上限为 1
+// 的东西）会灌爆别人的邮箱，宁可拦下来让人改数量。
+#define GRANT_MAIL_MAX 100
 typedef struct {
     int by_mail;
 } GrantCtx;
@@ -1067,25 +1082,40 @@ static int w_grant(void *ctx, Err err) {
     if (c->by_mail) {
         for (int i = 0; i < s_grant_snap_n; i++) {
             NamedId *n = &s_grant_snap[i];
-            GrantItem gi;
-            memset(&gi, 0, sizeof(gi));
-            gi.id = n->id;
-            gi.num = n->num;
-            gi.type = n->type;
-            gi.enhance = n->enhance;
-            gi.forge = n->forge;
-            gi.seal = n->seal;
-            gi.seal_cnt = n->seal_cnt;
-            gi.inc_type = n->inc_type;
-            gi.inc_val = n->inc_val;
-            gi.dur = n->dur;
-            // 附件种类得照着 PVF 判，不能一律当普通物品：时装和宠物要先在
-            // user_items / creature_items 建一行，拿 ui_id 当 add_info；直接把数量
-            // 写进 add_info 又置 flag=0，客户端取附件时拿到的就是错的东西。
-            int k = app_attach_kind(n->id);
-            if (!db_send_item_mail_ex(&g.db, &g.cur, "GM", "系统发放", &gi,
-                                      k == ACK_AVATAR ? 1 : 0,
-                      k == ACK_CREATURE ? 1 : 0, err)) return 0;
+            u8 ty = n->type ? n->type : IT_STACK;
+            int stackable = (ty != IT_EQUIP && ty != IT_CREATURE_EQUIP);
+            u32 lim = stackable ? app_item_stack_limit(n->id) : 0;
+            u32 total = stackable ? (n->num ? n->num : 1) : n->num;
+            // 一个附件装不下就按上限拆成几封，跟游戏里叠满换一格是一回事。
+            // 不拆的话附件里躺着个超上限的数量，客户端取出来就报错。
+            int pieces = (lim && total > lim) ? (int)((total + lim - 1) / lim) : 1;
+            if (pieces > GRANT_MAIL_MAX) {
+                snprintf(err, ERRBUF,
+                         "%s 一件最多叠 %u 个，%u 个要拆成 %d 封邮件（上限 %d 封），请减少数量",
+                         n->name[0] ? n->name : "该物品", lim, total, pieces, GRANT_MAIL_MAX);
+                return 0;
+            }
+            for (int p = 0; p < pieces; p++) {
+                GrantItem gi;
+                memset(&gi, 0, sizeof(gi));
+                gi.id = n->id;
+                gi.num = lim ? (total - (u32)p * lim < lim ? total - (u32)p * lim : lim) : total;
+                gi.type = n->type;
+                gi.enhance = n->enhance;
+                gi.forge = n->forge;
+                gi.seal = n->seal;
+                gi.seal_cnt = n->seal_cnt;
+                gi.inc_type = n->inc_type;
+                gi.inc_val = n->inc_val;
+                gi.dur = n->dur;
+                // 附件种类得照着 PVF 判，不能一律当普通物品：时装和宠物要先在
+                // user_items / creature_items 建一行，拿 ui_id 当 add_info；直接把数量
+                // 写进 add_info 又置 flag=0，客户端取附件时拿到的就是错的东西。
+                int k = app_attach_kind(n->id);
+                if (!db_send_item_mail_ex(&g.db, &g.cur, "GM", "系统发放", &gi,
+                                          k == ACK_AVATAR ? 1 : 0,
+                                          k == ACK_CREATURE ? 1 : 0, err)) return 0;
+            }
         }
         return 1;
     }
@@ -1105,26 +1135,74 @@ static int w_grant(void *ctx, Err err) {
         const char *zone = "背包";
         inv_zone(ty, &lo, &hi, &zone);
         if (hi > b->n) hi = b->n;      // 背包比标尺短时别越界
-        int slot = -1;
-        for (int k = lo; k < hi; k++)
-            if (item_empty(&local[k])) { slot = k; break; }
-        if (slot < 0) {
-            snprintf(err, ERRBUF, "%s已满", zone);
-            goto done;
+
+        if (ty == IT_EQUIP || ty == IT_CREATURE_EQUIP) {
+            // 装备不拆：它们的「数量」位装的不是数量（见 item.h 的 item_num 注释），
+            // 一件占一格，照用户填的原样写。
+            int slot = -1;
+            for (int k = lo; k < hi; k++)
+                if (item_empty(&local[k])) { slot = k; break; }
+            if (slot < 0) { snprintf(err, ERRBUF, "%s已满", zone); goto done; }
+            Item it;
+            memset(&it, 0, sizeof(it));
+            item_set_type(&it, ty);
+            item_set_id(&it, n->id);
+            item_set_num(&it, n->num);
+            item_set_enhance(&it, n->enhance);
+            item_set_forge(&it, n->forge);
+            item_set_seal(&it, n->seal);
+            item_set_seal_cnt(&it, n->seal_cnt);
+            item_set_inc_type(&it, n->inc_type);
+            item_set_inc_value(&it, n->inc_val);
+            item_set_durability(&it, n->dur);
+            local[slot] = it;
+            continue;
         }
-        Item it;
-        memset(&it, 0, sizeof(it));
-        item_set_type(&it, ty);
-        item_set_id(&it, n->id);
-        item_set_num(&it, n->num);
-        item_set_enhance(&it, n->enhance);
-        item_set_forge(&it, n->forge);
-        item_set_seal(&it, n->seal);
-        item_set_seal_cnt(&it, n->seal_cnt);
-        item_set_inc_type(&it, n->inc_type);
-        item_set_inc_value(&it, n->inc_val);
-        item_set_durability(&it, n->dur);
-        local[slot] = it;
+
+        // 堆叠类按 [stack limit] 拆，一个槽装不下就占下一个 —— 跟游戏里叠满换一格
+        // 是一回事。不拆的话槽里躺着个超上限的数量，服务端判「物品数量错误」，
+        // 症状与放错分区完全相同：登不进去，而且一次只报一件。
+        u32 lim = app_item_stack_limit(n->id);
+        u32 left = n->num ? n->num : 1;
+        while (left) {
+            int slot = -1;
+            if (lim) {                 // 先找同编号且没叠满的槽，能续就续
+                for (int k = lo; k < hi; k++) {
+                    if (item_empty(&local[k]) || item_id(&local[k]) != n->id) continue;
+                    if (item_num(&local[k]) < lim) { slot = k; break; }
+                }
+            }
+            if (slot < 0)
+                for (int k = lo; k < hi; k++)
+                    if (item_empty(&local[k])) { slot = k; break; }
+            if (slot < 0) {
+                snprintf(err, ERRBUF, "%s已满：%s 还有 %u 个没地方放",
+                         zone, n->name[0] ? n->name : "该物品", left);
+                goto done;
+            }
+            u32 have = item_empty(&local[slot]) ? 0 : item_num(&local[slot]);
+            u32 put = left;
+            if (lim && lim > have && put > lim - have) put = lim - have;
+            if (!put) break;           // 兜底，绝不让这里转出死循环
+            if (have) {
+                item_set_num(&local[slot], have + put);
+            } else {
+                Item it;
+                memset(&it, 0, sizeof(it));
+                item_set_type(&it, ty);
+                item_set_id(&it, n->id);
+                item_set_num(&it, put);
+                item_set_enhance(&it, n->enhance);
+                item_set_forge(&it, n->forge);
+                item_set_seal(&it, n->seal);
+                item_set_seal_cnt(&it, n->seal_cnt);
+                item_set_inc_type(&it, n->inc_type);
+                item_set_inc_value(&it, n->inc_val);
+                item_set_durability(&it, n->dur);
+                local[slot] = it;
+            }
+            left -= put;
+        }
     }
     {
         Blob tmp = *b;

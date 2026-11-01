@@ -141,7 +141,7 @@ int  db_set_qp(Db *d, const Charac *c, int qp, Err err);
 int  db_set_pvp(Db *d, const Charac *c, int grade, int win, int point, Err err);
 int  db_no_weight(Db *d, const Charac *c, Err err);
 int  db_open_equip_slot(Db *d, const Charac *c, Err err);
-int  db_unlock_lev_equip(Db *d, const Charac *c, Err err);
+int  db_unlock_lev_equip(Db *d, const Charac *c, int lev_max, Err err);  // lev_max = 本端等级封顶
 int  db_max_expert(Db *d, const Charac *c, Err err);
 int  db_set_fatigue(Db *d, const Charac *c, Err err);      // 补满疲劳
 int  db_unlock_dungeon(Db *d, const Charac *c, Err err);   // 全图全难度
@@ -213,6 +213,7 @@ int  db_set_vip(Db *d, u32 mid, const char *vip, Err err);                 // �
 // 整库备份 / 还原（.sql 文本）
 void db_dump_path(char *out, int cap);
 void db_undo_flush(int force);      // 把本会话的写前快照落盘（force=0 时限流 15s）
+const char *db_cs_name(int charset);// 连接字符集编号 → SET NAMES 用的名字（备份头要用它，不能写死）
 int  db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err);
 int  db_restore_sql(Db *d, const char *path, int *stmts, Err err);
 
@@ -228,7 +229,7 @@ typedef struct {
     int  kind;          // 0 容器槽位 / 1 user_items 时装 / 2 creature_items 宠物 / 3 邮件附件
     u64  key;           // kind 1/2: ui_id；kind 3: postal_id
 } ScanRow;
-int  db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, void *hctx, Err err);
+int  db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, ItemStackLim lim, void *hctx, Err err);
 int  db_purge_bad(Db *d, Vec *rows, int *done, Err err);   // 清掉清单里的错误物品，返回成功条数
 
 // 宠物/时装表内错误记录（it_id 查不到、角色已删）

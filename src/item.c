@@ -74,7 +74,7 @@ int blob_pack(const Blob *b, Buf *out) {
 }
 
 // 空槽不算错；类型/编号/数量非法，或名字表里查不到（客户端读不出来）算错
-int item_bad(const Item *it, ItemHasName has, void *ctx, char *why, int cap) {
+int item_bad(const Item *it, ItemHasName has, ItemStackLim lim, void *ctx, char *why, int cap) {
     u8 t = item_type(it);
     u32 id = item_id(it);
     if (t == IT_EMPTY && id == 0) return 0;
@@ -97,6 +97,15 @@ int item_bad(const Item *it, ItemHasName has, void *ctx, char *why, int cap) {
     if (has && !has(id, ctx)) {
         snprintf(why, (size_t)cap, "PVF 无此编号");
         return 1;
+    }
+    // 数量超上限。装备（1）和宠物装备（6）那 4 个字节装的不是数量 —— 装备的
+    // amount 位另有含义，拿堆叠上限去卡它们是误报。
+    if (lim && t != IT_EQUIP && t != IT_CREATURE_EQUIP) {
+        u32 lim_n = lim(id, ctx);
+        if (lim_n && item_num(it) > lim_n) {
+            snprintf(why, (size_t)cap, "数量 %u 超上限 %u", item_num(it), lim_n);
+            return 1;
+        }
     }
     return 0;
 }

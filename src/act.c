@@ -86,7 +86,7 @@ static int char_do(void *ctx, Err err) {
         case K_QP: return db_set_qp(&g.db, &who, c->i1, err);
         case K_NOWEIGHT: return db_no_weight(&g.db, &who, err);
         case K_SLOT: return db_open_equip_slot(&g.db, &who, err);
-        case K_UNLOCK: return db_unlock_lev_equip(&g.db, &who, err);
+        case K_UNLOCK: return db_unlock_lev_equip(&g.db, &who, g.cfg.lev_max, err);
         case K_EXPERT: return db_max_expert(&g.db, &who, err);
         case K_FATIGUE: return db_set_fatigue(&g.db, &who, err);
         case K_DUNGEON: return db_unlock_dungeon(&g.db, &who, err);

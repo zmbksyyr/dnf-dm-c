@@ -325,9 +325,15 @@ static int scan_has_name(u32 id, void *ctx) {
     return g.pvf_ok && *pvf_item_name(&g.pvf, id);
 }
 
+// 堆叠上限。没 PVF 时返回 0，那一整项检查自动跳过
+static u32 scan_stack_lim(u32 id, void *ctx) {
+    (void)ctx;
+    return app_item_stack_limit(id);
+}
+
 static int scan_work(void *ctx, Err err) {
     (void)ctx;
-    return db_scan_bad(&g.db, &s_scan, &s_scan_chars, scan_has_name, NULL, err);
+    return db_scan_bad(&g.db, &s_scan, &s_scan_chars, scan_has_name, scan_stack_lim, NULL, err);
 }
 
 static int purge_work(void *ctx, Err err) {

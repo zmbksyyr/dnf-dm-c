@@ -250,6 +250,11 @@ static int has_name(u32 id, void *ctx) {
     return g.pvf_ok && *pvf_item_name(&g.pvf, id);
 }
 
+static u32 has_limit(u32 id, void *ctx) {
+    (void)ctx;
+    return app_item_stack_limit(id);
+}
+
 static LRESULT bad_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
     (void)d;
     (void)lp;
@@ -280,7 +285,7 @@ static void item_bad_clear(void) {
         for (int i = 0; i < b->n; i++) {
             char why[48];
             const Item *it = &b->items[i];
-            if (!it || !item_bad(it, has_name, NULL, why, sizeof(why))) continue;
+            if (!it || !item_bad(it, has_name, has_limit, NULL, why, sizeof(why))) continue;
             BadRow *r = VEC_ADD(&rows, BadRow);
             r->sub = sub;
             r->slot = i;
@@ -1362,9 +1367,10 @@ static void grant_build(Page *p, HWND parent) {
     SendMessageW(g_type, EM_SETREADONLY, TRUE, 0);
     grant_type_sync();                 // 建好就填默认值，不等用户敲编号
     g_num = ui_edit(parent, "1", G_NUM, 0);
-    // 耐久默认 999 而不是 0：新建一件装备直接照默认发出去的话，耐久 0 会让客户端
-    // 显示异常、服务端也可能拒收。参考实现新建槽也是 999。要真的是 0 的人会自己改。
-    g_dur = ui_edit(parent, "999", G_DUR, 0);   // 耐久在第一行末尾，跟着建
+    // 耐久默认 5：DNF 的耐久是「当前耐久 / 最大耐久」里的前者，正常装备满耐久也就是
+    // 个两位数。填 999 会顶穿最大值，客户端显示成异常数字；填 0 则等于发出一件
+    // 已损坏的装备。要真的是 0 的人会自己改。
+    g_dur = ui_edit(parent, "5", G_DUR, 0);    // 耐久在第一行末尾，跟着建
     g_enh = ui_edit(parent, "0", G_ENH, 0);
     g_inc = ui_combo(parent, G_INC, 1);
     ui_combo_fill(g_inc, kIncList, COUNT_OF(kIncList), 0);

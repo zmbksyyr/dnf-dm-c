@@ -375,8 +375,10 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
     Str out = {0};
     char ts[32];
     now_str(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S");
-    str_catf(&out, "-- DNF GM 数据库备份 · %s\n-- %s\nSET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS=0;\n\n",
-             ts, d->host);
+    // 头里的 SET NAMES 必须跟连接实际用的字符集一致：还原时这条会被真的执行一遍，
+    // 写成别的等于把连接切走，后面的转义全对不上号。
+    str_catf(&out, "-- DNF GM 数据库备份 · %s\n-- %s\nSET NAMES %s;\nSET FOREIGN_KEY_CHECKS=0;\n\n",
+             ts, d->host, db_cs_name(d->charset));
     if (!file_write(path, out.p, (size_t)out.n)) {
         snprintf(err, ERRBUF, "无法写入 %s", path);
         str_free(&out);
@@ -530,10 +532,42 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
 }
 
 // 逐条执行 SQL 文本（识别引号/注释，按 ';' 切）
+//
+// 全程包在一个事务里，这是必需的而不是锦上添花：备份是「先 DELETE 再 INSERT」，
+// 第 N 条失败时前 N-1 条已经把原数据删干净了。不包事务的话，失败之后角色的行还在、
+// 装备技能任务全没了，而且没法回退 —— 那不叫还原失败，那叫数据丢失。
+//
+// 一个诚实的限制：MySQL 里 CREATE / DROP / ALTER 会隐式提交事务，所以整库备份
+// （带建表语句）做不到端到端原子，只能保证两个 DDL 之间的 DML 段是原子的。角色
+// 备份是纯 DML，能完整回滚 —— 而它恰恰是最需要回滚的那一种。
 int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
     Buf f = {0};
     if (!file_read(path, &f)) { snprintf(err, ERRBUF, "读不到 %s", path); return 0; }
-    set_names(d, "utf8");
+    set_names(d, db_cs_name(d->charset));
+
+    // 关自动提交，把后面所有语句收进同一个事务。
+    // 这一步失败就不继续：下面每一步都假定自己在事务里，事实不是那样的话，
+    // 出错时的表现会比不包事务更让人困惑。
+    Str t = {0};
+    str_cat(&t, "SET autocommit=0");
+    if (!run(d, &t)) {
+        snprintf(err, ERRBUF, "无法关闭自动提交：%s", d->err);
+        str_free(&t);
+        buf_free(&f);
+        return 0;
+    }
+    str_clear(&t);
+    str_cat(&t, "START TRANSACTION");
+    if (!run(d, &t)) {
+        snprintf(err, ERRBUF, "无法开启事务：%s", d->err);
+        str_clear(&t);
+        str_cat(&t, "SET autocommit=1");
+        run(d, &t);
+        str_free(&t);
+        buf_free(&f);
+        return 0;
+    }
+    str_free(&t);
 
     Str cur = {0};
     int quote = 0, n = 0;
@@ -581,12 +615,38 @@ int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
     }
     str_free(&cur);
     buf_free(&f);
+    {
+        Str s = {0};
+        str_cat(&s, "COMMIT");
+        int ok = run(d, &s);
+        if (!ok) snprintf(err, ERRBUF, "提交失败：%s（前 %d 条已回滚或处于未知状态）", d->err, n);
+        str_clear(&s);
+        str_cat(&s, "SET autocommit=1");
+        run(d, &s);
+        str_free(&s);
+        // 文件里可能自带 SET NAMES（备份头就有一条），执行时已经把连接切走了，
+        // 收尾时切回本连接该用的，免得后续转义对不上号。
+        set_names(d, db_cs_name(d->charset));
+        if (!ok) return 0;
+    }
     if (stmts) *stmts = n;
     return 1;
 
 fail:
     str_free(&cur);
     buf_free(&f);
+    {
+        // 已经执行的语句全部作废。err 里是原始错误，回滚本身失败也得喊一声，
+        // 否则用户会以为没写进去。
+        Str s = {0};
+        str_cat(&s, "ROLLBACK");
+        if (!run(d, &s)) snprintf(err, ERRBUF, "%s（且回滚失败：%s）", err, d->err);
+        str_clear(&s);
+        str_cat(&s, "SET autocommit=1");
+        run(d, &s);
+        str_free(&s);
+        set_names(d, db_cs_name(d->charset));
+    }
     return 0;
 }
 
@@ -1482,7 +1542,7 @@ static u32 scan_col_key(const Charac *c, const char *keycol) {
 
 // 一个容器里的全部异常槽位
 static void scan_blob(Db *d, const Charac *c, const ScanCol *sc, Vec *out,
-                      ItemHasName has, void *hctx) {
+                      ItemHasName has, ItemStackLim lim, void *hctx) {
     Str s = {0};
     MyResult r = {0};
     str_catf(&s, "SELECT `%s` FROM %s WHERE %s=%u", sc->col, sc->table, sc->keycol,
@@ -1500,7 +1560,7 @@ static void scan_blob(Db *d, const Charac *c, const ScanCol *sc, Vec *out,
     if (!ok) return;
     for (int i = 0; i < b.n; i++) {
         char why[48];
-        if (!item_bad(&b.items[i], has, hctx, why, sizeof(why))) continue;
+        if (!item_bad(&b.items[i], has, lim, hctx, why, sizeof(why))) continue;
         ScanRow *o = VEC_ADD(out, ScanRow);
         o->cno = c->no;
         o->mid = c->mid;
@@ -1513,7 +1573,7 @@ static void scan_blob(Db *d, const Charac *c, const ScanCol *sc, Vec *out,
     blob_free(&b);
 }
 
-int db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, void *hctx, Err err) {
+int db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, ItemStackLim lim, void *hctx, Err err) {
     vec_clear(out);
     if (nchar) *nchar = 0;
 
@@ -1546,7 +1606,7 @@ int db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, void *hctx, Err er
                 if (dup) continue;
                 *(u32 *)vec_add(&mids) = c.mid;
             }
-            scan_blob(d, &c, sc, out, has, hctx);
+            scan_blob(d, &c, sc, out, has, lim, hctx);
         }
 
         // 邮件附件：没有 PVF 就没法凭编号判断，跳过

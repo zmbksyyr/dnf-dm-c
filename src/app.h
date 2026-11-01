@@ -181,6 +181,7 @@ const char *app_item_name(u32 id, char *buf, int cap);
 // 轻则显示成别的东西，重则整格读不出来。
 u8          app_item_type(u32 id);       // IT_* 字节；没 PVF / 查不到时兜消耗品，不会返回 0
 const char *app_item_type_text(u32 id);  // 「装备」「消耗品」…；兜底时带括号说明来源
+u32         app_item_stack_limit(u32 id);// [stack limit]；0 = 该编号没声明上限
 
 // 邮件附件种类：普通 / 时装 / 宠物。
 // 三者 ID 空间互相独立，落到不同的表：普通把数量写进 postal.add_info，

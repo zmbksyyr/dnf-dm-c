@@ -112,6 +112,20 @@ int set_names(Db *d, const char *cs) {
     return ok;
 }
 
+// 连接字符集编号 → SET NAMES 用的名字。33 = utf8（也就是 utf8mb3）、45 = utf8mb4、
+// 8 = latin1；认不出的按 utf8 处理。
+//
+// 备份头必须由它生成，不能图省事写死 utf8mb4：还原时文件里的 SET NAMES 会被逐条
+// 执行，声明成一个跟连接不符的字符集，等于把连接偷偷切走 —— 之后所有转义都对不上
+// 号，写进去的东西静默变乱码。
+const char *db_cs_name(int charset) {
+    switch (charset) {
+    case 8:  return "latin1";
+    case 45: return "utf8mb4";
+    default: return "utf8";
+    }
+}
+
 void cp_str(char *dst, int cap, const char *src) {
     if (!src) { dst[0] = 0; return; }
     snprintf(dst, (size_t)cap, "%s", src);
@@ -127,8 +141,13 @@ void cp_text(char *dst, int cap, const MyResult *r, int row, int col) {
     snprintf(dst, (size_t)cap, "%s", s);
 }
 
+// 连接字符集。db_open 时记下，写备份头时要用 —— 头里声明的必须跟连接实际用的
+// 一致，否则还原时文件里的 SET NAMES 会把连接切到另一个字符集上去。
+static int s_cs = 45;
+
 int db_open(Db *d, const char *host, int port, const char *user, const char *pwd, int charset, Err err) {
     memset(d, 0, sizeof(*d));
+    s_cs = charset;
     reset_tables();                 // 换库/重连后表结构可能不同，从头探
     cp_str(d->host, sizeof(d->host), host);
     cp_str(d->user, sizeof(d->user), user);
@@ -838,8 +857,8 @@ void db_undo_flush(int force) {
     str_catf(&o,
              "-- DNF GM 写库前快照 · %s\n"
              "-- 本会话第一次写入前的原值，共 %d 处。可直接用「还原备份」整体回滚。\n"
-             "SET NAMES utf8mb4;\n\n",
-             hdr, s_undo.n);
+             "SET NAMES %s;\n\n",
+             hdr, s_undo.n, db_cs_name(s_cs));
     for (int i = 0; i < s_undo.n; i++) {
         UndoEnt *e = VEC_AT(&s_undo, UndoEnt, i);
         int by_mid = str_ieq(e->table, "taiwan_cain.account_cargo");
@@ -1143,14 +1162,21 @@ int db_open_equip_slot(Db *d, const Charac *c, Err err) {
 }
 
 // 先删后插，中途断掉会连原来的上限也一起没了，所以包事务
-int db_unlock_lev_equip(Db *d, const Charac *c, Err err) {
+//
+// lev_max 传等级的封顶值（settings.ini [gm] lev_max，默认 85），不是 999：
+// max_equip_level 是「能穿多少级的装备」，服务端拿它跟角色等级比。写成 999
+// 等于告诉服务端这号人物允许穿 999 级装备，在 85 封顶的端上就是个越界值 ——
+// 要么判非法，要么让等级校验彻底失效。解除限制到「端允许的最高」就够了。
+int db_unlock_lev_equip(Db *d, const Charac *c, int lev_max, Err err) {
+    int lv = lev_max;
+    if (lv < 1 || lv > 255) lv = 85;          // 调用方没传就退回默认，别把 0 写进去
     if (!db_tx_begin(d, err)) return 0;
     Str s = {0};
     str_catf(&s, "DELETE FROM taiwan_cain.charac_manage_info WHERE charac_no=%u", c->no);
     run(d, &s);
     str_clear(&s);
     str_catf(&s, "INSERT INTO taiwan_cain.charac_manage_info (charac_no,max_equip_level) "
-                 "VALUES (%u,999)", c->no);
+                 "VALUES (%u,%d)", c->no, lv);
     int ok = run(d, &s);
     str_free(&s);
     if (!ok) {
