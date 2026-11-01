@@ -812,6 +812,7 @@ typedef struct {
     char table[48];
     char field[24];
     u32  key;
+    int  has_value;      // 0 = 原值太大没记下来，只能留一行说明，绝不能当数据回写
     Str  raw;
 } UndoEnt;
 
@@ -833,9 +834,13 @@ static void undo_note(const char *table, const char *field, u32 key, const void 
     snprintf(e->field, sizeof(e->field), "%s", field);
     e->key = key;
     if (n > UNDO_MAX_RAW) {
-        // 超大 blob（背包 hex 可达数十 KB）：只记提示，不占内存
+        // 超大 blob（背包 hex 可达数十 KB）：只记提示，不占内存。
+        // 关键是 has_value=0 —— 否则这段提示文本会被当成原值写成 0x2D2D20…，
+        // 还原时把整个容器刷成「注释的十六进制」，比不做快照糟糕得多。
+        e->has_value = 0;
         str_set(&e->raw, "-- 原值过大，未记录（>256KB），无法自动还原此条");
     } else {
+        e->has_value = 1;
         str_setn(&e->raw, (const char *)raw, (int)n);
     }
     s_undo_dirty = 1;
@@ -863,6 +868,13 @@ void db_undo_flush(int force) {
         UndoEnt *e = VEC_AT(&s_undo, UndoEnt, i);
         int by_mid = str_ieq(e->table, "taiwan_cain.account_cargo");
         const char *key_col = by_mid ? "m_id" : "charac_no";
+        if (!e->has_value) {
+            // 没有原值就不要生成 UPDATE：宁可让人看到「这条回不去」，
+            // 也不能拿提示文本当数据写进 blob。
+            str_catf(&o, "-- %s.%s  %s=%u  %s\n\n", e->table, e->field, key_col, e->key,
+                     e->raw.p ? e->raw.p : "原值未记录");
+            continue;
+        }
         str_catf(&o, "-- %s.%s  %s=%u\nUPDATE %s SET %s=0x", e->table, e->field, key_col, e->key,
                  e->table, e->field);
         hex_str(e->raw.p, (size_t)e->raw.n, &o);

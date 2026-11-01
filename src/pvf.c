@@ -581,7 +581,10 @@ static int parse_tree(Pvf *p, Err err, PvfProg prog) {
 
     const u8 *b = p->base;
     u32 uuid_len = rd32(b);
-    if (uuid_len == 0 || uuid_len > 256 || uuid_len + 20 > p->size) {
+    // 上界必须按 uuid 字段本身的大小来卡。以前写的是 256，而 uuid 只有 64 字节：
+    // 一个 uuid_len=200 的坏文件就会把 version / tree_len / file / base 一起踩掉。
+    // 正常 PVF 的 uuid 是 32 字节左右，卡到 sizeof-1 不影响真实文件。
+    if (uuid_len == 0 || uuid_len > sizeof(p->uuid) - 1 || uuid_len + 20 > p->size) {
         snprintf(err, ERRBUF, "PVF 头非法");
         return 0;
     }

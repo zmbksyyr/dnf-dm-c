@@ -314,13 +314,23 @@ int file_write(const char *path, const void *d, size_t n) {
     return ok;
 }
 
-int file_append(const char *path, const char *text, int n) {
+// 长度用 size_t：备份是边查边 append 的，int 形参在 2GB 以上会静默截断长度，
+// 写进去的只是前半截 —— 这不是理论问题，是「备份文件看着完整、还原少数据」的那类。
+int file_append(const char *path, const char *text, size_t n) {
     HANDLE h = open_w(path, FILE_APPEND_DATA, FILE_SHARE_READ, OPEN_ALWAYS);
     if (h == INVALID_HANDLE_VALUE) return 0;
-    DWORD put = 0;
-    WriteFile(h, text, (DWORD)n, &put, NULL);
+    const char *p = text;
+    size_t done = 0;
+    int ok = 1;
+    while (done < n) {
+        DWORD put = 0;
+        DWORD want = (DWORD)(n - done);
+        if (want > (1u << 24)) want = 1u << 24;
+        if (!WriteFile(h, p + done, want, &put, NULL) || !put) { ok = 0; break; }
+        done += put;
+    }
     CloseHandle(h);
-    return (int)put == n;
+    return ok && done == n;
 }
 
 int file_exists(const char *path) {
@@ -446,9 +456,14 @@ void art_prune(const char *dir, const char *prefix, int keep) {
                 ent[i] = ent[j];
                 ent[j] = t;
             }
+    // 拼删除路径要用「目录」，不是上面那个带 * 的匹配式 wp。
+    // 以前直接拿 wp 去拼，得到「dir\prefix*\文件名」，每次 DeleteFileW 都因路径非法
+    // 失败 —— 静默的，返回值没人看，于是「只留最近 N 份」从来没生效过。
+    WCHAR wdir[MAX_PATH * 2];
+    utf16(dir, wdir, COUNT_OF(wdir));
     for (int i = keep; i < n; i++) {
         WCHAR full[MAX_PATH * 2];
-        swprintf(full, COUNT_OF(full), L"%s\\%s", wp, ent[i].name);
+        swprintf(full, COUNT_OF(full), L"%s\\%s", wdir, ent[i].name);
         DeleteFileW(full);
     }
     free(ent);

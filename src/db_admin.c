@@ -370,7 +370,7 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
     Vec tabs;
     vec_init(&tabs, sizeof(Str));
     if (!db_list_tables(d, &tabs, err)) { vec_free(&tabs); return 0; }
-    set_names(d, "utf8");
+    set_names(d, db_cs_name(d->charset));
 
     Str out = {0};
     char ts[32];
@@ -438,9 +438,7 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
         }
         my_free(&r);
         str_clear(&q);
-        if (!names.n) {
-            for (int i = 0; i < names.n; i++) str_free(VEC_AT(&names, Str, i));
-            for (int i = 0; i < types.n; i++) str_free(VEC_AT(&types, Str, i));
+        if (!names.n) {                 // 查不到列定义：这张表跳过（没有任何 Str 要逐个释放）
             vec_free(&names); vec_free(&types); str_free(&q);
             continue;
         }
@@ -739,15 +737,19 @@ void db_backup_char_path(char *out, int cap, const Charac *c) {
 }
 
 int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *rows, Err err) {
-    set_names(d, "utf8");
+    // 连接字符集和文件头的 SET NAMES 必须是同一个来源。
+    // 以前这里一边 set_names("utf8")、一边把文件头写死成 utf8mb4，两者对不上；
+    // 默认配置（45）下内容其实是按 mb3 读出来的，头里却声明 mb4。
+    const char *cs = db_cs_name(d->charset);
+    set_names(d, cs);
     Str out = {0};
     char ts[32];
     now_str(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S");
     str_catf(&out,
              "-- DNF GM 角色备份 · %s\n-- charac_no=%u  %s  (m_id=%u)\n"
              "-- 还原会先删掉该角色在这些表里的现有行，再按备份写回\n"
-             "SET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS=0;\n\n",
-             ts, c->no, c->name, c->mid);
+             "SET NAMES %s;\nSET FOREIGN_KEY_CHECKS=0;\n\n",
+             ts, c->no, c->name, c->mid, cs);
     if (!file_write(path, out.p, (size_t)out.n)) {
         snprintf(err, ERRBUF, "无法写入 %s", path);
         str_free(&out);

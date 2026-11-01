@@ -40,6 +40,10 @@ static void cfg_load(Config *c, const char *path) {
     c->port = ini_int(L"db", L"port", 3306, w);
     ini_str(L"db", L"user", c->user, sizeof(c->user), w);
     if (!c->user[0]) snprintf(c->user, sizeof(c->user), "game");
+    // 口令明文读、明文存（settings.ini 里就是原文），这是**定好的取舍**，不是漏做：
+    // 本机连库用，掩码之后看不见、改不动、连不上时也核对不了；本地加密也挡不住
+    // 能碰到这台机器的人。界面上对应一个可编辑下拉（main.c 的 kPwdList 有预置项），
+    // tools/v_pwd.py 把「必须是明文、必须可手填」钉成用例。
     ini_str(L"db", L"pwd", c->pwd, sizeof(c->pwd), w);
     if (!c->pwd[0]) snprintf(c->pwd, sizeof(c->pwd), "uu5!^%%jg");
     // 45 = utf8mb4。以前默认 33（utf8，也就是 utf8mb3），那种连接存不下 4 字节字符：
@@ -95,7 +99,7 @@ static void cfg_save(const Config *c, const char *path) {
     ini_set(L"db", L"host", c->host, w);
     ini_set(L"db", L"port", fmt_new("%d", c->port), w);
     ini_set(L"db", L"user", c->user, w);
-    ini_set(L"db", L"pwd", c->pwd, w);
+    ini_set(L"db", L"pwd", c->pwd, w);      // 明文落盘，见 cfg_load 里那段说明
     ini_set(L"db", L"charset", fmt_new("%d", c->charset), w);
     ini_set(L"pvf", L"path", c->pvf, w);
     ini_set(L"pvf", L"img", c->img_dir, w);
@@ -347,35 +351,50 @@ typedef struct {
     u32 mask;
     u32 cno;      // 归属角色：写 6 个容器要好几百毫秒，期间用户可能已经切了角色
     u32 mid;
+    // 入队时在 UI 线程就打包好的字节。
+    // 以前是把 g.data.* 的 Blob 指针带进作业线程、在那儿才 blob_pack，
+    // 而用户此刻照样能编辑同一个容器（app_item_set 不等作业）——
+    // 打包出来就是「改了一半」的混合态，库里写的哪一版谁也说不清。
+    // 拍快照还有第二个好处：切角色后 g.data 被整块换掉，作业手里那份仍然有效。
+    Buf snap[6];
+    u8  has[6];
 } WriteCtx;
-static WriteCtx g_wctx;
 
-static int w_write(void *ctx, Err err) {
-    WriteCtx *c = (WriteCtx *)ctx;
+// 队列里只放指针：WriteCtx 本身在堆上，谁拿到谁负责 free。
+// 不用 static 上下文，是因为它同时被「作业线程读」和「下次 flush 写」，
+// 中间没有任何同步，正是上面要消灭的那类共享。
+typedef struct {
+    WriteCtx *c;
+} WriteArg;
+static WriteArg g_warg;                  // 只转手一次，act_start 当拍即存下指针
+
+static void w_ctx_free(WriteCtx *c) {
+    if (!c) return;
+    for (int i = 0; i < 6; i++) buf_free(&c->snap[i]);
+    free(c);
+}
+
+static int w_write(void *argv, Err err) {
+    WriteCtx *c = ((WriteArg *)argv)->c;
     // 只认入队时记下的编号。若在任务线程里读 g.cur，用户中途切角色就会
     // 前几个容器写进 A、后几个写进 B —— 数据污染，比写失败严重得多。
     Charac who;
     memset(&who, 0, sizeof(who));
     who.no = c->cno;
     who.mid = c->mid;
-    int n = 0;
+    int ok = 1;
     for (int p = 0; p < 6; p++) {
-        if (!(c->mask & (1u << p))) continue;
-        Blob *b = app_page_blob(p);
-        if (!b || !b->ok) continue;
-        Buf packed = {0};
-        if (!blob_pack(b, &packed)) {
-            buf_free(&packed);
-            snprintf(err, ERRBUF, "打包失败");
-            return 0;
+        if (!(c->mask & (1u << p)) || !c->has[p]) continue;
+        if (!db_save_blob(&g.db, &who, app_page_table(p), app_page_field(p), c->snap[p].p,
+                          c->snap[p].n, err)) {
+            ok = 0;
+            break;
         }
-        int ok = db_save_blob(&g.db, &who, app_page_table(p), app_page_field(p), packed.p,
-                              packed.n, err);
-        buf_free(&packed);
-        if (!ok) return 0;
-        n++;
     }
-    g.write_done = c->mask;
+    u32 mask = c->mask;
+    w_ctx_free(c);                       // 快照归作业所有，成败都在这里收
+    if (!ok) return 0;
+    g.write_done = mask;
     return 1;
 }
 
@@ -386,10 +405,28 @@ void app_flush_pending(void) {
     u32 m = g.pend_mask;
     g.pend_mask = 0;
     g.write_mask = m;
-    g_wctx.mask = m;
-    g_wctx.cno = g.cur.no;
-    g_wctx.mid = g.cur.mid;
-    if (!app_act("写入容器", w_write, &g_wctx)) {
+    WriteCtx *c = (WriteCtx *)calloc(1, sizeof(*c));
+    int packed = c != NULL;
+    if (c) {
+        c->mask = m;
+        c->cno = g.cur.no;
+        c->mid = g.cur.mid;
+        for (int p = 0; p < 6 && packed; p++) {
+            if (!(m & (1u << p))) continue;
+            Blob *b = app_page_blob(p);
+            if (!b || !b->ok) continue;          // 该容器没载入：这次不写它
+            if (!blob_pack(b, &c->snap[p])) {
+                packed = 0;
+                break;
+            }
+            c->has[p] = 1;
+        }
+    }
+    g_warg.c = c;
+    if (!packed || !app_act("写入容器", w_write, &g_warg)) {
+        w_ctx_free(c);
+        g_warg.c = NULL;
+        if (!packed) app_status("容器打包失败，本次改动没有写入");
         g.pend_mask |= m;
         g.write_mask = 0;
     }
@@ -904,8 +941,10 @@ void app_save_draft(void) {
 
 // ---------------- 通用异步动作 ----------------
 // 上下文一律拷贝一份再交给线程。调用方多半传的是共享的静态结构（gm 页的 kc、
-// 物品页的 g_wctx），当场不改、任务线程稍后才读，中间被下一次点击改写，
+// 写容器时的 g_warg），当场不改、任务线程稍后才读，中间被下一次点击改写，
 // 就会出现"点 A 执行 B"这种查不出来的错。
+// 容器写入的快照（WriteCtx）走堆 + 指针，不放进这里的固定缓冲：
+// 它带 6 个动态 Buf，按值拷贝会让两个副本各认一份所有权。
 #define PEND_BUF 768
 #define PEND_N   4
 typedef struct {

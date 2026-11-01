@@ -191,7 +191,10 @@ int zlib_unpack(const void *src, size_t n, Buf *out) {
     if (((cmf << 8) | flg) % 31) return 0;                 // 头校验
     size_t off = 2;
     if (flg & 0x20) off += 4;                              // 预置字典，跳过 DICTID
-    if (off >= n) return 0;
+    // 尾部还有 4 字节 adler32，输入必须比 off+4 长。
+    // 只写 off >= n 是不够的：n=6 时 off+4 > n，n-off-4 会按 size_t 回绕成天文数字，
+    // 于是 inlen 变成「无边」，解压器就会一路读过缓冲区。
+    if (off + 4 > n) return 0;
 
     Inf s;
     memset(&s, 0, sizeof(s));

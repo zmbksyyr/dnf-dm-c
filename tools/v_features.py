@@ -107,7 +107,10 @@ BTN_CASES = [
     ("满QP", G["QP"], "taiwan_cain.charac_quest_shop", "charac_no", "qp", 90000, 7),
     ("无限负重", G["NOWEIGHT"], "taiwan_cain.charac_info", "charac_no", "inven_weight", 99999999, 100),
     ("开装备槽", G["SLOT"], "taiwan_cain.charac_stat", "charac_no", "add_slot_flag", 3, 0),
-    ("解锁装备等级", G["UNLOCK"], "taiwan_cain.charac_manage_info", "charac_no", "max_equip_level", 999, 10),
+    # 目标值不是 999：c586623 起 db_unlock_lev_equip 明确按「端允许的最高等级」
+    # （cfg lev_max，默认 85）写入，注释里写清了 999 在 85 封顶的端上属越界值。
+    # 这条用例的期望值一直停在改之前，于是恒报「没生效」——改期望，不改实现。
+    ("解锁装备等级", G["UNLOCK"], "taiwan_cain.charac_manage_info", "charac_no", "max_equip_level", 85, 10),
     ("满专家", G["EXPERT"], "taiwan_cain.charac_stat", "charac_no", "expert_job_exp", 2054, 7),
     ("补满疲劳", G["FATIGUE"], "taiwan_cain.charac_info", "charac_no", "fatigue", None, 7),  # 目标=max_fatigue
 ]

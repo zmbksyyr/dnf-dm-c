@@ -61,7 +61,7 @@ static void tab_scan_start(void) {
 }
 
 static HWND t_list, t_info;
-static int  t_ver;
+static u32  t_ver;          // 与 g.act_ver 同类型：混用 int 时 -Wextra 报符号比较
 
 static void tab_fill(void) {
     ui_rows_clear(t_list);
@@ -269,7 +269,7 @@ static void pet_layout(Page *p, int w, int h) {
     (void)h;
     RECT rc;
     GetClientRect(p->wnd, &rc);
-    int pad = ui_scale(6), rowh = ui_scale(23), gp = ui_scale(5);
+    int pad = ui_scale(6), rowh = ui_scale(23);
     URow r;
     ui_row(&r, p->wnd, pad, pad, rowh);
     ui_add(&r, ui_btn_at(p->wnd, P_REFRESH, "刷新"), ui_scale(60));
@@ -503,9 +503,11 @@ static void quest_enrich(void) {
             continue;
         }
         snprintf(r->name, sizeof(r->name), "%s", q.name);
-        r->nneed = q.nitem;
+        // 这里的 4 是三处数组共同的容量（QuestRow.need_id / QJob.purge_id / qsend），
+        // 现在靠 pvf.c:1399 的 `nitem < 4` 保证。夹一下，将来那边放宽了也不会直接越界。
+        r->nneed = q.nitem > 4 ? 4 : q.nitem;
         r->need[0] = 0;
-        for (int k = 0; k < q.nitem; k++) {
+        for (int k = 0; k < r->nneed; k++) {
             r->need_id[k] = q.item[k];
             r->need_cnt[k] = q.cnt[k];
             const char *nm = pvf_item_name(&g.pvf, q.item[k]);

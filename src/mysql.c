@@ -86,20 +86,8 @@ int my_col(const MyResult *r, const char *name) {
 }
 
 // ---------------- 编解码 ----------------
-static void put_lenenc(Buf *b, u64 v) {
-    if (v < 251) buf_putc(b, (u8)v);
-    else if (v < 65536) { buf_putc(b, 0xFC); buf_put16(b, (u16)v); }
-    else if (v < 16777216) {
-        buf_putc(b, 0xFD);
-        buf_putc(b, (u8)v);
-        buf_putc(b, (u8)(v >> 8));
-        buf_putc(b, (u8)(v >> 16));
-    } else {
-        buf_putc(b, 0xFE);
-        for (int i = 0; i < 8; i++) buf_putc(b, (u8)(v >> (8 * i)));
-    }
-}
-
+// 只有解码。客户端发出去的包（登录/查询）长度都是定长或长度外置的，
+// 从来不需要 lenenc 编码；原先那个 put_lenenc 全库无引用，已删除。
 static int get_lenenc(const u8 *p, size_t n, size_t *off, u64 *v) {
     if (*off >= n) return 0;
     u8 b = p[(*off)++];
@@ -438,8 +426,13 @@ static void add_row(MyResult *r, Buf *pkt) {
         r->offs[idx] = -1;
         if (!get_lenenc(pkt->p, pkt->n, &off, &len)) continue;
         if (len == UINT64_MAX) continue;
-        if (off + len > pkt->n) len = pkt->n - off;
-        if (r->arena.n > INT_MAX - (size_t)len - 1) continue;   // arena 超 2GB 截断防护
+        // 长度是对方给的，不能直接做 off+len 再比较：那个加法会回绕，
+        // 一个 0xFFFF...FE 的长度就能让判界失效，接着 buf_put 拿着天文数字去 memcpy。
+        // 一律改写成减法判界。注意这里刻意不判 off>=n 就 break —— 值为空串时
+        // 正好读掉最后一个字节后 off==n，那是合法的一列空值，跳过它等于把该列写成 NULL。
+        if (len > (u64)(pkt->n - off)) len = (u64)(pkt->n - off);
+        if (len > (u64)INT_MAX || r->arena.n > (size_t)INT_MAX - (size_t)len - 1)
+            continue;                                              // arena 超 2GB 截断防护
         r->offs[idx] = (int)r->arena.n;
         buf_put(&r->arena, pkt->p + off, (size_t)len);
         buf_putc(&r->arena, 0);
@@ -487,10 +480,13 @@ int mysql_query(MySql *m, const char *sql, MyResult *r) {
             for (int k = 0; k < 4; k++) {
                 u64 l = 0;
                 if (!get_lenenc(pkt.p, pkt.n, &o, &l)) break;
-                if (l != UINT64_MAX) o += (size_t)l;
+                if (l == UINT64_MAX) continue;
+                if (l > (u64)(pkt.n - o)) { o = pkt.n; break; }   // 减法判界，避免 o+l 回绕
+                o += (size_t)l;
             }
             u64 nameLen = 0;
-            if (get_lenenc(pkt.p, pkt.n, &o, &nameLen) && nameLen != UINT64_MAX && o + nameLen <= pkt.n) {
+            if (get_lenenc(pkt.p, pkt.n, &o, &nameLen) && nameLen != UINT64_MAX &&
+                nameLen <= (u64)(pkt.n - o)) {
                 r->cols[i] = (char *)xalloc((size_t)nameLen + 1);
                 memcpy(r->cols[i], pkt.p + o, (size_t)nameLen);
                 r->cols[i][nameLen] = 0;

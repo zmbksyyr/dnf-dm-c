@@ -21,6 +21,14 @@ static HWND g_limg, g_img, g_imgbtn;      // ImagePacks2 目录（悬浮卡图�
 // 框是可编辑的下拉，不在预设里直接敲也行，敲过的照样存进 settings.ini。
 static const char *const kHostList[] = {"127.0.0.1", "192.168.200.131"};
 
+// 密码预置：常见私服端默认的两套口令。下拉框是「可编辑」的（CBS_DROPDOWN），
+// 不在预置里就直接敲，不会被限制成只能选。
+// 注意：这里是**明文**，界面不掩码、settings.ini 不加密，这是有意为之，不是漏做。
+// 理由：它是本机连库用的口令，藏成圆点之后看不见、改不动、连不上时也核对不了；
+// 而真要防「有人看到这台机器」，掩码和本地加密都挡不住（进程内存、ini 文件都在同一台机）。
+// 见 tools/v_pwd.py —— 那条用例把这个约定钉住了，免得以后有人"顺手"改成密码框。
+static const char *const kPwdList[] = {"uu5!^%jg", "123456"};
+
 // 把配置里的地址放回下拉框：命中预设就选中，不命中就当成手填的文本。
 // 切回来时要能看出"现在连的是哪台"，而不是永远停在第一个预设上。
 static void host_sync(void) {
@@ -34,6 +42,22 @@ static void host_sync(void) {
     }
     SendMessageW(g_host, CB_INSERTSTRING, 0, (LPARAM)w);
     ui_combo_set(g_host, 0);
+}
+
+// 同 host_sync：配置里的口令命中预置就选中，不命中就插到最前面当「手填项」。
+// 不能简单 ui_text —— 下拉框里没有这一项时，编辑框会被 SetWindowText 覆盖掉
+// 但列表里仍缺一条，用户点开下拉就看不到自己正在用的口令。
+static void pwd_sync(void) {
+    if (!g_pwd || !g.cfg.pwd[0]) return;
+    WCHAR w[128];
+    utf16(g.cfg.pwd, w, COUNT_OF(w));
+    int idx = (int)SendMessageW(g_pwd, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)w);
+    if (idx >= 0) {
+        ui_combo_set(g_pwd, idx);
+        return;
+    }
+    SendMessageW(g_pwd, CB_INSERTSTRING, 0, (LPARAM)w);
+    ui_combo_set(g_pwd, 0);
 }
 
 // ---- 角色卡 ----
@@ -734,8 +758,15 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             g_luser = ui_label(h, "用户", 0);
             g_user = ui_edit(h, g.cfg.user, IDC_USER, 0);
             g_lpwd = ui_label(h, "密码", 0);
-            // 密码明文显示：这是本机连库用的口令，藏成圆点反而看不见、改不动也核对不了
-            g_pwd = ui_edit(h, g.cfg.pwd, IDC_PWD, 0);
+            // 密码**明文显示、明文保存**，这是定好的取舍，不是没做保护：
+            // 本机连库用的口令，掩码之后看不见、改不动、连不上时也核对不了；
+            // 而掩码/本地加密都挡不住能碰到这台机器的人。所以不做密码框、不做加密。
+            // 可编辑下拉：预置 uu5!^%jg 与 123456，不在预置里就自己敲。
+            g_pwd = ui_combo(h, IDC_PWD, 0);
+            ui_combo_fill(g_pwd, kPwdList, COUNT_OF(kPwdList), 0);
+            pwd_sync();
+            ui_tip(h, g_pwd, "数据库口令：明文显示、明文存进 settings.ini（有意如此，便于核对）。"
+                   "预置 uu5!^%jg 与 123456 可直接选，也可以自己填");
             g_conn = ui_button(h, "连接", IDC_CONN);
             g_disc = ui_button(h, "断开", IDC_DISC);
 

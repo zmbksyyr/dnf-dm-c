@@ -13,10 +13,15 @@ void ui_pages_wire(void);
 
 // ---------------- 页面注册 ----------------
 Page g_pages[PAGE_COUNT] = {
-    [PAGE_ITEM] = {"物品"},     [PAGE_QUERY] = {"查询"},  [PAGE_GRANT] = {"发放"},
-    [PAGE_MAIL] = {"邮件"},     [PAGE_PET] = {"宠物"},    [PAGE_AVATAR] = {"时装"},
-    [PAGE_QUEST] = {"任务"},    [PAGE_EVENT] = {"活动"},  [PAGE_GM] = {"GM"},
-    [PAGE_BUBBLE] = {"泡点"},   [PAGE_BAN] = {"封停"},    [PAGE_LOG] = {"日志"},
+    // 只点出 name，其余（wnd/busy/四个回调）由 C 规则清零。
+    // 写成 {"物品"} 会触发 -Wmissing-field-initializers（12 条），
+    // 指名初始化既表达了「只给名字」的意图，也不再刷警告。
+    [PAGE_ITEM]   = {.name = "物品"}, [PAGE_QUERY] = {.name = "查询"},
+    [PAGE_GRANT]  = {.name = "发放"}, [PAGE_MAIL]  = {.name = "邮件"},
+    [PAGE_PET]    = {.name = "宠物"}, [PAGE_AVATAR] = {.name = "时装"},
+    [PAGE_QUEST]  = {.name = "任务"}, [PAGE_EVENT] = {.name = "活动"},
+    [PAGE_GM]     = {.name = "GM"},   [PAGE_BUBBLE] = {.name = "泡点"},
+    [PAGE_BAN]    = {.name = "封停"}, [PAGE_LOG]   = {.name = "日志"},
 };
 
 void ui_pages_wire(void) {

@@ -25,13 +25,8 @@ enum { AK_ITEM = 0, AK_AVATA = 1, AK_CREATURE = 2 };
 // 宠物不落在 user_items，而是自成一表（creature_items）；但它在 PVF 里的编号
 // 长得和装备/消耗品一样 —— 63000「佛拉斯」按所在目录算就是件装备，光看 PVF
 // 分不出来。说得清的只有库里的 dnf_creature_info：it_id 那一列就是宠物清单，
-// 连库时收一次，这里照它对。清单为空（架服没带 web 库）时按普通物品发，不发宠物。
-static int id_in_list(Vec *v, u32 id) {
-    for (int i = 0; i < v->n; i++)
-        if (*VEC_AT(v, u32, i) == id) return 1;
-    return 0;
-}
-
+// 连库时收一次（见 db_mail.c 的 pet_list），这里照它对。清单为空（架服没带
+// web 库）时按普通物品发，不发宠物。
 // 附件种类判定统一走 app 层（app_attach_kind），发放页走同一个判据，
 // 改判据只需改一处。AK_* 只是本地显示用的别名。
 static int attach_kind_of(u32 id) {
