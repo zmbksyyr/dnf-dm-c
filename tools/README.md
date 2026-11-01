@@ -70,6 +70,20 @@ python tools\v_gmwrite.py
 | `v_hover.py` | 编号悬浮卡：悬停列表的编号行 400ms 浮出「图标 + 详情」，换行换内容、移开收起。要真鼠标（`SetCursorPos` 会被真实输入抢回去，脚本会高频按住并回读坐标），还要 PVF 旁边的 `ImagePacks2`；本机光标被占用时标「跳过」而不是假失败 |
 | `v_listtip.py` | **列表上不许挂提示**：绑了编号卡的列表若再挂 `ui_tip()`，悬停行时两个气泡会撞。静态扫 `src/*.c` 查「既挂 tip 又 bind」的组合（覆盖弹窗里的列表，运行时进不去），再运行时悬停三个列表第一行确认屏幕上不出现 `tooltips_class32`。没绑编号卡的列表（泡点计划）不受限 |
 
+### 一次跑全套
+
+单个脚本适合调试；整体回归用总入口：
+
+```
+python tools/run_regress.py              # 默认跑 ALWAYS 组
+python tools/run_regress.py --group all  # 连 MANUAL 组一起
+python tools/run_regress.py --only v_log # 只跑一个
+python tools/run_regress.py --timeout 600
+```
+
+退出码：全绿 0，任一失败 1。各用例日志落在 `tools/regress-logs/`（已 gitignore）。
+ALWAYS / MANUAL 的分组理由见脚本头部注释。
+
 `pages.py` 是公共库，脚本里只留各自的用例，重复的东西一律往这里收：
 启动并连库（`start`）、按编号找控件（`ctl`）、读文本（`txt`）、改文本（`set_text`）、
 失焦提交（`blur`）、投递点击（`press` / `click_at`）、数列表行数（`rows`）、
