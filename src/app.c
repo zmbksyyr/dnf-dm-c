@@ -1234,7 +1234,9 @@ static int w_grant(void *ctx, Err err) {
     if (c->by_mail) {
         for (int i = 0; i < s_grant_snap_n; i++) {
             NamedId *n = &s_grant_snap[i];
-            u8 ty = n->type ? n->type : IT_STACK;
+            // 类型按当前 PVF 现派，不信任入队那一刻算的值：先加队列、后加载 PVF
+            // 会留下过时的 IT_STACK，照它写会落错背包区段。
+            u8 ty = app_item_type(n->id);
             int stackable = (ty != IT_EQUIP && ty != IT_CREATURE_EQUIP);
             u32 lim = stackable ? app_item_stack_limit(n->id) : 0;
             u32 total = stackable ? (n->num ? n->num : 1) : n->num;
@@ -1252,7 +1254,7 @@ static int w_grant(void *ctx, Err err) {
                 memset(&gi, 0, sizeof(gi));
                 gi.id = n->id;
                 gi.num = lim ? (total - (u32)p * lim < lim ? total - (u32)p * lim : lim) : total;
-                gi.type = n->type;
+                gi.type = app_item_type(n->id);
                 gi.enhance = n->enhance;
                 gi.forge = n->forge;
                 gi.seal = n->seal;
@@ -1280,7 +1282,10 @@ static int w_grant(void *ctx, Err err) {
     int ok = 0;
     for (int i = 0; i < s_grant_snap_n; i++) {
         NamedId *n = &s_grant_snap[i];
-        u8 ty = n->type ? n->type : IT_STACK;
+        // 类型按当前 PVF 现派，不信任入队那一刻算的值（先加队列、后加载 PVF 会留下
+        // 过时的 IT_STACK）。类型字节决定落哪个背包区段，写错区段服务端直接拒绝加载、
+        // 角色登不进去。
+        u8 ty = app_item_type(n->id);
         // 按类型落对应区段。放错区不是"位置不好看"，是服务端直接拒绝加载、
         // 角色登不进去。
         int lo, hi;
@@ -1372,6 +1377,17 @@ done:
 int app_grant_send(int by_mail) {
     if (!g.char_ok) { app_info("请先选择角色"); return 0; }
     if (g.grant.n == 0) { app_info("发放队列为空"); return 0; }
+    // 没加载 PVF 时 app_item_type 对所有编号一律兜成 IT_STACK（消耗品），而 w_grant
+    // 是照类型字节落背包区段的。装备/时装/宠物被当成消耗品写进错误区段，服务端
+    // InventoryVerify 会判整个背包非法、角色登不进去（见 app.c 下方那段警告）。
+    // 这类损坏没法靠「兜底成 0 让格子失效」来避免 —— 写都写进库了。所以未加载
+    // PVF 一律拒发，逼用户先把 Script.pvf 选好；图标/浏览那些只影响显示的不在此列。
+    if (!g.pvf_ok) {
+        app_info("未加载 PVF，不能确定物品类型。\n\n"
+                 "装备/时装/宠物被当成消耗品发放会写错背包区段，导致角色背包损坏、无法登录。\n"
+                 "请先在左上角选好 Script.pvf 再发放。");
+        return 0;
+    }
     if (g.grant.n > GRANT_SNAP_MAX) {
         app_info(fmt_new("队列超过 %d 项，请分批发放", GRANT_SNAP_MAX));
         return 0;
