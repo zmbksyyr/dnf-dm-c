@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""回归总入口：把五轮攒下来的 v_*.py 跑成一套，逐个记 rc + 失败项数，末尾出汇总表。
+"""回归总入口：把 v_*.py 跑成一套，逐个记 rc + 失败项数，末尾出汇总表。
 
     python tools/run_regress.py              # 跑「每次都跑」那一组（默认）
     python tools/run_regress.py --group all  # 连「需人工」那组一起跑
@@ -40,7 +40,7 @@ ALWAYS（自还原，可复现）
   v_type           走 PVF 判定，只读发放页/邮件页的只读文本框
                    （v_tasknum 同类但已移到 MANUAL，理由见下）
   v_r1_conn / v_r1_lists / v_r1_quest / v_r1_scan / v_r1_unlock
-                   R1 的定向脚本，都用「第二条连接 LOCK TABLES」把意图变成可控量，
+                   定向脚本，都用「第二条连接 LOCK TABLES」把意图变成可控量，
                    不靠 sleep 抢时序；改过的行在 finally 里按快照还原
   v_r1_name / v_r3_emoji
                    临时改名 → 断言 → 改回 laoxx，最后比 HEX
@@ -49,11 +49,11 @@ ALWAYS（自还原，可复现）
   v_r3_clone / v_r4_clone_keys
                    克隆出来的是临时角色，finally 里删掉；依赖的起点状态
                    （charac_info 1 行 + delivery 17 行挂 charac_no=1）是
-                   brief 里写明的常设验收前提，不是随机状态
+                   常设验收前提，不是随机状态
   v_r3_jobstop / v_r3_sticky / v_r4_connstop / v_r4_levjob / v_r4_name / v_r4_shutdown
                    都用「卡住作业 → 点断开/退出」的构造，锁释放后库回到原样
   v_r5_banchars / v_r5_mail / v_r5_mailsend / v_r5_online / v_r5_tsv
-                   R5 那五个页面的定向脚本。构造全是「第二条连接 LOCK TABLES 把意图
+                   这五个页面的定向脚本。构造全是「第二条连接 LOCK TABLES 把意图
                    变成可控量 + PROCESSLIST 里确认它真的在等」，不靠 sleep 抢时序；
                    写库的那两个（mailsend 写 letter、online 改 login_status 与
                    event_1306）都在 finally 里按快照还原并断言逐字节一致；
@@ -74,12 +74,11 @@ MANUAL（命中上面三条之一）
   v_norow          断言前提是“account_cargo 里没有 m_id=1 的行”，这份空表状态
                    会被其它脚本抹掉（v_features 建过再删，但只要中途失败就会留下）
   v_bubble         会把 account=1 的 login_status 置在线并改 cera_point，
-                   在线状态正是本轮 R5-005 要校验的那一份；而且它会往 postal 插行，
-                   与邮件页行数断言抢同一份数据
+                   而且它会往 postal 插行，与邮件页行数断言抢同一份数据
   v_r3_probe_stale_name
                    记录型探针：只打印不判定。它记的是“改名被拒后界面停在假名字”，
-                   那个缺陷第 4 轮（R4-01）已经修掉，现在该打印「已回滚」而不是
-                   「停在假名字」。它是 R4-01 的人工确认证据，不是每轮该跑的回归
+                   那个缺陷已经修掉，现在该打印「已回滚」而不是
+                   「停在假名字」。它是人工确认证据，不是每轮该跑的回归
 """
 import argparse
 import os
@@ -93,7 +92,7 @@ ROOT = os.path.dirname(HERE)
 
 # 顺序上唯一还需要讲究的是：会临时建角色、把 AUTO_INCREMENT 顶上去的脚本
 # （v_r1_name / v_r4_name / v_r5_mailswap）排在只做断言的后面，别让它们的副产物
-# 影响别人。两个克隆脚本早已不认死 9919（见文件头那段），所以整张表第二轮照跑。
+# 影响别人。两个克隆脚本早已不认死 9919（见文件头那段），所以整张表照跑。
 ALWAYS = [
     "v_r4_clone_keys", "v_r4_levjob",
     "v_selfcheck", "v_features", "v_gmwrite", "v_pwd", "v_log", "v_pageall",
@@ -147,7 +146,7 @@ GOOD_LINE = {
     "v_r1_lists":  re.compile(r"合计失败 \d+ 项"),
     "v_selfcheck": re.compile(r"已改回 letter"),
 }
-# R5 这批脚本的收尾行都是「合计失败 N 项」，逐条列一遍太占地方
+# 这批脚本的收尾行都是「合计失败 N 项」，逐条列一遍太占地方
 for _n in ("v_r5_banchars", "v_r5_log", "v_r5_mail", "v_r5_mailsend",
            "v_r5_online", "v_r5_tsv", "v_r5_mailswap"):
     GOOD_LINE[_n] = re.compile(r"合计失败 \d+ 项")
@@ -198,7 +197,7 @@ def main():
     ap.add_argument("--reset-ai", action="store_true",
                     help="跑之前把 charac_info 的 AUTO_INCREMENT 拽回 9919。"
                          "现在没有脚本认死这个数了（见文件头注释），只在你想把库摆回 "
-                         "brief 里写的那个起点时才用；默认不拽：动自增计数器是一次 DDL")
+                         "那个起点时才用；默认不拽：动自增计数器是一次 DDL")
     ap.add_argument("--logdir", default=os.path.join(HERE, "regress-logs"))
     a = ap.parse_args()
 
