@@ -435,6 +435,23 @@ const char *app_item_type_text(u32 id) {
     }
 }
 
+// 邮件附件该走哪张表。以 PVF 的种类为准；没 PVF 时退到库里的宠物清单
+// （dnf_creature_info 的 it_id 列）—— 宠物编号在 PVF 里长得和装备一样，
+// 光看目录分不出来。两者都判不出来就按普通物品发，至少东西能发出去。
+int app_attach_kind(u32 id) {
+    if (!id) return ACK_ITEM;
+    if (g.pvf_ok) {
+        switch (pvf_item_kind(&g.pvf, id)) {
+            case PK_AVATAR:   return ACK_AVATAR;
+            case PK_CREATURE: return ACK_CREATURE;
+            default: break;
+        }
+    }
+    for (int i = 0; i < g.cre_ids.n; i++)
+        if (*VEC_AT(&g.cre_ids, u32, i) == id) return ACK_CREATURE;
+    return ACK_ITEM;
+}
+
 const char *app_job_text(int job) {
     static const char *kJ[] = {"未转职", "鬼剑士", "格斗家", "神枪手", "魔法师", "圣职者",
                                "刺客",   "男法师", "缔造者", "黑暗武士", "影舞者"};
@@ -1062,7 +1079,13 @@ static int w_grant(void *ctx, Err err) {
             gi.inc_type = n->inc_type;
             gi.inc_val = n->inc_val;
             gi.dur = n->dur;
-            if (!db_send_item_mail_ex(&g.db, &g.cur, "GM", "系统发放", &gi, 0, 0, err)) return 0;
+            // 附件种类得照着 PVF 判，不能一律当普通物品：时装和宠物要先在
+            // user_items / creature_items 建一行，拿 ui_id 当 add_info；直接把数量
+            // 写进 add_info 又置 flag=0，客户端取附件时拿到的就是错的东西。
+            int k = app_attach_kind(n->id);
+            if (!db_send_item_mail_ex(&g.db, &g.cur, "GM", "系统发放", &gi,
+                                      k == ACK_AVATAR ? 1 : 0,
+                      k == ACK_CREATURE ? 1 : 0, err)) return 0;
         }
         return 1;
     }

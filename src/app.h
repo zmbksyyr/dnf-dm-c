@@ -181,6 +181,14 @@ const char *app_item_name(u32 id, char *buf, int cap);
 // 轻则显示成别的东西，重则整格读不出来。
 u8          app_item_type(u32 id);       // IT_* 字节；没 PVF / 查不到时兜消耗品，不会返回 0
 const char *app_item_type_text(u32 id);  // 「装备」「消耗品」…；兜底时带括号说明来源
+
+// 邮件附件种类：普通 / 时装 / 宠物。
+// 三者 ID 空间互相独立，落到不同的表：普通把数量写进 postal.add_info，
+// 时装 / 宠物要先在 user_items / creature_items 建一行、拿 ui_id 当 add_info。
+// 邮件页和发放页共用一个判据 —— 各写一份迟早分叉，分叉的后果是发出去的东西
+// 收件人取不出来。
+enum { ACK_ITEM = 0, ACK_AVATAR = 1, ACK_CREATURE = 2 };
+int  app_attach_kind(u32 id);
 const char *app_job_text(int job);
 const char *app_pvp_text(int grade);   // PVP 段位名（0=10级 … 34=斗神）
 void app_money_text(u64 v, char *buf, int cap);

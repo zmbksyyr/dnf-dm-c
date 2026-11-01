@@ -1078,9 +1078,16 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
 
                     Buf pk = {0};
                     zlib_pack(plain.p, plain.n, &pk);
+                    // info 的格式是 [4 字节前缀][zlib 流]，跟容器 blob 一样。读的
+                    // 时候剥了前缀，写回去就得原样补上 —— zlib_pack 只产 zlib 流
+                    // 本身（0x78 0x01 起），它不知道前缀这回事。漏补的话槽位
+                    // 整体错位，服务端读出来是空槽，克隆的角色照样不显示。
+                    Buf out = {0};
+                    buf_put(&out, bp, 4);
+                    buf_put(&out, pk.p, pk.n);
                     Str u = {0};
                     str_cat(&u, "UPDATE taiwan_cain.charac_view SET `info`=");
-                    sql_lit(&u, (const char *)pk.p, (int)pk.n, 1);
+                    sql_lit(&u, (const char *)out.p, (int)out.n, 1);
                     str_catf(&u, ", `charac_count`=(SELECT COUNT(*) FROM taiwan_cain.charac_info"
                                  " WHERE `m_id`=%u AND `delete_flag`=0) WHERE `m_id`=%u",
                              c->mid, c->mid);
@@ -1089,6 +1096,7 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
                         ok = 0;
                     }
                     str_free(&u);
+                    buf_free(&out);
                     buf_free(&pk);
                 }
                 buf_free(&plain);

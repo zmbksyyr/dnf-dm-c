@@ -32,17 +32,14 @@ static int id_in_list(Vec *v, u32 id) {
     return 0;
 }
 
+// 附件种类判定统一走 app 层（app_attach_kind），发放页走同一个判据，
+// 改判据只需改一处。AK_* 只是本地显示用的别名。
 static int attach_kind_of(u32 id) {
-    if (!id) return AK_ITEM;                  // 没填附件：纯文本邮件，种类无从谈起
-    if (g.pvf_ok) {
-        switch (pvf_item_kind(&g.pvf, id)) {
-            case PK_AVATAR:   return AK_AVATA;
-            case PK_CREATURE: return AK_CREATURE;
-            default: break;
-        }
+    switch (app_attach_kind(id)) {
+        case ACK_AVATAR:   return AK_AVATA;
+        case ACK_CREATURE: return AK_CREATURE;
+        default:           return AK_ITEM;
     }
-    if (id_in_list(&g.cre_ids, id)) return AK_CREATURE;
-    return AK_ITEM;                           // 没 PVF 也照样出：默认普通，邮件照样发得出去
 }
 
 static const char *kAttachText[] = {"普通物品", "时装", "宠物"};

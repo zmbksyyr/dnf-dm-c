@@ -373,8 +373,13 @@ int db_delete_avatar(Db *d, u32 ui_id, Err err) {
 
 // ---------------- 任务 ----------------
 int db_list_quests(Db *d, const Charac *c, Vec *out, Err err) {
+    // 显式列名，不写 SELECT *：这张表在 play_10_trigger 和 play_11 之间插了一列
+    // auto_clear，按位置两两配对会整段错位 —— 参考实现是靠 `if i==20: i+=1`
+    // 跳过去的（它先切掉了前三列）。按名字取，以后再加杂列也不怕。
     Str s = {0};
-    str_catf(&s, "SELECT * FROM taiwan_cain.new_charac_quest WHERE charac_no=%u", c->no);
+    str_cat(&s, "SELECT charac_no,clear_quest,quest_notify");
+    for (int k = 1; k <= 20; k++) str_catf(&s, ",play_%d,play_%d_trigger", k, k);
+    str_catf(&s, " FROM taiwan_cain.new_charac_quest WHERE charac_no=%u", c->no);
     MyResult r = {0};
     if (!select1(d, &s, &r)) { snprintf(err, ERRBUF, "%s", d->err); str_free(&s); return 0; }
     str_free(&s);

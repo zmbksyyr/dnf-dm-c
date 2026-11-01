@@ -1362,7 +1362,9 @@ static void grant_build(Page *p, HWND parent) {
     SendMessageW(g_type, EM_SETREADONLY, TRUE, 0);
     grant_type_sync();                 // 建好就填默认值，不等用户敲编号
     g_num = ui_edit(parent, "1", G_NUM, 0);
-    g_dur = ui_edit(parent, "0", G_DUR, 0);   // 耐久在第一行末尾，跟着建
+    // 耐久默认 999 而不是 0：新建一件装备直接照默认发出去的话，耐久 0 会让客户端
+    // 显示异常、服务端也可能拒收。参考实现新建槽也是 999。要真的是 0 的人会自己改。
+    g_dur = ui_edit(parent, "999", G_DUR, 0);   // 耐久在第一行末尾，跟着建
     g_enh = ui_edit(parent, "0", G_ENH, 0);
     g_inc = ui_combo(parent, G_INC, 1);
     ui_combo_fill(g_inc, kIncList, COUNT_OF(kIncList), 0);
