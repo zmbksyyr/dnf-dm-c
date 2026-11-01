@@ -94,10 +94,21 @@ done
     { "table": "charac_info", "rows": 57, "before": "...", "after": "...", "restored": true }
   ],
   "regressions": [],
+  "pre_existing": [],
   "blocked": [],
   "verdict": "green"
 }
 ```
+
+**`regressions` 和 `pre_existing` 别放错**（放错会让闸门判错）：
+
+- `regressions` —— **本轮修复导致的**回退。原来能用，现在不能用了。这是对修复的指控。
+- `pre_existing` —— 你跑测试时**顺带撞见的既有缺陷**，与本次改动无关。
+  写清"为什么判断不是本轮引入"（比如"用 `git show HEAD~1` 的老版本也一样失败"、
+  "表结构本身决定，与改动路径无关"）。这类问题进下一轮的审查输入，不算本轮扣分。
+
+闸门对两者的处理不同：`regressions` 只记为"待裁判确认"，`pre_existing` 只记录，
+真正触发回滚的是裁判确认过的回归。所以**别为了让报告显得干净就把既有缺陷塞进 `regressions`**。
 
 `verdict` 只有两个值：`green`（构建过 + 全部套件 pass + 无回归 + 每条修复有定向证据）、
 `red`（其余一律 red，不要四舍五入）。

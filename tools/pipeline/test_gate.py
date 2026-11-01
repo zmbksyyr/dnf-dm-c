@@ -45,6 +45,7 @@ def test(**kw):
             "suites": suites, "targeted": kw.pop("targeted", [
                 {"finding_id": "R1-001", "test": "tools/v_r1.py", "rc": 0, "result": "pass"}]),
             "regressions": kw.pop("regressions", []), "blocked": kw.pop("blocked", []),
+            "pre_existing": kw.pop("pre_existing", []),
             "verdict": kw.pop("verdict", "green")}
 
 
@@ -89,7 +90,11 @@ CASES = [
      test(suites=[{"name": "v_gmwrite", "rc": 1, "result": "fail"}]), verdict()),
     ("build_failed", 2, findings(), {"round": 1, "build": "fail", "fixed": []},
      test(build_rc=1), verdict()),
-    ("regression", 2, findings(), fix(), test(regressions=["coin no longer saves"]), verdict()),
+    ("regression_reported", 1, findings(), fix(), test(regressions=["coin no longer saves"]), verdict()),
+    ("judge_confirmed_regression", 2, findings(), fix(), test(),
+     verdict(regressions=["coin no longer saves"])),
+    ("pre_existing_defect", 0, findings(), fix(),
+     test(pre_existing=["clone hits a binary pk"]), verdict()),
     ("green_but_suite_fail", 2, findings(), fix(),
      test(suites=[{"name": "v_log", "rc": 0, "result": "fail"}], verdict="green"), verdict()),
     ("no_targeted_evidence", 1, findings(), fix(), test(targeted=[]), verdict()),

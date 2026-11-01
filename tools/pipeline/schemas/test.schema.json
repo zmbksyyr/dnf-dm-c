@@ -44,6 +44,7 @@
     },
     "db_roundtrip": { "type": "array", "items": { "type": "object" } },
     "regressions": { "type": "array", "items": { "type": "string" } },
+    "pre_existing": { "type": "array", "items": { "type": "string" } },
     "blocked": { "type": "array", "items": { "type": "string" } },
     "verdict": { "enum": ["green", "red"] }
   }

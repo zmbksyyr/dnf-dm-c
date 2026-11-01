@@ -105,10 +105,15 @@ def main():
             failures.append("suite %s blocked - not verified" % name)
 
     # ---- regressions -----------------------------------------------------
+    # A tester's "regression" is a claim, not a verdict. Only the judge decides
+    # whether this round broke something. Treating the claim as damage would
+    # roll back good work whenever a test happens to unearth an old defect.
     for r in (test.get("regressions") or []):
-        damage.append("regression: " + str(r))
+        failures.append("tester reported possible regression, judge must rule: " + str(r))
+    for r in (test.get("pre_existing") or []):
+        notes.append("pre-existing defect surfaced: " + str(r))
     for r in (verdict.get("regressions") or []):
-        damage.append("judge saw regression: " + str(r))
+        damage.append("judge confirmed regression: " + str(r))
 
     # ---- test verdict ----------------------------------------------------
     tv = test.get("verdict")
