@@ -144,7 +144,7 @@ void app_log_flush(void) {
     if (s_log.n <= 0) { LeaveCriticalSection(&s_log_cs); return; }
     char path[MAX_PATH];
     app_log_path(path, sizeof(path));
-    file_append(path, s_log.p, s_log.n);
+    file_append(path, s_log.p, (size_t)s_log.n);
     s_log.n = 0;
     if (s_log.p) s_log.p[0] = 0;
     s_log_ms = now_ms();

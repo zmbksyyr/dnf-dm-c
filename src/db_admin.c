@@ -415,7 +415,7 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
             str_cat(&out, ";\n");
         }
         if (out.n) {                    // 建表语句要立刻落盘，不能攒到最后
-            file_append(path, out.p, out.n);
+            file_append(path, out.p, (size_t)out.n);
             str_clear(&out);
         }
         my_free(&r);
@@ -478,7 +478,7 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
             rows_in++;
             if (rows_in >= 64 || ins.n > (1 << 20)) {
                 str_cat(&ins, ";\n");
-                if (!file_append(path, ins.p, ins.n)) {
+                if (!file_append(path, ins.p, (size_t)ins.n)) {
                     snprintf(err, ERRBUF, "写入失败：%s", path);
                     my_free(&r); str_free(&q); str_free(&ins);
                     nr += (u64)rows_in;
@@ -500,7 +500,7 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
         }
         if (rows_in) {
             str_cat(&ins, ";\n");
-            file_append(path, ins.p, ins.n);
+            file_append(path, ins.p, (size_t)ins.n);
             nr += (u64)rows_in;
         }
         str_free(&ins);
@@ -515,7 +515,7 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
 
     str_clear(&out);
     str_cat(&out, "\nSET FOREIGN_KEY_CHECKS=1;\n");
-    file_append(path, out.p, out.n);
+    file_append(path, out.p, (size_t)out.n);
     str_free(&out);
     for (int i = 0; i < tabs.n; i++) str_free(VEC_AT(&tabs, Str, i));
     vec_free(&tabs);

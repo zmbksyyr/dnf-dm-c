@@ -941,7 +941,10 @@ int db_name_taken(Db *d, const char *name, u32 except_no) {
     }
     my_free(&r);
     str_free(&s);
-    set_names(d, "utf8");
+    // 复原要回到「配置的那个」字符集，不能写死 utf8。
+    // 配置默认 45（utf8mb4），写死 utf8 等于把会话降成 utf8mb3：之后读到含 4 字节
+    // 字符的名字会被服务端替换成 '?'，再往后写库就按 mb3 转义 —— 静默的乱码/截断。
+    set_names(d, db_cs_name(s_cs));
     return taken;
 }
 
@@ -953,7 +956,7 @@ int db_set_name(Db *d, const Charac *c, const char *name, Err err) {
                      "UPDATE taiwan_cain.charac_info SET charac_name='%s' WHERE charac_no=%u",
                      e ? e : "", c->no);
     free(e);
-    set_names(d, "utf8");
+    set_names(d, db_cs_name(s_cs));   // 同上：回到配置的字符集，不是写死 utf8
     return ok;
 }
 
