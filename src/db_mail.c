@@ -109,7 +109,10 @@ int db_delete_all_mails(Db *d, const Charac *c, Err err) {
 }
 
 int db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *text, Err err) {
-    set_names(d, "latin1");
+    // 用配置的字符集写，别再手工切 latin1：letter.letter_text / send_charac_name 都是
+    // utf8 列，latin1 会话会把 UTF-8 字节当成 latin1 再转存，落库即双重编码；
+    // 且列上限按字符算，latin1 下一个汉字占 3 个字符，90 个汉字就被截到 255 个字符。
+    set_names(d, db_cs_name(d->charset));
     char *es = mysql_escape(sender ? sender : "GM");
     char *et = mysql_escape(text ? text : "");
     Str s = {0};
@@ -124,7 +127,6 @@ int db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *te
     free(et);
     int ok = run(d, &s);
     str_free(&s);
-    set_names(d, "utf8");
     if (!ok) snprintf(err, ERRBUF, "%s", d->err);
     return ok;
 }
@@ -142,7 +144,8 @@ int db_send_item_mail(Db *d, const Charac *c, const char *sender, const char *te
 int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char *text,
                          const GrantItem *g, int avata_flag, int creature_flag, Err err) {
     if (!db_send_text_mail(d, c, sender, text, err)) return 0;
-    set_names(d, "latin1");
+    // postal.send_charac_name 同样是 utf8 列，字符集必须跟上面那封正文一致
+    set_names(d, db_cs_name(d->charset));
     char *es = mysql_escape(sender ? sender : "GM");
     Str s = {0};
     MyResult r = {0};
@@ -169,7 +172,7 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
                  "(charac_no,it_id,expire_date,obtain_from,reg_date,stat) "
                  "VALUES (%u,%u,'9999-12-31 23:59:59',1,'%s',2)",
                  c->no, g->id, ts0);
-        if (!run(d, &s)) { snprintf(err, ERRBUF, "建时装行：%s", d->err); str_free(&s); free(es); set_names(d, "utf8"); return 0; }
+        if (!run(d, &s)) { snprintf(err, ERRBUF, "建时装行：%s", d->err); str_free(&s); free(es); return 0; }
         str_clear(&s);
         str_cat(&s, "SELECT LAST_INSERT_ID()");
         if (select1(d, &s, &r)) add_info = my_u64(&r, 0, 0, 0);
@@ -183,7 +186,7 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
                  "(charac_no,it_id,expire_date,reg_date,stat,item_lock_key,creature_type,stomach) "
                  "VALUES (%u,%u,'9999-12-31 23:59:59','%s',0,0,0,100)",
                  c->no, g->id, ts0);
-        if (!run(d, &s)) { snprintf(err, ERRBUF, "建宠物行：%s", d->err); str_free(&s); free(es); set_names(d, "utf8"); return 0; }
+        if (!run(d, &s)) { snprintf(err, ERRBUF, "建宠物行：%s", d->err); str_free(&s); free(es); return 0; }
         str_clear(&s);
         str_cat(&s, "SELECT LAST_INSERT_ID()");
         if (select1(d, &s, &r)) add_info = my_u64(&r, 0, 0, 0);
@@ -205,7 +208,6 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
     free(es);
     int ok = run(d, &s);
     str_free(&s);
-    set_names(d, "utf8");
     if (!ok) snprintf(err, ERRBUF, "%s", d->err);
     return ok;
 }
@@ -283,14 +285,16 @@ int db_list_pets(Db *d, const Charac *c, Vec *out, Err err) {
 }
 
 int db_set_pet_name(Db *d, u32 ui_id, const char *name, Err err) {
-    set_names(d, "latin1");
+    // creature_items.name 是 utf8 列，且只有 varchar(12)：latin1 会话下 4 个汉字就
+    // 吃满 12 个字符、5 个汉字直接被截断，还顺带双重编码。用配置的字符集，
+    // 12 个字符就是 12 个字符，截断只按真实长度发生。
+    set_names(d, db_cs_name(d->charset));
     char *e = mysql_escape(name);
     Str s = {0};
     str_catf(&s, "UPDATE taiwan_cain_2nd.creature_items SET name='%s' WHERE ui_id=%u", e, ui_id);
     free(e);
     int ok = run(d, &s);
     str_free(&s);
-    set_names(d, "utf8");
     if (!ok) snprintf(err, ERRBUF, "%s", d->err);
     return ok;
 }

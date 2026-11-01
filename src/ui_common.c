@@ -988,6 +988,10 @@ void ui_dlg_end(int ok) {
 static LRESULT CALLBACK dlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     DlgBox *d = (DlgBox *)GetWindowLongPtrW(h, GWLP_USERDATA);
     if (m == WM_CLOSE) {
+        // 先问页面要不要拦（比如「后台作业还在跑，确定关？」）：页面返回 -1 表示
+        // 不关它的事，才按默认语义结束。原来这里无条件 ui_dlg_end(0)，页面连
+        // 「窗口要关了」都收不到，想拦一句都没有地方写。
+        if (d && d->proc && d->proc(h, m, wp, lp, d->ctx) != -1) return 0;
         ui_dlg_end(0);
         return 0;
     }
@@ -1064,9 +1068,13 @@ int ui_dlg_run(HWND dlg, HWND owner) {
     EnableWindow(owner ? owner : g_main, TRUE);
     if (owner ? owner : g_main) SetActiveWindow(owner ? owner : g_main);
     DlgBox *d = (DlgBox *)GetWindowLongPtrW(dlg, GWLP_USERDATA);
-    SetWindowLongPtrW(dlg, GWLP_USERDATA, 0);
-    free(d);
+    // 必须先 DestroyWindow 再 free(d)：DestroyWindow 是同步的，WM_DESTROY / WM_NCDESTROY
+    // 就在这一句里派发给 dlg_proc，而 dlg_proc 要靠 GWLP_USERDATA 找到 DlgBox 才能把
+    // 消息转给页面 proc。原来的顺序是「清 USERDATA → free(d) → DestroyWindow」，
+    // 页面 proc 一次 WM_DESTROY 都收不到，所有「关窗时清理」的代码全是死代码。
+    // USERDATA 随窗口一起消失，不用再单独清零。
     DestroyWindow(dlg);
+    free(d);
     return g_dlg_ok;
 }
 

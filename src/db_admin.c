@@ -211,7 +211,9 @@ int db_unban(Db *d, u32 mid, int type, Err err) {
 }
 
 int db_find_mid(Db *d, const char *name, u32 *mid, Err err) {
-    set_names(d, "latin1");
+    // 和读路径用同一个字符集，别再切 latin1：charac_name 是 varchar(20) utf8，
+    // latin1 会话把送进去的 UTF-8 逐字节当 latin1、再转存成 utf8，中文名恒不命中。
+    set_names(d, db_cs_name(d->charset));
     char *e = mysql_escape(name);
     Str s = {0};
     MyResult r = {0};
@@ -223,7 +225,6 @@ int db_find_mid(Db *d, const char *name, u32 *mid, Err err) {
     else snprintf(err, ERRBUF, "%s", d->err);
     my_free(&r);
     str_free(&s);
-    set_names(d, "utf8");
     return ok;
 }
 
@@ -889,7 +890,7 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
 //    都是 AUTO_INCREMENT，照搬原值要么撞主键、要么把新行挂到旧角色名下。
 //    跳过后由服务端发号，新 charac_no 用 LAST_INSERT_ID() 取回。
 // 2) charac_name 是唯一键，必须改名。截断在服务端用 LEFT 做（按字符数，
-//    中文不会被砍半），写回和 db_set_name 一样走 latin1 连接，保持同一约定。
+//    中文不会被砍半），改名跟 db_set_name 一样用配置的字符集（db_cs_name）。
 // 3) 账号共享表（account_cargo / member_dungeon）不复制——它们按 m_id 归属，
 //    复制等于凭空多出一份账号金库。
 typedef struct {
@@ -1046,7 +1047,10 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
 
     // 1) charac_info：charac_no 是自增列会被跳过，唯一要覆盖的就是 charac_name
     {
-        set_names(d, "latin1");          // 与 db_set_name 同一约定：latin1 连接写 UTF-8 字节
+        // 字符集跟读路径一致（db_cs_name），别再手工切 latin1：表达式里的字面量会
+        // 在 latin1 会话下被当成「UTF-8 字节 = latin1 字符」再转存成 utf8，落库就是
+        // 双重编码；column 上限还按字符算，5 个汉字就超 varchar(20)。
+        set_names(d, db_cs_name(d->charset));
         char *e = mysql_escape(cand);
         char expr[160];
         snprintf(expr, sizeof(expr), "'%s'", e ? e : "");
@@ -1055,7 +1059,6 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
         u64 aff = 0;
         int ret = clone_rows(d, "taiwan_cain", "charac_info", "charac_no", c->no, NULL,
                              ovr, 1, &aff, err);
-        set_names(d, "utf8");
         if (ret != 1 || aff != 1) {
             if (ret == 1)
                 snprintf(err, ERRBUF, "复制 charac_info 影响了 %llu 行（应为 1）",
@@ -1207,7 +1210,7 @@ void db_quest_tpl_path(char *out, int cap, const Charac *c) {
 }
 
 int db_export_quest(Db *d, const Charac *c, const char *path, Err err) {
-    set_names(d, "utf8");
+    set_names(d, db_cs_name(d->charset));
     Str out = {0};
     char ts[32];
     now_str(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S");

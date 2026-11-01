@@ -634,6 +634,12 @@ void app_connect(void) {
     job_start(&g.job_conn, w_connect, NULL);
 }
 
+// 「排队动作」和「待载入」两组状态：队列本体（g_pq）和载入上下文定义在下面的
+// 「角色」「通用异步动作」两段里，但断开时要连这两个计数一起清，所以先声明在这里
+// （搬上来的话，得把 PEND_BUF / PEND_N 和 g_pq 一起挪）。
+static int s_load_want;                  // 想载入但连接正忙：等空闲了再发
+static int g_pq_head, g_pq_n;            // 环形：head 出队，n 排队数
+
 void app_disconnect(void) {
     // 先等占用这条连接的作业退出，再关连接。
     // db_close 会 free 收发包缓冲并关掉 socket，而 w_write / w_load / w_poll 此刻
@@ -644,6 +650,12 @@ void app_disconnect(void) {
     job_stop(&g.job_act);
     job_stop(&g.job_poll);
     job_stop(&g.job_bubble);
+    // 队列里排着的是「旧连接上的意图」：断开的语义是丢掉所有还没开始的动作，
+    // 而不是让它们对着已经关掉的连接逐个跑一遍 —— 那样每 200ms 弹一条
+    // 「xxx 失败：未连接」，把「已断开数据库」这行正常提示盖掉；重连快的话，
+    // 剩下的动作还会拿断开前的快照打进新连接。
+    g_pq_n = g_pq_head = 0;
+    s_load_want = 0;
     if (g.db_ok) db_close(&g.db);
     g.lists_ready = 0;
     g.db_ok = 0;
@@ -791,7 +803,6 @@ void app_grab_auto(int on) {
 }
 
 // ---------------- 角色 ----------------
-static int s_load_want;        // 想载入但连接正忙：等空闲了再发
 
 // 载入写进 g_load_ctx.d 而不是直接写 g.data：
 // db_load_data 第一件事就是 db_free_data(out)，也就是先 free 掉 6 个 blob 再重填。
@@ -978,7 +989,6 @@ static struct {
     int    sz;
     unsigned char buf[PEND_BUF];
 } g_pq[PEND_N];
-static int g_pq_head, g_pq_n;            // 环形：head 出队，n 排队数
 
 static int act_start(const char *what, ActFn fn, void *ctx, int ctxsz) {
     snprintf(g.act_what, sizeof(g.act_what), "%s", what);

@@ -38,6 +38,11 @@ static int  s_scan_chars;        // 本次扫到的角色数
 static int  s_scan_busy;         // 后台任务在跑（扫描或清除）
 static int  s_phase;             // 0=扫描完成 1=清除完成、待复扫
 static int  s_scan_open;         // 扫完自动弹窗（首次点按钮时）
+// 作业真的还在写 s_scan：由作业线程收尾时自己清零。
+// s_scan_busy 不能代替它 —— 关窗时 WM_DESTROY 会把 busy 清零（那是给入口用的），
+// 而作业可能还在往 s_scan 里追加；job_running(&g.job_act) 也不能代替它 ——
+// 那个槽位会被别的动作复用。
+static volatile LONG s_scan_live;
 static HWND s_slv, s_sinfo;
 
 // 职业/觉醒都做成下拉：值→文字，避免让人对着裸数字猜
@@ -172,7 +177,7 @@ static u32 s_fill_gen = 0xFFFFFFFFu;
 static void gm_reload(Page *p) {
     (void)p;
     // 首次点「全服清错误物品」后，扫描在后台跑；完成时这里自动弹出结果
-    if (s_scan_open && s_scan_busy && !job_running(&g.job_act)) {
+    if (s_scan_open && s_scan_busy && !s_scan_live) {
         s_scan_open = 0;
         s_scan_busy = 0;
         scan_show();
@@ -333,28 +338,43 @@ static u32 scan_stack_lim(u32 id, void *ctx) {
 
 static int scan_work(void *ctx, Err err) {
     (void)ctx;
-    return db_scan_bad(&g.db, &s_scan, &s_scan_chars, scan_has_name, scan_stack_lim, NULL, err);
+    int ok = db_scan_bad(&g.db, &s_scan, &s_scan_chars, scan_has_name, scan_stack_lim, NULL, err);
+    // 收尾自己放开闸：窗口关掉之后没有 WM_TIMER 来收，外面谁也判断不了它是否还在
+    // 往 s_scan 里追加，只有这里知道「这一轮确实写完了」。
+    InterlockedExchange(&s_scan_live, 0);
+    return ok;
 }
 
 static int purge_work(void *ctx, Err err) {
     (void)ctx;
     int done = 0;
     db_purge_bad(&g.db, &s_scan, &done, err);
+    InterlockedExchange(&s_scan_live, 0);       // 同上：清除也会改写 s_scan
     app_log("清除错误物品 · 完成 %d 处", done);
     return 1;
 }
 
 static void scan_run(void) {
     s_scan_busy = 1;
-    app_act("全服扫描", scan_work, NULL);
+    InterlockedExchange(&s_scan_live, 1);
+    if (!app_act("全服扫描", scan_work, NULL)) {     // 没提交出去：闸不能留着，否则这页再也扫不了
+        InterlockedExchange(&s_scan_live, 0);
+        s_scan_busy = 0;
+    }
 }
 
-static void scan_start(void) {
+static int scan_start(void) {
+    // 关窗时 WM_DESTROY 会把 s_scan_busy 清零（否则入口永远回「上一轮还没跑完」），
+    // 但作业可能还在 db_scan_bad 里往这个 Vec 追加。这时 s_scan.n=0 就是两个线程
+    // 同时改 n，而且可能一边追加、一边 xrealloc 换缓冲，写到已经释放的旧块上。
+    // s_scan_live 是唯一可靠信号：它只由作业线程在收尾时清。
+    if (s_scan_live) { app_info("上一轮还没跑完，等它结束再扫。"); return 0; }
     if (!s_scan.cap) vec_init(&s_scan, sizeof(ScanRow));
     s_scan.n = 0;
     s_scan_chars = 0;
     app_status("正在扫描全服…");
     scan_run();
+    return 1;
 }
 
 static void on_scanbad(void) {
@@ -363,8 +383,8 @@ static void on_scanbad(void) {
     if (!app_confirm("扫描全服所有角色的容器、邮件、时装、宠物，找出错误物品？\n\n"
                      "角色较多时需要一点时间。"))
         return;
-    scan_start();
-    s_scan_open = 1;             // 扫完自动弹窗
+    // 没真的提交出去就别置「扫完自动弹窗」，否则 gm_reload 会拿着一份旧结果弹窗
+    if (scan_start()) s_scan_open = 1;
 }
 
 static void scan_fill(void) {
@@ -390,7 +410,7 @@ static LRESULT scan_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
     (void)lp;
     (void)ctx;
     if (m == WM_TIMER) {
-        if (s_scan_busy && !job_running(&g.job_act)) {
+        if (s_scan_busy && !s_scan_live) {
             s_scan_busy = 0;
             if (s_phase) {                       // 清除完，自动复扫一遍看结果
                 s_phase = 0;
@@ -410,7 +430,8 @@ static LRESULT scan_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
         // 清成 0 —— 于是 s_scan_busy 再也回不到 0，入口（on_scanbad / 6002 / 6003）
         // 此后一律回「上一轮还没跑完」，全服清错误物品整页废掉，直到重启进程。
         // 关窗时若作业还在跑，就让它照旧在后台把库改完 —— 这里放弃的只是
-        // 「等它跑完再填列表」这件事，不能连入口一起锁死。
+        // 「等它跑完再填列表」这件事，不能连入口一起锁死。作业还活着这件事由
+        // s_scan_live 记住，scan_start / 6002 会据此拒绝复用 s_scan。
         s_scan_busy = 0;
         s_phase = 0;
         s_scan_open = 0;
@@ -419,7 +440,7 @@ static LRESULT scan_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
     if (m == WM_COMMAND) {
         switch (LOWORD(wp)) {
         case 6002:                               // 清除全部
-            if (s_scan_busy) return 0;
+            if (s_scan_busy || s_scan_live) return 0;     // 同上：别跟还在追加的作业抢 s_scan
             if (!s_scan.n) { app_info("没有需要清除的记录。"); return 0; }
             if (!app_confirm(fmt_new("清除全部 %d 处错误物品？\n\n"
                                      "容器槽位写成空槽（原数据自动备份到 config/backup），\n"
@@ -427,13 +448,18 @@ static LRESULT scan_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
                 return 0;
             s_phase = 1;
             s_scan_busy = 1;
-            app_act("清除错误物品", purge_work, NULL);
+            InterlockedExchange(&s_scan_live, 1);
+            if (!app_act("清除错误物品", purge_work, NULL)) {
+                InterlockedExchange(&s_scan_live, 0);
+                s_scan_busy = 0;
+                s_phase = 0;
+                return 0;
+            }
             ui_text(s_sinfo, "正在清除…完成后自动重新扫描。");
             return 0;
         case 6003:                               // 重新扫描
             if (s_scan_busy) return 0;
-            scan_start();
-            ui_text(s_sinfo, "正在扫描…");
+            if (scan_start()) ui_text(s_sinfo, "正在扫描…");
             return 0;
         }
     }
