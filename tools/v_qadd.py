@@ -60,7 +60,7 @@ e0 = db_exp(CNO)
 l0 = l0_orig
 # 上限改成 85 了，而库里这个号可能停在旧测试留下的 100：先压回一个正常值，
 # 否则一上来「+10」就撞上限，测的是另一条分支。还原仍按原值 l0_orig。
-if l0 > LEV_MAX or l0 < 1:
+if l0 >= LEV_MAX or l0 < 1:
     cur.execute("UPDATE taiwan_cain.charac_info SET lev=70 WHERE charac_no=%d" % CNO)
     db.commit()
     l0 = 70

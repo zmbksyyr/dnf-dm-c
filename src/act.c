@@ -98,7 +98,7 @@ static int char_do(void *ctx, Err err) {
                 return 0;
             }
             return db_set_name(&g.db, &who, c->s, err);
-        case K_LEV: return db_set_lev(&g.db, &who, c->i1, (u32)c->u1, err);
+        case K_LEV: return db_set_lev(&g.db, &who, c->i1, (i64)c->u1, err);
         case K_MONEY: return db_set_money(&g.db, &who, c->u1, err);
         case K_COIN: return db_set_coin(&g.db, &who, c->u1, err);
         case K_CERA: return db_set_cera(&g.db, &who, c->u1, c->u2, err);

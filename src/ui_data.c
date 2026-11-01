@@ -788,18 +788,23 @@ static void log_load(void) {
         ui_text(l_info, "今天还没有日志文件");
         return;
     }
-    size_t start = b.n > 100000 ? b.n - 100000 : 0;
-
     // 文件是顺序追写的，直接顺下来就是「最早那条在最上面」，看日志等于每次都要拖到
-    // 最后。倒着拼：先把行首偏移收一遍（倒着走才知道每段到哪收尾），再从后往前取。
+    // 最后。倒着拼：先把每一行的起点收一遍（倒着走才知道每段到哪收尾），再从后往前取。
+    // 按「行数」截，不是按字节：中文 UTF-8 日志里字节数对行数没有直观意义。
+    enum { LOG_MAX_LINES = 5000 };
     Vec ln;
     vec_init(&ln, sizeof(size_t));
-    *(size_t *)VEC_ADD(&ln, size_t) = start;
-    for (size_t i = start; i + 1 < b.n; i++)
+    *(size_t *)VEC_ADD(&ln, size_t) = 0;       // 第一行从 0 开始
+    for (size_t i = 0; i + 1 < b.n; i++)
         if (b.p[i] == '\n') *(size_t *)VEC_ADD(&ln, size_t) = i + 1;
+    // 保留最近 LOG_MAX_LINES 行；行数没超就全显。start 是这段的起点偏移。
+    size_t start = (ln.n > LOG_MAX_LINES)
+                   ? *(size_t *)VEC_AT(&ln, size_t, (size_t)(ln.n - LOG_MAX_LINES)) : 0;
 
     Str s = {0};
-    for (int k = ln.n - 1; k >= 0; k--) {
+    // 只从「最近 LOG_MAX_LINES 行」的起点往回拼，更早的记录不显示（截断已在 l_info 明说）。
+    int from = (ln.n > LOG_MAX_LINES) ? (ln.n - LOG_MAX_LINES) : 0;
+    for (int k = ln.n - 1; k >= from; k--) {
         size_t at = *(size_t *)VEC_AT(&ln, size_t, k);
         size_t to = (size_t)(k + 1 < ln.n ? *(size_t *)VEC_AT(&ln, size_t, k + 1) : b.n);
         // 行尾的 \r\n 都剥掉再统一补 \r\n —— 只减 1 会把上一行的 \r 留在
@@ -816,9 +821,15 @@ static void log_load(void) {
     str_free(&s);
     vec_free(&ln);
     buf_free(&b);
-    // 只显示文件名，绝对路径太长会把按钮挤走
+    // 截断对用户是静默的：不说明他会以为自己看全了当天所有操作记录。
     const char *nm = strrchr(path, '\\');
-    ui_text(l_info, nm ? nm + 1 : path);
+    char info[256];
+    if (ln.n > LOG_MAX_LINES)
+        snprintf(info, sizeof(info), "%s · 共 %d 行（显示最近 %d 行）",
+                 nm ? nm + 1 : path, (int)ln.n, LOG_MAX_LINES);
+    else
+        snprintf(info, sizeof(info), "%s · 共 %d 行", nm ? nm + 1 : path, (int)ln.n);
+    ui_text(l_info, info);
 }
 
 static void log_reload(Page *p) {
@@ -873,6 +884,10 @@ static void log_build(Page *p, HWND parent) {
     l_text = ui_make(parent, L"EDIT", L"",
                      WS_BORDER | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
                      WS_EX_CLIENTEDGE, L_TEXT);
+    // 日志文件按天追加，一天就过百 KB。标准 EDIT 控件的文本上限默认只有几十 KB，
+    // 不在这里提上限的话，下面算出来的「显示末尾 N 行」会在控件层被静默截断，
+    // 而且没有任何报错——看起来改对了，实际只显示了一部分。提到一个明显够大的值。
+    SendMessageW(l_text, EM_LIMITTEXT, (WPARAM)4000000, 0);
     l_info = ui_label(parent, "", L_INFO);
     l_sep = ui_hline(parent);
     ui_button(parent, "刷新", L_REFRESH);

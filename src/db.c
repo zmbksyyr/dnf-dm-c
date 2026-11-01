@@ -1017,6 +1017,8 @@ int db_set_lev(Db *d, const Charac *c, int lev, i64 exp, Err err) {
     if (!db_exec(d, "改等级", "taiwan_cain.charac_info", "charac_no", c->no, err,
                  "UPDATE taiwan_cain.charac_info SET lev=%d WHERE charac_no=%u", lev, c->no))
         goto fail;
+    // exp 来自 Ctx.u1（u64，恒为 0），不可能为负；exp>=0 恒真，仅作防御。
+    // 见 db.h：要"保留经验"不能靠传负，应另加标志位。
     if (exp >= 0 && !db_exec(d, "改经验", "taiwan_cain.charac_stat", "charac_no", c->no, err,
                              "UPDATE taiwan_cain.charac_stat SET exp=%llu WHERE charac_no=%u",
                              (unsigned long long)exp, c->no))
