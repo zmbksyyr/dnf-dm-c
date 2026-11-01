@@ -773,7 +773,7 @@ void page_quest_create(Page *p) {
 }
 
 // ================================================================ 日志页
-enum { L_TEXT = PAGE_ID(PAGE_LOG, 1), L_REFRESH, L_CLR, L_INFO };
+enum { L_TEXT = PAGE_ID(PAGE_LOG, 1), L_REFRESH, L_CLR, L_INFO, L_CFGCLR };
 
 static HWND l_text, l_info;
 static HWND l_sep;
@@ -845,10 +845,23 @@ static void log_reload(Page *p) {
     log_load();
 }
 
+// 清除配置并退出：先确认，再删掉 <exe>/config（含设置/缓存/日志/备份），最后退出。
+// 正常右上角 X 退出不处理（配置照常保留）；真正删除由 app_shutdown 在退出最后一步执行，
+// 避免删除后又被退出保存把 settings.ini 重建出来。
+static void on_cfg_clear_exit(void) {
+    char dir[MAX_PATH];
+    app_config_dir(dir, sizeof(dir));
+    if (!app_confirm(fmt_new("将删除以下目录及其全部内容并退出程序：\n%s\n\n"
+                             "包含设置、PVF 缓存、日志、备份等所有本地文件，此操作不可恢复。确定？", dir)))
+        return;
+    app_clear_config_and_exit();
+}
+
 static LRESULT log_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     (void)p;
     (void)lp;
     if (m != WM_COMMAND) return -1;
+    if (LOWORD(wp) == L_CFGCLR) { on_cfg_clear_exit(); return 0; }
     if (LOWORD(wp) == L_REFRESH) { log_load(); return 0; }
     if (LOWORD(wp) == L_CLR) {
         if (!app_confirm("清空今天的日志？")) return 0;
@@ -869,6 +882,7 @@ static void log_layout(Page *p, int w, int h) {
     ui_row(&r, p->wnd, pad, pad, rowh);
     ui_add(&r, ui_btn_at(p->wnd, L_REFRESH, "刷新"), ui_scale(60));
     ui_add(&r, ui_btn_at(p->wnd, L_CLR, "清空"), ui_scale(60));
+    ui_add(&r, ui_btn_at(p->wnd, L_CFGCLR, "清除配置并退出"), ui_scale(130));
     ui_add(&r, l_info, -1);
     int ly = pad + rowh + ui_scale(4);
     ui_place(l_sep, pad, ly, w - pad * 2, ui_scale(2));
@@ -892,6 +906,7 @@ static void log_build(Page *p, HWND parent) {
     l_sep = ui_hline(parent);
     ui_button(parent, "刷新", L_REFRESH);
     ui_button(parent, "清空", L_CLR);
+    ui_button(parent, "清除配置并退出", L_CFGCLR);
 }
 
 void page_log_create(Page *p) {

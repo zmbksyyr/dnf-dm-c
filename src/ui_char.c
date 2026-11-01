@@ -965,7 +965,7 @@ static void gm_layout(Page *p, int w, int h) {
 
     int wL[3], wR[3];
     for (int i = 0; i < 3; i++) wL[i] = padY + 2 * natF;
-    wL[1] = padY + 3 * natF;        // 资产组三行（多了 VIP），按行数给高才不会挤成一团
+    wL[1] = padY + 3 * natF;        // 资产组三行（金币 / 账号金币+VIP / 点券）
     wL[2] = padY + 3 * natF;        // PVP 组也三行（段位/胜场/胜点纵向排）
     wR[0] = padY + rowsOnce * natB;
     wR[1] = padY + COUNT_OF(kAcct) * natB;
@@ -1163,7 +1163,7 @@ static void gm_build(Page *p, HWND parent) {
     // 提示必须把这两点说清（留 0 = 不改），否则用户会以为框里应该显示当前值。
     // 上限写进提示：不同端封顶不同，写死「1~100」会让人以为能填到 100
     ui_tip(parent, c_lev,
-           fmt_new("填「设成几级」（1~%d，上限在 settings.ini 的 [gm] lev_max），"
+           fmt_new("填「设成几级」（1~%d，上限由配置文件 settings.ini 的 [gm] lev_max 决定，默认 85），"
                    "点到别处按这个数写库、经验清零，框随即回 0。"
                    "留 0 = 不改；要往上加几级用右边 +10。当前等级看左边角色信息",
                    gm_lev_max()));

@@ -148,6 +148,9 @@ void app_drop_queued(void);
 // 日志：先攒在内存里，1s 或 8KB 落一次盘（按天分文件）
 void app_log_flush(void);
 void app_log_path(char *out, int cap);
+void app_config_dir(char *out, int cap);          // <exe>/config（清除配置用）
+void app_cfg_save(void);                          // 把内存设置落盘（settings.ini）
+void app_clear_config_and_exit(void);             // 标记清除配置并退出程序
 
 // 连接 / 角色 / 数据
 void app_connect(void);

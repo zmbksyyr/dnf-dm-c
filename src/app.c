@@ -1543,6 +1543,65 @@ void app_quest_import(const char *path) {
     app_act("导入任务模版", w_quest_import, &g_dbc);
 }
 
+// ---------------- 清除配置并退出 ----------------
+// 目标目录由代码构造（exe_dir + "config"），没有用户输入，天然可信；
+// 仍加「以 config 结尾 + 前导分隔符」双重守卫，杜绝误删 exe 目录或其它盘。
+static int s_clear_exit = 0;
+
+void app_config_dir(char *out, int cap) {
+    char d[MAX_PATH];
+    exe_dir(d, sizeof(d));
+    path_join(out, cap, d, "config");
+}
+
+void app_cfg_save(void) {
+    cfg_save(&g.cfg, g.cfg_path);
+}
+
+// 递归删除 dir 下所有文件与子目录；dir 自身最后删。仅用于「清除配置退出」。
+static int rm_tree(const char *dir) {
+    char pat[MAX_PATH];
+    path_join(pat, sizeof(pat), dir, "*");
+    WCHAR wp[MAX_PATH];
+    utf16(pat, wp, MAX_PATH);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(wp, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 1;        // 空或不存在：视为已删
+    int ok = 1;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        char name[MAX_PATH];
+        utf8(fd.cFileName, name, sizeof(name));
+        char full[MAX_PATH];
+        path_join(full, sizeof(full), dir, name);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            ok &= rm_tree(full);
+        else if (!DeleteFileA(full))
+            ok = 0;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (!RemoveDirectoryA(dir)) ok = 0;
+    return ok;
+}
+
+static int app_remove_config_dir(void) {
+    char dir[MAX_PATH];
+    app_config_dir(dir, sizeof(dir));
+    int n = (int)strlen(dir);
+    if (n < 7) return 0;                            // 太短，绝不删
+    if (!str_ieq(dir + n - 6, "config")) return 0;  // 必须以 config 结尾
+    if (dir[n - 7] != '\\' && dir[n - 7] != '/') return 0;
+    if (dir_exists(dir)) return rm_tree(dir) ? 1 : 0;
+    return 1;                                       // 不存在即视为已清
+}
+
+void app_clear_config_and_exit(void) {
+    // 走 WM_CLOSE 链路：main.c 的 WM_CLOSE 会先收尾未决写库，再调 app_shutdown，
+    // 后者在末尾删除 config。直接 PostQuitMessage 会绕过 app_shutdown， config 删不掉。
+    s_clear_exit = 1;
+    PostMessageW(g_main, WM_CLOSE, 0, 0);
+}
+
 // ---------------- 生命周期 ----------------
 void app_init(void) {
     InitializeCriticalSection(&s_log_cs);
@@ -1588,7 +1647,8 @@ void app_init(void) {
 }
 
 void app_shutdown(void) {
-    cfg_save(&g.cfg, g.cfg_path);            // 与连接无关，退出前一定要做
+    if (!s_clear_exit)
+        cfg_save(&g.cfg, g.cfg_path);        // 与连接无关，退出前一定要做（清除模式跳过）
     // 退出没有「稍后再试」这一说，所以正确语义是「让退出变得安全」，而不是像断开
     // 那样拒绝并提示：把 8 个作业全停一遍，只要有任何一个 30 秒没等到，下面那整段
     // 释放就跳过 —— db_undo_flush 还要用这条连接读写，db_free_data 收的是作业线程
@@ -1609,8 +1669,12 @@ void app_shutdown(void) {
         act_free();                              // 列表暂存 Vec
         if (g.db_ok) db_close(&g.db);
     }
-    app_log("退出");
-    app_log_flush();
+    if (!s_clear_exit) {
+        app_log("退出");
+        app_log_flush();
+    }
+    if (s_clear_exit)
+        app_remove_config_dir();             // 最后一步：删掉 config，之后不再有任何写
     if (s_log_cs_ok) { DeleteCriticalSection(&s_log_cs); s_log_cs_ok = 0; }
 }
 
