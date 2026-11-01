@@ -140,8 +140,9 @@ static void gm_kick(void) {
 void page_gm_pump(void) { gm_kick(); }
 
 // 断开/重连时由 app_drop_queued() 调：把本页「还没开始」的东西全部放下。
-// 这里能放心清 s_scan_live，是因为调用点已经确认所有作业线程都停了 ——
-// 还在跑的那种情况 app_disconnect 会整个取消，根本走不到这儿。
+// 这里能放心清 s_scan_live，是因为调用点（app_disconnect）已经确认共用那条连接的
+// 作业都停了（stop_db_jobs）—— 还在跑的那种情况 app_disconnect 会整个取消，
+// 根本走不到这儿。（pvf/npk/grab 那三个作业不停，但它们不碰本页这把闸。）
 static void gm_drop(void) {
     s_gmq_n = 0;                       // 页面写队列：属于旧连接的意图
     InterlockedExchange(&s_scan_live, 0);

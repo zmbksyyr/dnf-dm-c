@@ -920,9 +920,11 @@ typedef struct {
     char why[160];    // 为什么这么判，日志用
 } CloneKey;
 
+// has_keycol = 表里有没有 keycol 这一列（调用方已经算过，顺手传进来：无主键时
+// 主键列一个都没有，光看主键判不出「这张表按不按 charac_no 归属」）。
 // 返回 1 = 判定完成（*k 已填）；0 = 读主键失败（err 已填）
 static int clone_key_policy(Db *d, const char *dbn, const char *tb, const char *keycol,
-                            CloneKey *k, Err err) {
+                            int has_keycol, CloneKey *k, Err err) {
     memset(k, 0, sizeof(*k));
     Str q = {0}, pk = {0};
     MyResult r = {0};
@@ -960,16 +962,36 @@ static int clone_key_policy(Db *d, const char *dbn, const char *tb, const char *
     if (!ok) return 0;
 
     if (!npk) {
-        k->kind = CK_SKIP_TABLE;
-        snprintf(k->why, sizeof(k->why), "没有主键，复制过去只会多出一份重复行");
+        // 无主键不等于「复制过去只会多出一份重复行」—— 那句老注释跟实际相反：
+        // 两张无主键表 taiwan_cain_2nd.user_items_work（ui_id,charac_no,slot,…）
+        // 和 taiwan_cain.test_sooya（m_id,charac_no,lev）都按 charac_no 逐行归属，
+        // 换号插入得到的是新角色自己的行；没有主键反而意味着撞不了任何键。
+        // 真正会复制出重复行的是不透明主键（投递哈希那类，见下面的 opaque 分支）。
+        if (has_keycol) {
+            k->kind = CK_RECODE;
+            snprintf(k->why, sizeof(k->why), "无主键（按 %s 归属），换成新角色号复制", keycol);
+        } else {
+            k->kind = CK_SKIP_TABLE;
+            snprintf(k->why, sizeof(k->why), "无主键且不含 %s，复制出来是无主的重复行", keycol);
+        }
     } else if (nai && npk == 1) {
         k->kind = CK_SKIP_COL;
         snprintf(k->why, sizeof(k->why), "单列自增主键，交给服务端发号");
     } else if (nai) {
-        // 复合主键里含自增列：只跳这一列，剩下的列还是源角色的组合，
-        // 换个角色号也躲不开撞键（同一个自增列值 + 同一个组合），整表不复制更清楚
-        k->kind = CK_SKIP_TABLE;
-        snprintf(k->why, sizeof(k->why), "复合主键(%s)里含自增列，跳一列会落进错误组合", k->pk);
+        // 复合主键里含自增列：自增列照 clone_rows 的现有逻辑整列跳过（服务端发号），
+        // 新发出来的号在本表里从未出现过，所以「同一个自增列值 + 同一个组合」这种
+        // 撞法不会发生——老注释那个理由是错的。剩下只看主键里有没有 charac_no：
+        //   有 → 换成新角色号就是新角色自己的行
+        //   没有 → 这张表的键与角色无关，换号也躲不开，才整表跳过
+        if (has_keycol) {
+            k->kind = CK_RECODE;
+            snprintf(k->why, sizeof(k->why), "复合主键(%s)含自增列也含 %s：自增列跳过、%s 换新号",
+                     k->pk, keycol, keycol);
+        } else {
+            k->kind = CK_SKIP_TABLE;
+            snprintf(k->why, sizeof(k->why), "复合主键(%s)含自增列且不含 %s：主键与角色无关",
+                     k->pk, keycol);
+        }
     } else if (have_key) {
         k->kind = CK_RECODE;
         snprintf(k->why, sizeof(k->why), "主键(%s)含 %s，换成新角色号", k->pk, keycol);
@@ -1032,7 +1054,7 @@ static int clone_rows(Db *d, const char *dbn, const char *tb, const char *keycol
         return 2;
     }
 
-    if (!clone_key_policy(d, dbn, tb, keycol, key, err)) {
+    if (!clone_key_policy(d, dbn, tb, keycol, have_key, key, err)) {
         vec_free_strs(&names);
         vec_free(&ais);
         return 0;

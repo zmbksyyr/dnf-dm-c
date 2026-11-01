@@ -935,7 +935,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 }
                 app_flush_pending();
             }
-            if (g.write_mask || job_running(&g.job_act)) job_stop(&g.job_act);
+            // job_act 不用在这里停：app_shutdown 里 8 个作业全停一遍，并且接住了
+            // 返回值。留着这句反而坏事——它只在「有写」时才等，没写就不等，
+            // app_shutdown 那边该等多久就变得没个准数；而且它的返回值同样是丢的。
             app_shutdown();
             DestroyWindow(h);
             return 0;

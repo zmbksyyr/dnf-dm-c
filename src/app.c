@@ -427,6 +427,11 @@ void app_flush_pending(void) {
             c->has[p] = 1;
         }
     }
+    // app_act 返回 1 有两种含义：「已启动」和「已排队」（app_act_n 在连接忙或队列
+    // 非空时走入队分支）。这里把 1 当「已经交给作业线程」用，靠的是本函数入口那句
+    // db_busy() 和 g_pq_n==0（队列只在 app_act_n 里涨）—— 于是 app_act 必然走
+    // act_start，不会排队。这个前提一旦破了（比如在 pend 路径上让动作排了队），
+    // 下面那句 w_ctx_free(c) 就是把作业线程马上要读的 g_warg.c 提前释放：悬垂指针。
     g_warg.c = c;
     if (!packed || !app_act("写入容器", w_write, &g_warg)) {
         w_ctx_free(c);
@@ -647,7 +652,27 @@ void app_connect(void) {
 // 「角色」「通用异步动作」两段里，但断开时要连这两个计数一起清，所以先声明在这里
 // （搬上来的话，得把 PEND_BUF / PEND_N 和 g_pq 一起挪）。
 static int s_load_want;                  // 想载入但连接正忙：等空闲了再发
+// 载入前要不要先把 name/job/grow/lev 从库里读回来（UI 线程置 1，载入作业取走）。
+// 跨线程所以用 Interlocked：和 s_reload_later 同一套写法。
+static volatile LONG s_load_recheck;
 static int g_pq_head, g_pq_n;            // 环形：head 出队，n 排队数
+
+// 「断开」和「退出」在关连接之前都要先等这批作业停下来：它们共用同一条 MySQL
+// 连接（db_busy 那一份），紧接着的 db_close / db_free_data 释放的正是它们手里的
+// 收发包缓冲和容器 blob —— job_stop 的注释就是为这件事写的。
+// 抽成一份，是为了两边永远同步：以前断开只停 4 个、漏了 job_conn（连接作业正在
+// db_open/select 时点断开，db_close 就撞上它的收发包缓冲），以后新增作业也不会
+// 再漏第二次。
+// 只列用这条连接的 5 个：pvf / npk / grab 只读游戏进程内存，不必等它们
+// （退出那一段仍然全停，但那是「进程要走了」，不是连接安全的需要）。
+static int stop_db_jobs(void) {
+    int stopped = job_stop(&g.job_conn);
+    stopped &= job_stop(&g.job_load);
+    stopped &= job_stop(&g.job_act);
+    stopped &= job_stop(&g.job_poll);
+    stopped &= job_stop(&g.job_bubble);
+    return stopped;
+}
 
 void app_disconnect(void) {
     // 先等占用这条连接的作业退出，再关连接。
@@ -658,10 +683,7 @@ void app_disconnect(void) {
     //
     // 等不到就不能往下走：全服扫描、整库备份/还原在真实库上轻易超过 30 秒，
     // job_stop 超时后线程仍在跑，接着 db_close 就是一边 free 一边 recv。
-    int stopped = job_stop(&g.job_load);
-    stopped &= job_stop(&g.job_act);
-    stopped &= job_stop(&g.job_poll);
-    stopped &= job_stop(&g.job_bubble);
+    int stopped = stop_db_jobs();
     if (!stopped) {
         app_status("后台任务还在跑，稍后再断开（连接没有关）");
         app_log("断开取消：后台任务 30 秒内没有退出，连接与队列都保留");
@@ -830,6 +852,15 @@ void app_grab_auto(int on) {
 // 用一块暂存区就没有这个问题——g.data 在交换之前一直是完整可用的旧快照。
 static int w_load(void *ctx, Err err) {
     LoadCtx *c = (LoadCtx *)ctx;
+    // 回滚/重载要用库里的真值当快照：db_load_data 的 SELECT 里没有 charac_name
+    // （lev/job/grow 也没有），光靠它重读一遍，名字永远回不来 —— 改名被拒时界面
+    // 就一直停在那个没写进库的重名上。回读失败就维持传进来的那份：一条小查询
+    // 不该把整个载入打挂。查询放在这里做是因为连接归载入作业独占，UI 线程不查库。
+    if (InterlockedExchange(&s_load_recheck, 0)) {     // 取走即清零
+        Err e = {0};
+        if (!db_read_charac(&g.db, c->c.no, &c->c, e))
+            app_log("重载：回读角色失败，按内存快照载入：%s", e);
+    }
     db_free_data(&c->d);                 // 上一轮失败留下的半成品
     return db_load_data(&g.db, &c->c, &c->d, err);
 }
@@ -869,7 +900,12 @@ void app_select_char(int idx) {
 
 void app_reload(void) {
     if (!g.char_ok) return;
+    // 写失败后的回滚要回到库里的真值，而不是内存里这份：改名/改等级是「先改快照、
+    // 再写库」（gm_apply 的乐观更新），失败时 g.cur 里躺的正是那个没写进库的值，
+    // 照它重读等于把假值再确认一次。所以让载入作业先回读 charac_info 再载入
+    // （s_load_recheck，见 w_load）—— 顺带把 lev/job/grow 一起纠正。
     g_load_ctx.c = g.cur;
+    InterlockedExchange(&s_load_recheck, 1);
     s_load_want = 1;
     load_kick();
 }
@@ -1061,9 +1097,11 @@ int app_act_idle(void) {
 // 每新增一个带页面队列的页都回来改 app.c，漏一次就是下一次 R3-00x；钩子在
 // 页面自己的 create 里注册，app.c 不认识页面名。
 //
-// 安全性来自调用时机：只有确认所有作业线程都停了（job_stop 返回 1）才会走到这里。
-// 也就是说钩子复位的一定是「死状态」，不会去清一个还在往 s_scan 里追加的作业
-// 手里的闸 —— 那是 R1-006 用 s_scan_live 挡住的那类 use-after-free。
+// 安全性来自调用时机：只有确认共用那条连接的作业都停了（stop_db_jobs 返回 1）
+// 才会走到这里。也就是说钩子复位的一定是「死状态」，不会去清一个还在往 s_scan 里
+// 追加的作业手里的闸 —— 那是 R1-006 用 s_scan_live 挡住的那类 use-after-free。
+// 注意这里说的只是「db 侧作业」：pvf / npk / grab 那三个不碰这条连接，也不持有
+// 页面队列，等不等它们都不影响钩子清的是什么。
 #define DROP_HOOKS 8
 static void (*s_drop_hook[DROP_HOOKS])(void);
 static int s_drop_hooks;
@@ -1524,24 +1562,29 @@ void app_init(void) {
 }
 
 void app_shutdown(void) {
-    cfg_save(&g.cfg, g.cfg_path);
-    job_stop(&g.job_conn);
-    job_stop(&g.job_load);
-    job_stop(&g.job_pvf);
-    job_stop(&g.job_poll);
-    job_stop(&g.job_act);
-    job_stop(&g.job_grab);
-    job_stop(&g.job_bubble);
-    job_stop(&g.job_npk);
-    db_undo_flush(1);                 // 本会话的写前快照落盘
+    cfg_save(&g.cfg, g.cfg_path);            // 与连接无关，退出前一定要做
+    // 退出没有「稍后再试」这一说，所以正确语义是「让退出变得安全」，而不是像断开
+    // 那样拒绝并提示：把 8 个作业全停一遍，只要有任何一个 30 秒没等到，下面那整段
+    // 释放就跳过 —— db_undo_flush 还要用这条连接读写，db_free_data 收的是作业线程
+    // 手里那 6 个 blob，db_close 收的是它的收发包缓冲，这时候「不释放」比「释放了
+    // 崩」正确：进程马上就结束，泄漏的那点内存交给 OS 回收，是可接受的代价。
+    int stopped = stop_db_jobs();
+    stopped &= job_stop(&g.job_pvf);
+    stopped &= job_stop(&g.job_grab);
+    stopped &= job_stop(&g.job_npk);
+    if (!stopped)
+        app_log("退出：有任务线程 30 秒未退出，跳过资源释放（连接与容器交给系统回收）");
+    if (stopped) {
+        db_undo_flush(1);                 // 本会话的写前快照落盘
+        pvf_close(&g.pvf);
+        npk_free(&g.npk);
+        db_free_data(&g.data);
+        db_free_data(&g_load_ctx.d);
+        act_free();                              // 列表暂存 Vec
+        if (g.db_ok) db_close(&g.db);
+    }
     app_log("退出");
     app_log_flush();
-    pvf_close(&g.pvf);
-    npk_free(&g.npk);
-    db_free_data(&g.data);
-    db_free_data(&g_load_ctx.d);
-    act_free();                              // 列表暂存 Vec
-    if (g.db_ok) db_close(&g.db);
     if (s_log_cs_ok) { DeleteCriticalSection(&s_log_cs); s_log_cs_ok = 0; }
 }
 
