@@ -34,7 +34,8 @@ db_load_data（db.c:655）的 SELECT 里既没有 charac_name 也没有 lev/job/
 
 旧版必红：A 与 C 两条。
 数据纪律：只建/删两个触发器，不动任何行；finally 里断言 charac_info 1 行、
-AUTO_INCREMENT=9919、laoxx 的 (name,HEX) 与 lev/job/grow 与改前一致。
+AUTO_INCREMENT 与跑前一致（不认死 9919——回归集跑完一轮它就被别的一次性脚本顶上
+去了，认死等于第二次跑永久假红）、laoxx 的 (name,HEX) 与 lev/job/grow 与改前一致。
 
     python tools/v_r4_levjob.py                      # 新版（应 0 失败）
     DNF_GM_BUILD=<旧版目录> python tools/v_r4_levjob.py   # 4df0a0c（应红）

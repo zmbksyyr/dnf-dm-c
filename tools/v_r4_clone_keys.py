@@ -17,7 +17,8 @@ R4-05（Minor）：复合主键含自增列这一支同样按 has_keycol 分。�
 克隆后断言新角色下有对应的 4 行，且 charac_no 被换成新号；然后删掉测试数据并断言还原。
 
 断言清单：
-  0) 起点：charac_info 1 行 / AI=9919 / laoxx 名字字节 / delivery 17 行全挂 charac_no=1
+  0) 起点：charac_info 1 行 / laoxx 名字字节 / delivery 17 行全挂 charac_no=1
+     （AUTO_INCREMENT 只跟跑前比，不认死 9919：回归集跑完一轮它就被顶上去了）
   1) 测试数据已插（每张 2 行，源角色的行）
   2) 克隆成功（新 charac_no）
   3) user_items_work：新角色 2 行，ui_id/it_id/slot 与源一致，charac_no 是新号
@@ -27,7 +28,8 @@ R4-05（Minor）：复合主键含自增列这一支同样按 has_keycol 分。�
   7) user_items_work 与 test_sooya 在日志里是「复制 N 行」，不是「跳过」
   8) 跳过的表里仍有 cera_shop_delivery_applied；delivery 仍 17 行、新角色 0 行
   9) 清理：删测试数据 + 删新角色 + 还原 charac_view 与自增计数器，
-     断言 77 张表行数全还原、charac_view 字节一致、AI=9919、laoxx 字节一致
+     断言 77 张表行数全还原、charac_view 字节一致、AUTO_INCREMENT 与跑前一致、
+     laoxx 字节一致
 
     python tools/v_r4_clone_keys.py
 """

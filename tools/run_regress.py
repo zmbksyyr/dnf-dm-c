@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""回归总入口：把四轮攒下来的 v_*.py 跑成一套，逐个记 rc + 失败项数，末尾出汇总表。
+"""回归总入口：把五轮攒下来的 v_*.py 跑成一套，逐个记 rc + 失败项数，末尾出汇总表。
 
     python tools/run_regress.py              # 跑「每次都跑」那一组（默认）
     python tools/run_regress.py --group all  # 连「需人工」那组一起跑
@@ -31,13 +31,14 @@ ALWAYS（自还原，可复现）
   v_pwd            只读控件属性 + SETTEXT 读回，不写库
   v_log            只读今天的日志文件与日志页文本比对
   v_pageall        逐个页签进一次再切回，只数控件的颜色种类
-  v_queue / v_qadd / v_stable / v_pollcard / v_browse
+  v_queue / v_stable / v_pollcard
                    都走 GM 页/发放页写路径，按 pages.first_char_no 认当前角色，
                    原值记下来跑完写回
+                   （v_qadd / v_browse 同类但已移到 MANUAL，理由见下）
   v_align / v_geom / v_left / v_top / v_tab / v_pages
                    纯量矩形，改布局后第一件该跑的东西
-  v_type / v_tasknum
-                   走 PVF 判定，只读发放页/邮件页的只读文本框
+  v_type           走 PVF 判定，只读发放页/邮件页的只读文本框
+                   （v_tasknum 同类但已移到 MANUAL，理由见下）
   v_r1_conn / v_r1_lists / v_r1_quest / v_r1_scan / v_r1_unlock
                    R1 的定向脚本，都用「第二条连接 LOCK TABLES」把意图变成可控量，
                    不靠 sleep 抢时序；改过的行在 finally 里按快照还原
@@ -51,15 +52,20 @@ ALWAYS（自还原，可复现）
                    brief 里写明的常设验收前提，不是随机状态
   v_r3_jobstop / v_r3_sticky / v_r4_connstop / v_r4_levjob / v_r4_name / v_r4_shutdown
                    都用「卡住作业 → 点断开/退出」的构造，锁释放后库回到原样
-
-## 一个已知的先后依赖（排这张表时踩到的）
-
-`v_r1_name` 会临时插一个角色再删掉，MySQL 的 `AUTO_INCREMENT` 因此从 brief 里的
-9919 涨到 9920。而 `v_r4_clone_keys` / `v_r4_levjob` 的起点断言写死
-`AUTO_INCREMENT=9919` —— 它们排在 `v_r1_name` 后面的话，整套跑下来必假红，
-**不是被测程序出问题，是顺序**。所以下面 ALWAYS 的次序是刻意排的：这两个放在最前，
-`v_r1_name` 放后面。整套跑完一轮再跑第二轮时，计数器已经停在 9920 了，用
-`--reset-ai` 把它拽回 9919（默认不拽：动自增计数器是一次 DDL，不静默替你做）。
+  v_r5_banchars / v_r5_mail / v_r5_mailsend / v_r5_online / v_r5_tsv
+                   R5 那五个页面的定向脚本。构造全是「第二条连接 LOCK TABLES 把意图
+                   变成可控量 + PROCESSLIST 里确认它真的在等」，不靠 sleep 抢时序；
+                   写库的那两个（mailsend 写 letter、online 改 login_status 与
+                   event_1306）都在 finally 里按快照还原并断言逐字节一致；
+                   tsv 那个只走发放队列和临时文件，不写库，文件对话框是用
+                   WM_SETTEXT + IDOK 驱动的，不需要真实输入桌面
+  v_r5_mailswap    同上，另外临时建一个角色（编号 9918，在自增计数器之下）再删掉，
+                   finally 里断言 charac_info 行数 / charac_view 字节 / AUTO_INCREMENT
+                   全部还原。它是唯一会打到「邮件查询在飞时切角色」这条补修分支的脚本
+  v_r5_log         只读日志页与日志文件，自己判定。有一条前提写在它自己第 0 条断言里：
+                   今天这份 log 得超过 100000 字节（ui_data.c 的显示上限）才能谈「被截」。
+                   日志按天轮转，早上刚开张那会儿不足这个数它会红 —— 那不是程序的问题，
+                   看见这条红先看一眼日志文件大小
 
 MANUAL（命中上面三条之一）
   v_hover          依赖真实鼠标停留 + PVF 旁的 ImagePacks2；本机光标被占时它标“跳过”
@@ -85,8 +91,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-# 顺序有讲究：两个克隆脚本认死 AUTO_INCREMENT=9919，必须排在 v_r1_name 之前
-# （v_r1_name 会临时建一个角色，把计数器顶到 9920）。详见文件头那段。
+# 顺序上唯一还需要讲究的是：会临时建角色、把 AUTO_INCREMENT 顶上去的脚本
+# （v_r1_name / v_r4_name / v_r5_mailswap）排在只做断言的后面，别让它们的副产物
+# 影响别人。两个克隆脚本早已不认死 9919（见文件头那段），所以整张表第二轮照跑。
 ALWAYS = [
     "v_r4_clone_keys", "v_r4_levjob",
     "v_selfcheck", "v_features", "v_gmwrite", "v_pwd", "v_log", "v_pageall",
@@ -96,6 +103,8 @@ ALWAYS = [
     "v_r2_charset", "v_r2_dlg", "v_r2_disc",
     "v_r3_clone", "v_r3_emoji", "v_r3_jobstop", "v_r3_sticky",
     "v_r4_connstop", "v_r4_name", "v_r4_shutdown",
+    "v_r5_banchars", "v_r5_mail", "v_r5_mailsend", "v_r5_online", "v_r5_tsv",
+    "v_r5_log", "v_r5_mailswap",
 ]
 
 MANUAL = [
@@ -138,6 +147,10 @@ GOOD_LINE = {
     "v_r1_lists":  re.compile(r"合计失败 \d+ 项"),
     "v_selfcheck": re.compile(r"已改回 letter"),
 }
+# R5 这批脚本的收尾行都是「合计失败 N 项」，逐条列一遍太占地方
+for _n in ("v_r5_banchars", "v_r5_log", "v_r5_mail", "v_r5_mailsend",
+           "v_r5_online", "v_r5_tsv", "v_r5_mailswap"):
+    GOOD_LINE[_n] = re.compile(r"合计失败 \d+ 项")
 
 
 def kill_stale():
@@ -183,7 +196,9 @@ def main():
     ap.add_argument("--only", action="append", default=[])
     ap.add_argument("--timeout", type=int, default=420)
     ap.add_argument("--reset-ai", action="store_true",
-                    help="跑之前把 charac_info 的 AUTO_INCREMENT 拽回 9919（见文件头注释）")
+                    help="跑之前把 charac_info 的 AUTO_INCREMENT 拽回 9919。"
+                         "现在没有脚本认死这个数了（见文件头注释），只在你想把库摆回 "
+                         "brief 里写的那个起点时才用；默认不拽：动自增计数器是一次 DDL")
     ap.add_argument("--logdir", default=os.path.join(ROOT, "..", "_pipeline",
                                                      "round-05", "regress-logs"))
     a = ap.parse_args()
