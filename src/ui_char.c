@@ -47,10 +47,10 @@ static HWND s_slv, s_sinfo;
 
 // 职业/觉醒都做成下拉：值→文字，避免让人对着裸数字猜
 // 职业名沿用参考工具（x/2026.3.14GMTOOL源码）的叫法：6 号职业叫「刺客」而不是「盗贼」
-static const char *kJobList[] = {"未转职", "鬼剑士", "格斗家", "神枪手", "魔法师", "圣职者",
-                                 "刺客",   "男法师", "缔造者", "黑暗武士", "影舞者"};
-static char kJobBuf[COUNT_OF(kJobList)][32];
-static const char *kJobLbl[COUNT_OF(kJobList)];
+// 职业数必须和 app_job_text 里的 kJ 列表一致（PVF 未加载时显示的就是那 11 个名）。
+enum { JOB_N = 11 };
+static char kJobBuf[JOB_N][32];
+static const char *kJobLbl[JOB_N];
 
 static const char *kGrowList[] = {"未觉醒", "一次觉醒", "二次觉醒", "三次觉醒", "四次觉醒"};
 
@@ -68,7 +68,7 @@ static void pvp_labels(void) {
 
 // PVF 里的职业名比内置表准，加载了就换过来
 static void job_labels(void) {
-    for (int i = 0; i < COUNT_OF(kJobList); i++) {
+    for (int i = 0; i < JOB_N; i++) {
         snprintf(kJobBuf[i], sizeof(kJobBuf[i]), "%s", app_job_text(i));
         kJobLbl[i] = kJobBuf[i];
     }
@@ -213,7 +213,7 @@ static void gm_reload(Page *p) {
     if (src != s_job_src) {
         s_job_src = src;
         job_labels();
-        ui_combo_fill(c_job, kJobLbl, COUNT_OF(kJobList), 0);
+        ui_combo_fill(c_job, kJobLbl, JOB_N, 0);
         s_refill = 1;
     }
     if (!g.char_ok) return;              // 没选角色：控件由 gm_lock 置灰，无需回填
@@ -223,7 +223,7 @@ static void gm_reload(Page *p) {
     // 交完框自己清回 0（见 gm_commit）。把当前值填进来会让人以为「框里是什么
     // 库里就是什么」，其实这框只管这一次的设定。当前值看左边角色信息。
     ui_set_int(c_lev, 0);
-    ui_combo_set(c_job, g.cur.job >= 0 && g.cur.job < COUNT_OF(kJobList) ? g.cur.job : 0);
+    ui_combo_set(c_job, g.cur.job >= 0 && g.cur.job < JOB_N ? g.cur.job : 0);
     ui_combo_set(c_grow, g.cur.grow >= 0 && g.cur.grow < COUNT_OF(kGrowList) ? g.cur.grow : 0);
     ui_set_i64(c_money, 0);
     ui_set_i64(c_coin, 0);
@@ -1076,7 +1076,7 @@ static void gm_build(Page *p, HWND parent) {
     ui_num(c_lev, 0, gm_lev_max());
     job_labels();
     c_job = ui_combo(parent, G_JOB, 1);
-    ui_combo_fill(c_job, kJobLbl, COUNT_OF(kJobList), 0);
+    ui_combo_fill(c_job, kJobLbl, JOB_N, 0);
     s_job_src = g.pvf_ok ? 1 : 0;       // 建页时已按当前来源填过，reload 不必重填
     c_grow = ui_combo(parent, G_GROW, 1);
     ui_combo_fill(c_grow, kGrowList, COUNT_OF(kGrowList), 0);

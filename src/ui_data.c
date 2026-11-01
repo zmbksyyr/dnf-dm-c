@@ -797,10 +797,6 @@ static void log_load(void) {
     *(size_t *)VEC_ADD(&ln, size_t) = 0;       // 第一行从 0 开始
     for (size_t i = 0; i + 1 < b.n; i++)
         if (b.p[i] == '\n') *(size_t *)VEC_ADD(&ln, size_t) = i + 1;
-    // 保留最近 LOG_MAX_LINES 行；行数没超就全显。start 是这段的起点偏移。
-    size_t start = (ln.n > LOG_MAX_LINES)
-                   ? *(size_t *)VEC_AT(&ln, size_t, (size_t)(ln.n - LOG_MAX_LINES)) : 0;
-
     Str s = {0};
     // 只从「最近 LOG_MAX_LINES 行」的起点往回拼，更早的记录不显示（截断已在 l_info 明说）。
     int from = (ln.n > LOG_MAX_LINES) ? (ln.n - LOG_MAX_LINES) : 0;
