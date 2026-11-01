@@ -257,5 +257,7 @@ int  db_import_quest(Db *d, const Charac *c, const char *path, int *tables, Err 
 // 角色克隆：把一个角色连同它的背包/装备/技能/任务等整份复制成一个新角色。
 // 全程在一个事务里，中途任何一步失败就整体回滚，不会留下半个角色。
 // out_name 回填新角色名（调用方拿去提示 / 刷新），out_no 回填新 charac_no。
+// log 可传 NULL；否则每张表的键策略（换号 / 发号 / 跳过）连同跳过原因追加进去，
+// 由调用方写进日志 —— 图层不碰 UI 的日志缓冲，但「新角色少了什么」必须说得出来。
 int  db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
-                   int *tables, u64 *rows, Err err);
+                   int *tables, u64 *rows, Str *log, Err err);

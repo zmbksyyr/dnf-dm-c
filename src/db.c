@@ -951,6 +951,18 @@ int db_name_taken(Db *d, const char *name, u32 except_no) {
 }
 
 int db_set_name(Db *d, const Charac *c, const char *name, Err err) {
+    // 4 字节 UTF-8（emoji、扩展区汉字）根本进不了 charac_name：列是
+    // varchar(20) CHARACTER SET utf8（mb3）。会话是 utf8mb4 + 非严格模式时
+    // MySQL 不报错，而是把那个字符换成 '?'，于是「改名 完成」的提示和库里
+    // 存的东西不是一回事；撞上已存在的同形名字还会弹一句与输入无关的 1062。
+    // 判首字节就够：>= 0xF0 只可能是 4 字节序列的头（续字节落在 0x80..0xBF）。
+    if (name)
+        for (const unsigned char *p = (const unsigned char *)name; *p; p++)
+            if (*p >= 0xF0) {
+                snprintf(err, ERRBUF,
+                         "名字里不能有 emoji 等 4 字节字符（charac_name 按 3 字节存）");
+                return 0;
+            }
     // 与读路径用同一个字符集（db_cs_name(s_cs)），别再手工切 latin1：
     // 那样写进去的是双重编码的乱码，工具自己下一次读都还原不回来；而且列上限
     // 按「字符」算，切到 latin1 后一个汉字占 3 个字符，7 个汉字（21 字节）就会被
@@ -958,12 +970,33 @@ int db_set_name(Db *d, const Charac *c, const char *name, Err err) {
     // 显式设一遍而不是「假定会话是对的」：邮件/管理员那几条路径会把会话停在
     // latin1 或 utf8mb3，不设就会按上一个动作的字符集转义，同样写出乱码。
     set_names(d, db_cs_name(s_cs));
+    // 写和回读放在一个事务里。非严格模式下，超长（列上限按字符算，20 个字符）
+    // 和库不支持的字符都是静默处理，客户端从返回值上看不出任何异常 ——
+    // 只有读回来比对才知道库里到底是什么。不一致就整条回滚，名字保持原样。
+    if (!db_tx_begin(d, err)) return 0;
     char *e = mysql_escape(name);
     int ok = db_exec(d, "改角色名", "taiwan_cain.charac_info", "charac_no", c->no, err,
                      "UPDATE taiwan_cain.charac_info SET charac_name='%s' WHERE charac_no=%u",
                      e ? e : "", c->no);
     free(e);
-    return ok;
+    if (!ok) {
+        db_tx_rollback(d);
+        return 0;
+    }
+    Str q = {0};
+    MyResult r = {0};
+    char got[256] = "";
+    str_catf(&q, "SELECT charac_name FROM taiwan_cain.charac_info WHERE charac_no=%u", c->no);
+    if (select1(d, &q, &r) && r.nrow) cp_text(got, sizeof(got), &r, 0, 0);
+    my_free(&r);
+    str_free(&q);
+    if (strcmp(got, name) != 0) {
+        snprintf(err, ERRBUF, "改名没有按原样落库（库里是「%s」），可能超长或含库不支持的字符，已回滚",
+                 got[0] ? got : "");
+        db_tx_rollback(d);
+        return 0;
+    }
+    return db_tx_commit(d, err);
 }
 
 int db_set_job(Db *d, const Charac *c, int job, int grow, Err err) {

@@ -109,12 +109,28 @@ static const char *gm_what(int kind) {
     }
 }
 
+static void gm_refill(void);          // 实现见下（gm_kick 提交失败时要回滚界面）
+
 static void gm_kick(void) {
     if (!s_gmq_n || !app_act_idle()) return;   // 连接忙时先不弹队，等连接空闲后由 page_gm_pump 发
     s_gm_run = s_gmq[0];
     memmove(s_gmq, s_gmq + 1, sizeof(Ctx) * (size_t)(s_gmq_n - 1));
     s_gmq_n--;
-    app_act(gm_what(s_gm_run.kind), char_work, &s_gm_run);
+    if (app_act(gm_what(s_gm_run.kind), char_work, &s_gm_run)) return;
+    // 没提交出去。条目已经弹出去了，先塞回队首 —— 静默丢是这里最坏的走法：
+    // 界面那一格显示「已经改过」，库里一个字没动。
+    memmove(s_gmq + 1, s_gmq, sizeof(Ctx) * (size_t)s_gmq_n);
+    s_gmq[0] = s_gm_run;
+    s_gmq_n++;
+    if (!g.db_ok) {
+        // 连接已经没了：这份改值属于上一个会话，重试只会把它按旧角色号写进
+        // 下一个库（app.c 的泄洪注释要避免的正是这件事）。整队丢掉，界面回填。
+        s_gmq_n = 0;
+        gm_refill();
+        app_status("未连接，%s 没有写入", gm_what(s_gm_run.kind));
+        return;
+    }
+    app_status("%s 没提交出去，等连接空闲再发", gm_what(s_gm_run.kind));
 }
 
 // 队列的推进挂在这里，而不是挂在 gm_reload 上。
@@ -123,7 +139,16 @@ static void gm_kick(void) {
 // 现在每 tick 推进一次，与页面可见性无关；reload 只管显示。
 void page_gm_pump(void) { gm_kick(); }
 
-static void gm_refill(void);          // 实现见下（gm_push 队列满时要回滚界面）
+// 断开/重连时由 app_drop_queued() 调：把本页「还没开始」的东西全部放下。
+// 这里能放心清 s_scan_live，是因为调用点已经确认所有作业线程都停了 ——
+// 还在跑的那种情况 app_disconnect 会整个取消，根本走不到这儿。
+static void gm_drop(void) {
+    s_gmq_n = 0;                       // 页面写队列：属于旧连接的意图
+    InterlockedExchange(&s_scan_live, 0);
+    s_scan_busy = 0;
+    s_phase = 0;
+    s_scan_open = 0;
+}
 
 // 先把值写进内存快照，再排进队列。
 // 快照是表单和左栏的唯一数据源：不先更新它，左栏那一行要等写库完成才变，
@@ -1179,4 +1204,7 @@ void page_gm_create(Page *p) {
     p->reload = gm_reload;
     p->lock = gm_lock;
     p->on = gm_on;
+    // 断开的泄洪要连本页的写队列和扫描闸一起放下：注册在页面自己这边，
+    // app.c 不必认识页面名，以后加页面也不会漏掉这条路径
+    app_on_drop(gm_drop);
 }

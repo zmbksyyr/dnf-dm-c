@@ -272,18 +272,22 @@ static int db_busy(void) {
            job_running(&g.job_bubble);
 }
 
-void job_stop(Job *j) {
+int job_stop(Job *j) {
     if (j->th) {
         if (WaitForSingleObject(j->th, 30000) != WAIT_OBJECT_0) {
             // 超时：线程还在跑，不能关句柄（线程退出时句柄才可关）。
             // 标记 abandoned 并记日志，泄漏一个句柄但状态机不会假空闲。
+            // 必须把「没等到」这件事告诉调用方：它接着要释放的正是这个线程
+            // 正在读的收发包缓冲（db_close → free(m->buf)），不看返回值就等于
+            // 一边 free 一边 recv。
             app_log("任务线程 30 秒未退出，放弃等待（句柄保留）");
-            return;                       // 保留 j->th 和 state，等下次 job_poll 收
+            return 0;                     // 保留 j->th 和 state，等下次 job_poll 收
         }
         CloseHandle(j->th);
         j->th = NULL;
     }
     InterlockedExchange(&j->state, 0);
+    return 1;
 }
 
 // ---------------- 页面 ----------------
@@ -625,6 +629,11 @@ static int w_poll(void *ctx, Err err) {
 
 void app_connect(void) {
     if (job_running(&g.job_conn)) return;
+    // 新会话不能继承旧会话的意图。连接失败那条路上 db_ok 会直接变 0，
+    // 没有经过 app_disconnect，队列里可能还压着「上一个库」的动作；
+    // 不清的话，重连成功的第一时间它们就按旧快照打进新库。
+    // 作业还在跑就先不动：那时候页面状态归那个作业所有，等断开那次统一收。
+    if (!db_busy()) app_drop_queued();
     g.lists_ready = 0;
     g.db_ok = 0;
     g.char_ok = 0;
@@ -646,16 +655,26 @@ void app_disconnect(void) {
     // 可能正在这条连接上 recv/memmove；紧接着的 db_free_data 释放的又正是它们手中
     // 那份容器。写 6 个容器要几百毫秒，这几百毫秒里「断开」一直可点 ——
     // 退出路径（main.c:929 WM_CLOSE）早就是这个顺序，断开这条漏了同一步。
-    job_stop(&g.job_load);
-    job_stop(&g.job_act);
-    job_stop(&g.job_poll);
-    job_stop(&g.job_bubble);
+    //
+    // 等不到就不能往下走：全服扫描、整库备份/还原在真实库上轻易超过 30 秒，
+    // job_stop 超时后线程仍在跑，接着 db_close 就是一边 free 一边 recv。
+    int stopped = job_stop(&g.job_load);
+    stopped &= job_stop(&g.job_act);
+    stopped &= job_stop(&g.job_poll);
+    stopped &= job_stop(&g.job_bubble);
+    if (!stopped) {
+        app_status("后台任务还在跑，稍后再断开（连接没有关）");
+        app_log("断开取消：后台任务 30 秒内没有退出，连接与队列都保留");
+        return;                        // 断开是可重试的：等作业跑完再点一次
+    }
     // 队列里排着的是「旧连接上的意图」：断开的语义是丢掉所有还没开始的动作，
     // 而不是让它们对着已经关掉的连接逐个跑一遍 —— 那样每 200ms 弹一条
     // 「xxx 失败：未连接」，把「已断开数据库」这行正常提示盖掉；重连快的话，
     // 剩下的动作还会拿断开前的快照打进新连接。
-    g_pq_n = g_pq_head = 0;
-    s_load_want = 0;
+    // 页面层自己的队列/闸（GM 页写队列、扫描页的 s_scan_live、表内扫描的待弹标志）
+    // 也在这里一起复位：它们和 g_pq 是同一个语义的两种存放位置，分成两处清就是
+    // R1-006 / R3-003 / R3-004 / R3-007 这四次发作的共同原因。
+    app_drop_queued();
     if (g.db_ok) db_close(&g.db);
     g.lists_ready = 0;
     g.db_ok = 0;
@@ -1017,8 +1036,11 @@ int app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz) {
     int i = (g_pq_head + g_pq_n) % PEND_N;
     snprintf(g_pq[i].what, sizeof(g_pq[i].what), "%s", what);
     g_pq[i].fn = fn;
-    g_pq[i].sz = ctxsz;
-    if (ctxsz > 0) memcpy(g_pq[i].buf, ctx, (size_t)ctxsz);
+    // 上下文和上下文大小必须一起为空：app_act 的 ctxsz 是 sizeof(*(ctx))，
+    // 传 NULL 时算出来是 sizeof(void)==1（GCC 扩展），照抄进队列就是
+    // memcpy(..., NULL, 1) —— 全服扫描/清除这两个无上下文的动作一旦排队就崩。
+    g_pq[i].sz = ctx ? ctxsz : 0;
+    if (ctx && ctxsz > 0) memcpy(g_pq[i].buf, ctx, (size_t)ctxsz);
     g_pq_n++;
     return 1;
 }
@@ -1027,6 +1049,36 @@ int app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz) {
 // 页面自己攒队列时用它判断，免得自己的动作排到队尾等太久
 int app_act_idle(void) {
     return !db_busy() && !g_pq_n;
+}
+
+// ---------------- 会话边界：丢弃还没开始的动作 ----------------
+// 「断开」= 丢掉所有还没开始的动作。这个语义以前只落在 app 层的 g_pq 上，
+// 页面层各自还攒着自己的队列和闸：GM 页的写队列 s_gmq、扫描页的 s_scan_live、
+// 表内扫描的 g_tab_pending。它们各自找地方复位，于是同一个漏法发作了四次
+// （R1-006 / R3-003 / R3-004 / R3-007）。现在统一从这一个入口走。
+//
+// 用「注册钩子」而不是在 app_disconnect 里逐个调 page_xxx_drop()：后者要求
+// 每新增一个带页面队列的页都回来改 app.c，漏一次就是下一次 R3-00x；钩子在
+// 页面自己的 create 里注册，app.c 不认识页面名。
+//
+// 安全性来自调用时机：只有确认所有作业线程都停了（job_stop 返回 1）才会走到这里。
+// 也就是说钩子复位的一定是「死状态」，不会去清一个还在往 s_scan 里追加的作业
+// 手里的闸 —— 那是 R1-006 用 s_scan_live 挡住的那类 use-after-free。
+#define DROP_HOOKS 8
+static void (*s_drop_hook[DROP_HOOKS])(void);
+static int s_drop_hooks;
+
+void app_on_drop(void (*fn)(void)) {
+    if (!fn) return;
+    for (int i = 0; i < s_drop_hooks; i++)
+        if (s_drop_hook[i] == fn) return;          // 幂等：同一页可能注册两次
+    if (s_drop_hooks < DROP_HOOKS) s_drop_hook[s_drop_hooks++] = fn;
+}
+
+void app_drop_queued(void) {
+    g_pq_n = g_pq_head = 0;
+    s_load_want = 0;
+    for (int i = 0; i < s_drop_hooks; i++) s_drop_hook[i]();
 }
 
 // ---------------- 发放 ----------------
@@ -1368,7 +1420,12 @@ static int w_clone_char(void *ctx, Err err) {
     u32 no = 0;
     int nt = 0;
     u64 nr = 0;
-    if (!db_clone_char(&g.db, &g.cur, nm, sizeof(nm), &no, &nt, &nr, err)) return 0;
+    Str log = {0};
+    int ok = db_clone_char(&g.db, &g.cur, nm, sizeof(nm), &no, &nt, &nr, &log, err);
+    // 逐表的键策略先落日志：新角色少了哪几张表，事后只能从这里看出来
+    if (log.n) app_log_block(log.p);
+    str_free(&log);
+    if (!ok) return 0;
     app_log("克隆角色 · %s → %s（charac_no=%u）· %d 张表 / %llu 行", g.cur.name, nm, no, nt,
             (unsigned long long)nr);
     snprintf(c->name, sizeof(c->name), "%s", nm);

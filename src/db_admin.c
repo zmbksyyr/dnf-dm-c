@@ -893,16 +893,103 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
 //    中文不会被砍半），改名跟 db_set_name 一样用配置的字符集（db_cs_name）。
 // 3) 账号共享表（account_cargo / member_dungeon）不复制——它们按 m_id 归属，
 //    复制等于凭空多出一份账号金库。
+// 键怎么处理由 clone_key_policy 逐表判定：不自增、又不由 charac_no 派生的主键
+// （binary 投递哈希、不含 charac_no 的序数组合）复制就必撞，那些表整张跳过。
 typedef struct {
     const char *col;
     const char *expr;    // 该列改用这段 SQL 表达式（已转义的常量），NULL 表示原样搬
 } CloneOvr;
 
-// 返回值：1 = 成功（*rows 为复制行数）；2 = 该表没有 keycol 这一列，跳过；
+// 一张表的主键决定它能不能跟着新角色复制。以前只判「这一列是不是 auto_increment」，
+// 那只对主键恰好是自增列的表成立：主键是投递哈希（cera_shop_delivery_applied 的
+// binary(16)）、或者是不含 charac_no 的序数组合（charac_tower_despair_apc 的
+// (reg_date,seq)），行照搬过去就必然撞 PRIMARY。而 INSERT..SELECT 撞一行，
+// 整个克隆事务连已经复制好的二十几张表一起回滚，用户只看到「点了没反应」。
+//
+// 所以先算「键策略」，再决定怎么复制。判定全部来自 information_schema，
+// 不写死表名 —— 这张库上今天有 72 张按 charac_no 归属的表，加一张也不会漏。
+typedef enum {
+    CK_RECODE = 0,    // 主键含 charac_no：换成新角色号，其余主键列原样搬
+    CK_SKIP_COL,      // 单列自增主键：跳过这一列，让服务端发号
+    CK_SKIP_TABLE     // 复制必然撞（或语义上属于旧角色）：整张表跳过
+} CloneKeyKind;
+
+typedef struct {
+    CloneKeyKind kind;
+    char pk[128];     // 主键列清单，日志用
+    char why[160];    // 为什么这么判，日志用
+} CloneKey;
+
+// 返回 1 = 判定完成（*k 已填）；0 = 读主键失败（err 已填）
+static int clone_key_policy(Db *d, const char *dbn, const char *tb, const char *keycol,
+                            CloneKey *k, Err err) {
+    memset(k, 0, sizeof(*k));
+    Str q = {0}, pk = {0};
+    MyResult r = {0};
+    // 一条查询同时拿顺序和自增标记：STATISTICS 给主键的列顺序，
+    // COLUMNS 给 EXTRA（auto_increment 在这儿）和类型
+    str_catf(&q, "SELECT s.COLUMN_NAME,IFNULL(c.EXTRA,''),IFNULL(c.DATA_TYPE,'') "
+                 "FROM information_schema.STATISTICS s "
+                 "LEFT JOIN information_schema.COLUMNS c "
+                 "  ON c.TABLE_SCHEMA=s.TABLE_SCHEMA AND c.TABLE_NAME=s.TABLE_NAME "
+                 " AND c.COLUMN_NAME=s.COLUMN_NAME "
+                 "WHERE s.TABLE_SCHEMA='%s' AND s.TABLE_NAME='%s' AND s.INDEX_NAME='PRIMARY' "
+                 "ORDER BY s.SEQ_IN_INDEX", dbn, tb);
+    int ok = select1(d, &q, &r);
+    if (!ok) snprintf(err, ERRBUF, "读 %s.%s 的主键失败：%s", dbn, tb, d->err);
+    str_free(&q);
+
+    int npk = 0, nai = 0, have_key = 0, opaque = 1;
+    for (int i = 0; ok && i < r.nrow; i++) {
+        const char *cn = my_text(&r, i, 0);
+        const char *ex = my_text(&r, i, 1);
+        const char *dt = my_text(&r, i, 2);
+        if (!cn) continue;
+        if (npk) str_catc(&pk, ',');
+        str_cat(&pk, cn);
+        npk++;
+        if (ex && strstr(ex, "auto_increment")) nai++;
+        if (!strcmp(cn, keycol)) have_key = 1;
+        // 不透明键 = 二进制 / 字符串。这种主键的取值本身就是内容（哈希、uuid），
+        // 既不能按数值重排，也不存在「新角色对应哪个新键」的答案
+        if (!(is_bin_type(dt) || str_istr(dt, "char") || str_istr(dt, "text"))) opaque = 0;
+    }
+    my_free(&r);
+    snprintf(k->pk, sizeof(k->pk), "%s", pk.p ? pk.p : "");
+    str_free(&pk);
+    if (!ok) return 0;
+
+    if (!npk) {
+        k->kind = CK_SKIP_TABLE;
+        snprintf(k->why, sizeof(k->why), "没有主键，复制过去只会多出一份重复行");
+    } else if (nai && npk == 1) {
+        k->kind = CK_SKIP_COL;
+        snprintf(k->why, sizeof(k->why), "单列自增主键，交给服务端发号");
+    } else if (nai) {
+        // 复合主键里含自增列：只跳这一列，剩下的列还是源角色的组合，
+        // 换个角色号也躲不开撞键（同一个自增列值 + 同一个组合），整表不复制更清楚
+        k->kind = CK_SKIP_TABLE;
+        snprintf(k->why, sizeof(k->why), "复合主键(%s)里含自增列，跳一列会落进错误组合", k->pk);
+    } else if (have_key) {
+        k->kind = CK_RECODE;
+        snprintf(k->why, sizeof(k->why), "主键(%s)含 %s，换成新角色号", k->pk, keycol);
+    } else if (opaque) {
+        k->kind = CK_SKIP_TABLE;
+        snprintf(k->why, sizeof(k->why),
+                 "非派生主键(%s)，投递/回执类记录对新角色没有意义", k->pk);
+    } else {
+        k->kind = CK_SKIP_TABLE;
+        snprintf(k->why, sizeof(k->why),
+                 "主键(%s)既不自增也不含 %s，重新发号会造出源角色没有的记录", k->pk, keycol);
+    }
+    return 1;
+}
+
+// 返回值：1 = 成功（*rows 为复制行数）；2 = 整表跳过（key->why 说明原因）；
 //         0 = 出错（err 已填）
 static int clone_rows(Db *d, const char *dbn, const char *tb, const char *keycol,
                       u32 src, const char *key_expr, const CloneOvr *ovr, int novr,
-                      u64 *rows, Err err) {
+                      CloneKey *key, u64 *rows, Err err) {
     if (rows) *rows = 0;
     Vec names, ais;
     vec_init(&names, sizeof(Str));
@@ -937,6 +1024,20 @@ static int clone_rows(Db *d, const char *dbn, const char *tb, const char *keycol
     for (int i = 0; i < names.n; i++)
         if (!strcmp(str_c(VEC_AT(&names, Str, i)), keycol)) { have_key = 1; break; }
     if (!have_key) {                       // 表里没这一列（skill 那类），跳过即可
+        memset(key, 0, sizeof(*key));
+        key->kind = CK_SKIP_TABLE;
+        snprintf(key->why, sizeof(key->why), "表里没有 %s 列", keycol);
+        vec_free_strs(&names);
+        vec_free(&ais);
+        return 2;
+    }
+
+    if (!clone_key_policy(d, dbn, tb, keycol, key, err)) {
+        vec_free_strs(&names);
+        vec_free(&ais);
+        return 0;
+    }
+    if (key->kind == CK_SKIP_TABLE) {       // 键策略说整表不复制
         vec_free_strs(&names);
         vec_free(&ais);
         return 2;
@@ -974,7 +1075,7 @@ static int clone_rows(Db *d, const char *dbn, const char *tb, const char *keycol
 }
 
 int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
-                  int *tables, u64 *rows, Err err) {
+                  int *tables, u64 *rows, Str *log, Err err) {
     if (tables) *tables = 0;
     if (rows) *rows = 0;
     if (out_no) *out_no = 0;
@@ -1057,8 +1158,9 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
         free(e);
         CloneOvr ovr[1] = {{"charac_name", expr}};
         u64 aff = 0;
+        CloneKey ck;
         int ret = clone_rows(d, "taiwan_cain", "charac_info", "charac_no", c->no, NULL,
-                             ovr, 1, &aff, err);
+                             ovr, 1, &ck, &aff, err);
         if (ret != 1 || aff != 1) {
             if (ret == 1)
                 snprintf(err, ERRBUF, "复制 charac_info 影响了 %llu 行（应为 1）",
@@ -1067,6 +1169,7 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
         } else {
             nt = 1;
             nr = aff;
+            if (log) str_catf(log, "taiwan_cain.charac_info 复制 1 行 ——（%s）\r\n", ck.why);
         }
     }
 
@@ -1083,10 +1186,15 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
         }
     }
 
-    // 3) 其余按 charac_no 归属的表，键直接换成新号
+    // 3) 其余按 charac_no 归属的表，键直接换成新号。
+    //    哪张能换、哪张只能跳过，由 clone_rows 里的 clone_key_policy 逐表判：
+    //    这里只负责把结论记进日志 —— 少复制了哪张表必须让用户看得见，
+    //    静默少数据查起来比报错难十倍。
     if (ok) {
         char kexpr[32];
         snprintf(kexpr, sizeof(kexpr), "%u", new_no);
+        Str skips = {0};                 // 被跳过的表名，收尾统一报一次
+        int nskip = 0;
         // 同 db_backup_char：表集运行时发现，不写死清单
         Vec tabs;
         vec_init(&tabs, sizeof(CharTab));
@@ -1096,11 +1204,27 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
             if (ct->by_mid) continue;                        // 账号共享数据不复制
             if (!strcmp(ct->tb, "charac_info")) continue;    // 已经处理过
             u64 n2 = 0;
+            CloneKey ck;
             int ret = clone_rows(d, ct->db, ct->tb, "charac_no", c->no, kexpr, NULL, 0,
-                                 &n2, err);
+                                 &ck, &n2, err);
             if (ret == 0) { ok = 0; break; }
-            if (ret == 1 && n2) { nt++; nr += n2; }
+            if (ret == 2) {
+                nskip++;
+                if (log)
+                    str_catf(log, "%s.%s 跳过 —— %s\r\n", ct->db, ct->tb, ck.why);
+                if (skips.n < 480)
+                    str_catf(&skips, "%s%s.%s", skips.n ? "、" : "", ct->db, ct->tb);
+                continue;
+            }
+            if (log)
+                str_catf(log, "%s.%s 复制 %llu 行 ——（%s）\r\n", ct->db, ct->tb,
+                         (unsigned long long)n2, ck.why);
+            if (n2) { nt++; nr += n2; }
         }
+        if (log && nskip)
+            str_catf(log, "跳过 %d 张非派生主键表：%s%s\r\n", nskip, skips.p ? skips.p : "",
+                     skips.n >= 480 ? "…" : "");
+        str_free(&skips);
         vec_free(&tabs);
     }
 

@@ -114,6 +114,14 @@ static void tab_scan_start(void) {
 static HWND t_list, t_info;
 static u32  t_ver;          // 与 g.act_ver 同类型：混用 int 时 -Wextra 报符号比较
 
+// 断开时由 app_drop_queued() 调。tab_scan_start 是「先置 g_tab_pending 再提交」，
+// 而 app_act 在连接忙时只是把动作排进队列 —— 队列随后被泄洪，tab_work 永远不会跑，
+// 重连后 pet_reload 会拿一份 n=0 的旧结果弹「发现 0 条错误记录」，看着像刚扫过。
+static void tab_drop(void) {
+    g_tab_pending = 0;
+    g_tab_rescan = 0;
+}
+
 static void tab_fill(void) {
     ui_rows_clear(t_list);
     for (int i = 0; i < g_tabscan.n; i++) {
@@ -373,6 +381,7 @@ void page_pet_create(Page *p) {
     p->reload = pet_reload;
     p->lock = pet_lock;
     p->on = pet_on;
+    app_on_drop(tab_drop);      // 表内扫描的待弹/复扫标志跟着断开一起清
 }
 
 // ================================================================ 时装页
@@ -521,6 +530,7 @@ void page_avatar_create(Page *p) {
     p->reload = ava_reload;
     p->lock = ava_lock;
     p->on = ava_on;
+    app_on_drop(tab_drop);      // 同一份表内扫描状态，pet 页已经注册过（钩子是幂等的）
 }
 
 // ================================================================ 任务页

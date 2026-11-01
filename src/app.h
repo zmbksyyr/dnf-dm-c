@@ -137,8 +137,13 @@ void app_info(const char *text);
 // 任务
 int  job_start(Job *j, int (*fn)(void *ctx, Err err), void *ctx);
 int  job_poll(Job *j, Err err);      // 返回 1 表示本轮刚结束（成功或失败）
-void job_stop(Job *j);
+int  job_stop(Job *j);               // 1 = 线程真的停了；0 = 30 秒没等到，还在跑
 int  job_running(const Job *j);
+
+// 会话边界（断开 / 重连）：丢掉所有还没开始的动作，并让页面复位自己的队列与闸。
+// 页面在自己的 create 里调 app_on_drop() 注册，新增页面不用回头改 app.c。
+void app_on_drop(void (*fn)(void));
+void app_drop_queued(void);
 
 // 日志：先攒在内存里，1s 或 8KB 落一次盘（按天分文件）
 void app_log_flush(void);
