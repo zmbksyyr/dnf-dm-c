@@ -1000,16 +1000,44 @@ typedef struct {
 } GrantCtx;
 static GrantCtx g_grant_ctx;
 
-// 背包是分段的，不是一整条：普通栏放装备/消耗品，材料栏放材料/任务材料。
-// 服务端逐槽校验，材料类物品只要落进普通栏区间，InventoryVerify 就判整个背包
-// 非法并断开连接 —— 而且一次只报第一个（ERROR_ITEM_LOG），删掉它只会让报错
-// 顺延到下一件，看起来就像"删了没用"。
-// 分界来自原生数据：装备/消耗品全在 0..152，材料/任务材料全在 153..248。
-#define INV_MATERIAL_SLOT 153
+// 背包是分段的，不是一整条。服务端逐槽校验，物品只要落错区段，InventoryVerify
+// 就判整个背包非法并断开连接 —— 而且一次只报第一个（ERROR_ITEM_LOG），删掉它只会
+// 让报错顺延到下一件，看起来就像"删了没用"。
+//
+// 分区标尺取自 2026.3.14 源码 GUI.py 的 positionDict（新旧两版一致）：
+//     槽 0        保留位，任何物品都不该落这里
+//     槽 1..8     快捷栏，通用，放什么都行
+//     槽 9..56    装备     (type=0x01)
+//     槽 57..104  消耗品   (type=0x02)
+//     槽 105..152 材料     (type=0x03)
+//     槽 153..200 任务材料 (type=0x04)
+//     槽 201..248 副职业   (type=0x0a)
+//
+// 早先这里只分「普通栏 / 材料栏」两档，一刀切在 153，有两个错：
+//   1) 材料(type=3)真区间是 105..152，被塞进了任务材料区 153..200
+//   2) 非材料类从槽 0 起找，而槽 0 是保留位 —— 服务端日志里那条
+//      ERROR_ITEM_LOG ... slot(0) 就是这么来的
+#define INV_EQUIP_LO    9
+#define INV_EQUIP_HI   57
+#define INV_STACK_LO   57
+#define INV_STACK_HI  105
+#define INV_MAT_LO    105
+#define INV_MAT_HI    153
+#define INV_QUEST_LO  153
+#define INV_QUEST_HI  201
+#define INV_EXPERT_LO 201
+#define INV_EXPERT_HI 249
 
-// 这一类物品必须落材料栏
-static inline int inv_need_material(u8 t) {
-    return t == IT_MATERIAL || t == IT_QUEST;
+// 返回该类型该落哪个区段；未知类型退回整个背包，别把物品挡在门外
+static void inv_zone(u8 t, int *lo, int *hi, const char **name) {
+    switch (t) {
+    case IT_EQUIP:    *lo = INV_EQUIP_LO;  *hi = INV_EQUIP_HI;  *name = "装备栏";   break;
+    case IT_STACK:    *lo = INV_STACK_LO;  *hi = INV_STACK_HI;  *name = "消耗品栏"; break;
+    case IT_MATERIAL: *lo = INV_MAT_LO;    *hi = INV_MAT_HI;    *name = "材料栏";   break;
+    case IT_QUEST:    *lo = INV_QUEST_LO;  *hi = INV_QUEST_HI;  *name = "任务材料栏"; break;
+    case IT_EXPERT:   *lo = INV_EXPERT_LO; *hi = INV_EXPERT_HI; *name = "副职业栏"; break;
+    default:          *lo = 1;             *hi = INV_EXPERT_HI; *name = "背包";   break;
+    }
 }
 
 static int w_grant(void *ctx, Err err) {
@@ -1048,15 +1076,17 @@ static int w_grant(void *ctx, Err err) {
     for (int i = 0; i < s_grant_snap_n; i++) {
         NamedId *n = &s_grant_snap[i];
         u8 ty = n->type ? n->type : IT_STACK;
-        // 材料类只找材料栏，其它只找普通栏。放错区不是"位置不好看"，
-        // 是服务端直接拒绝加载、角色登不进去。
-        int lo = inv_need_material(ty) ? INV_MATERIAL_SLOT : 0;
-        int hi = inv_need_material(ty) ? b->n : INV_MATERIAL_SLOT;
+        // 按类型落对应区段。放错区不是"位置不好看"，是服务端直接拒绝加载、
+        // 角色登不进去。
+        int lo, hi;
+        const char *zone = "背包";
+        inv_zone(ty, &lo, &hi, &zone);
+        if (hi > b->n) hi = b->n;      // 背包比标尺短时别越界
         int slot = -1;
         for (int k = lo; k < hi; k++)
             if (item_empty(&local[k])) { slot = k; break; }
         if (slot < 0) {
-            snprintf(err, ERRBUF, inv_need_material(ty) ? "材料栏已满" : "背包已满");
+            snprintf(err, ERRBUF, "%s已满", zone);
             goto done;
         }
         Item it;
