@@ -1377,15 +1377,18 @@ done:
 int app_grant_send(int by_mail) {
     if (!g.char_ok) { app_info("请先选择角色"); return 0; }
     if (g.grant.n == 0) { app_info("发放队列为空"); return 0; }
-    // 没加载 PVF 时 app_item_type 对所有编号一律兜成 IT_STACK（消耗品），而 w_grant
-    // 是照类型字节落背包区段的。装备/时装/宠物被当成消耗品写进错误区段，服务端
-    // InventoryVerify 会判整个背包非法、角色登不进去（见 app.c 下方那段警告）。
-    // 这类损坏没法靠「兜底成 0 让格子失效」来避免 —— 写都写进库了。所以未加载
-    // PVF 一律拒发，逼用户先把 Script.pvf 选好；图标/浏览那些只影响显示的不在此列。
-    if (!g.pvf_ok) {
+    // 直接入包必须把物品落到正确的背包区段，区段由类型字节决定，类型只能靠 PVF 派。
+    // 没 PVF 时 app_item_type 一律兜成 IT_STACK（消耗品），装备/时装/宠物会被当成
+    // 消耗品写进错误区段，服务端 InventoryVerify 判整个背包非法、角色登不进去（见
+    // w_grant 下方那段警告）。这种损坏已落库、不可逆，所以直接入包在没 PVF 时硬拒发。
+    // 邮件发放不在此列：附件路由只看 avata_flag/creature_flag（app_attach_kind，没
+    // PVF 时优雅降级成「普通物品」，最坏是时装/宠物被当普通道具发出去、收件人拿到
+    // 废附件，但不会损坏背包、不影响登录），故邮件不卡 PVF（仍给软提示，见下方确认框）。
+    if (!g.pvf_ok && !by_mail) {
         app_info("未加载 PVF，不能确定物品类型。\n\n"
-                 "装备/时装/宠物被当成消耗品发放会写错背包区段，导致角色背包损坏、无法登录。\n"
-                 "请先在左上角选好 Script.pvf 再发放。");
+                 "直接入包时装备/时装/宠物会被当成消耗品写错背包区段，导致角色背包损坏、无法登录。\n"
+                 "请先在左上角选好 Script.pvf 再直接入包；\n"
+                 "若暂时无法加载 PVF，可改用「邮件发放」（附件路由会降级，时装/宠物可能发成普通道具）。");
         return 0;
     }
     if (g.grant.n > GRANT_SNAP_MAX) {
@@ -1404,9 +1407,13 @@ int app_grant_send(int by_mail) {
         app_info("角色在线，请改用「邮件」发放。");
         return 0;
     }
-    if (!app_confirm(by_mail ? fmt_new("把 %d 种物品发到 %s 的邮箱？", g.grant.n, g.cur.name)
-                             : fmt_new("把 %d 种物品直接放进 %s 的背包？", g.grant.n, g.cur.name)))
-        return 0;
+    char *q = by_mail
+        ? fmt_new("把 %d 种物品发到 %s 的邮箱？%s",
+                  g.grant.n, g.cur.name,
+                  g.pvf_ok ? ""
+                           : "\n（未加载 PVF：附件种类靠库里宠物清单兜底，时装会被当普通道具）")
+        : fmt_new("把 %d 种物品直接放进 %s 的背包？", g.grant.n, g.cur.name);
+    if (!app_confirm(q)) return 0;
     s_grant_snap_n = (int)g.grant.n;
     memcpy(s_grant_snap, g.grant.p, sizeof(NamedId) * (size_t)g.grant.n);
     g_grant_ctx.by_mail = by_mail;
