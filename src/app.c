@@ -428,10 +428,13 @@ void app_flush_pending(void) {
         }
     }
     // app_act 返回 1 有两种含义：「已启动」和「已排队」（app_act_n 在连接忙或队列
-    // 非空时走入队分支）。这里把 1 当「已经交给作业线程」用，靠的是本函数入口那句
-    // db_busy() 和 g_pq_n==0（队列只在 app_act_n 里涨）—— 于是 app_act 必然走
-    // act_start，不会排队。这个前提一旦破了（比如在 pend 路径上让动作排了队），
-    // 下面那句 w_ctx_free(c) 就是把作业线程马上要读的 g_warg.c 提前释放：悬垂指针。
+    // 非空时走入队分支）。本函数入口只查了 db_busy()，没查 g_pq_n，所以不能假定
+    // 「一定走 act_start、不会排队」。
+    // 真正的保险是上下文按值拷贝：act_start 把 g_warg 连着 WriteCtx* 一起 memcpy
+    // 进 g_act_ctx.buf，排队那条路则 memcpy 进 g_pq[i].buf —— 所有权随入队交出，
+    // 作业线程读的是自己那份拷贝，不再回头读 g_warg。下面那句 w_ctx_free(c) 只在
+    // !packed 或 app_act 返回 0（未连库 / 队列满 / 启动失败）时执行，返回 1 时走不到，
+    // 它不是悬垂指针的警戒点；真排了队，后果也只是这次写被推迟到队尾。
     g_warg.c = c;
     if (!packed || !app_act("写入容器", w_write, &g_warg)) {
         w_ctx_free(c);

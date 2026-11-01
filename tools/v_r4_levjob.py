@@ -205,8 +205,9 @@ def main():
           % (before["n"], before["ai"], before["row"]))
     cur_lev, cur_job, cur_grow = before["row"][2], before["row"][3], before["row"][4]
     try:
-        ok("0 起点：charac_info 只有 laoxx 一行，AUTO_INCREMENT=9919",
-           before["n"] == 1 and before["ai"] == 9919,
+        # 同上：不认死 AI=9919。它会被别的一次性脚本顶上去，认死等于第二次跑永久假红；
+        # 该钉的是「跑完回到跑之前」，那是第 8 步 after["ai"] == before["ai"] 的事。
+        ok("0 起点：charac_info 只有 laoxx 一行", before["n"] == 1,
            "%s 行 / AI=%s" % (before["n"], before["ai"]))
         ok("0 起点：laoxx 的 lev/job/grow 已知（%s/%s/%s）" % (cur_lev, cur_job, cur_grow),
            cur_lev is not None and BAD_LEV != cur_lev and BAD_JOB != cur_job,

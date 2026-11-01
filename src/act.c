@@ -6,8 +6,13 @@ Ctx kc;
 // 列表暂存：job 线程只写这里，UI 线程在 job_poll 后搬到 g.*。
 // 直接写 g.bans/g.events 是 vec_clear+VEC_ADD（realloc），UI 线程同时遍历/绘制
 // 就是 use-after-free。双缓冲：job 写暂存，UI 线程在 job_poll 成功后交换。
-static Vec  s_bans_next, s_ban_chars_next, s_events_next, s_event_info_next;
+static Vec  s_bans_next, s_ban_chars_next, s_events_next, s_event_info_next, s_mails_next;
 static volatile LONG s_lists_dirty;   // L_BANS | L_EVENTS 位掩码
+// 这批邮件是按哪个角色查的（查询时记下，交换时和 g.cur.no 比对）。
+// 只有邮件需要它：db_list_mails 是这几个列表里唯一带 Charac* 的，查出来的东西
+// 天生属于某个角色。bans / ban_chars / events 的 db_list_* 都不接角色参数，
+// 查的是全服清单，换到哪一帧都还是同一份数据，没有「属于谁」这个问题。
+static u32  s_mails_cno;
 
 // UI 线程调用：把暂存列表搬到 g.*（在 app_tick 的 job_poll 之后）
 void act_apply_lists(void) {
@@ -33,6 +38,21 @@ void act_apply_lists(void) {
         vec_init(&s_event_info_next, sizeof(EventInfo));
         g.lists_ready |= L_EVENTS;
     }
+    if (dirty & L_MAILS) {
+        // 只接受「查的正是当前角色」的那份：用户在查询飞行中切了角色，回来的这批
+        // 数据属于上一个角色，换上去界面就会把 A 的邮件挂在 B 名下，此时点
+        // 「删除邮件」删的是别人的信。角色不对就作废暂存、并且不置 L_MAILS ——
+        // 置了等于告诉界面「数据已就绪」（L_* 只在这里置位），那份错角色的数据会
+        // 一直显示到用户手动刷新；不置位，下次 reload 看到列表没就绪会重拉一份。
+        if (!g.char_ok || s_mails_cno != g.cur.no) {
+            vec_clear(&s_mails_next);      // 内容作废，容量留着给下次查询
+        } else {
+            vec_free(&g.mails);
+            g.mails = s_mails_next;        // 缓冲整体交出去，所有权只走这一条路
+            vec_init(&s_mails_next, sizeof(MailRow));
+            g.lists_ready |= L_MAILS;
+        }
+    }
 }
 
 void act_init(void) {
@@ -40,6 +60,7 @@ void act_init(void) {
     vec_init(&s_ban_chars_next, sizeof(Charac));
     vec_init(&s_events_next, sizeof(EventRow));
     vec_init(&s_event_info_next, sizeof(EventInfo));
+    vec_init(&s_mails_next, sizeof(MailRow));
 }
 
 void act_free(void) {
@@ -47,6 +68,7 @@ void act_free(void) {
     vec_free(&s_ban_chars_next);
     vec_free(&s_events_next);
     vec_free(&s_event_info_next);
+    vec_free(&s_mails_next);
 }
 
 // 这些操作会改到内存里那份快照：写完要回读校验一次（其余动作只动库，快照不变）
@@ -100,7 +122,8 @@ static int char_do(void *ctx, Err err) {
             return db_list_bans(&g.db, &s_bans_next, err);
         case K_BANCHARS:
             // 封停页列表：i1=0 加载全服，i1=1 只加载在线
-            InterlockedOr(&s_lists_dirty, L_BANCHARS);
+            // 全服角色清单，不属于任何一个角色（db_list_ban_chars 不接角色参数），
+            // 所以交换时不做邮件那种归属校验：切角色前后它都是同一份数据。
             return db_list_ban_chars(&g.db, &s_ban_chars_next, c->i1 ? 1 : 0, 5000, err);
         case K_EVLIST:
             // 同上，写暂存。活动字典小，每次刷新都重拉，保证「新增定义」能立刻出现在下拉里
@@ -113,6 +136,12 @@ static int char_do(void *ctx, Err err) {
         case K_RESETPWD: return db_reset_pwd(&g.db, c->mid, c->s, err);
         case K_UNLCREATE: return db_unlock_create(&g.db, c->mid, err);
         case K_VIP: return db_set_vip(&g.db, c->mid, c->s, err);
+        case K_MAILLIST:
+            // 邮件列表也写暂存，不碰 g.mails——UI 线程可能正在遍历它。
+            // 查之前先记下这批数据是按哪个角色查的：交换机在 job_poll 之后，那时
+            // 用户可能已经切走，act_apply_lists() 靠这个编号决定换不换。
+            s_mails_cno = c->cno;
+            return db_list_mails(&g.db, &who, &s_mails_next, err);
     }
     return 0;
 }
@@ -134,5 +163,6 @@ int char_work(void *ctx, Err err) {
     if (c->kind == K_BANLIST) InterlockedOr(&s_lists_dirty, L_BANS);
     if (c->kind == K_BANCHARS) InterlockedOr(&s_lists_dirty, L_BANCHARS);
     if (c->kind == K_EVLIST)  InterlockedOr(&s_lists_dirty, L_EVENTS);
+    if (c->kind == K_MAILLIST) InterlockedOr(&s_lists_dirty, L_MAILS);
     return 1;
 }

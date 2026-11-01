@@ -73,8 +73,17 @@ def main():
     print("页面第一行  ：", box[0][:70] if box else "(空)")
     print("文件第一行  ：", flines[0][:70] if flines else "(空)")
     print("页面最后一行：", box[-1][:70] if box else "(空)")
-    ok = bool(flines and box and flines[-1][:40] == box[0][:40] and flines[0][:40] == box[-1][:40])
+    # 倒序的判据只有一条：文件最后一行（最新）必须出现在页面第一行。
+    # 原来还要求「文件第一行 == 页面最后一行」（即页面显示得全），但日志页只取文件
+    # 末尾 100000 字节（src/ui_data.c:794），连跑十几轮定向脚本之后日志轻松破 100KB，
+    # 这条就恒不成立 —— 它是「显示上限」，不是「倒序错了」，混在一起会让这条脚本
+    # 在日志变大后永久假红。显示上限单独报，不算倒序的账。
+    ok = bool(flines and box and flines[-1][:40] == box[0][:40])
     print("倒序一致：", "是" if ok else "否")
+    if len(flines) != len(box):
+        print("注：页面只显示文件末尾约 100000 字节（src/ui_data.c:794 的截断），"
+              "文件 %d 行 / 页面 %d 行，差的那部分是显示上限所致，不影响倒序" %
+              (len(flines), len(box)))
     p.terminate()
 
 

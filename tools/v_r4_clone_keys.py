@@ -253,8 +253,11 @@ def main():
         name_before = cur.fetchone()
         print("起点：charac_info %s 行 / AI=%s / laoxx=%r / charac_no 表 %d 张"
               % (cnt_before["taiwan_cain.charac_info"], ai_before, name_before, len(tabs)))
-        ok("0 起点：charac_info 恰好 1 行、AI=9919、laoxx 名字字节正确",
-           cnt_before["taiwan_cain.charac_info"] == 1 and ai_before == 9919
+        # 不认死 AI=9919：回归集跑完一轮之后它会被别的一次性脚本顶上去
+        # （v_r1_name 临时建角色），认死一个数等于让本脚本在第二次跑时永久假红。
+        # 真正要钉的是「跑完回到跑之前的样子」，那由下面第 10 步的 ai_before 比对负责。
+        ok("0 起点：charac_info 恰好 1 行、laoxx 名字字节正确",
+           cnt_before["taiwan_cain.charac_info"] == 1
            and name_before == ("laoxx", "6C616F7878"),
            "%s 行 / AI=%s / %r" % (cnt_before["taiwan_cain.charac_info"], ai_before, name_before))
         ok("0 起点：delivery 17 行且全挂 charac_no=1（克隆验收的条件，别清）",
@@ -427,11 +430,10 @@ def main():
         ok("10 清理后 charac_info 回到 1 行",
            q1(cur, "SELECT COUNT(*) FROM taiwan_cain.charac_info") == 1,
            "%s 行" % q1(cur, "SELECT COUNT(*) FROM taiwan_cain.charac_info"))
-        ok("10 清理后 AUTO_INCREMENT 仍是 9919",
-           q1(cur, "SELECT AUTO_INCREMENT FROM information_schema.TABLES "
-                   "WHERE TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME='charac_info'") == 9919,
-           "%s" % q1(cur, "SELECT AUTO_INCREMENT FROM information_schema.TABLES "
-                          "WHERE TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME='charac_info'"))
+        ai_now = q1(cur, "SELECT AUTO_INCREMENT FROM information_schema.TABLES "
+                         "WHERE TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME='charac_info'")
+        ok("10 清理后 AUTO_INCREMENT 回到改前（%s）" % ai_before, ai_now == ai_before,
+           "%s → %s" % (ai_before, ai_now))
         ok("10 charac_view 字节与改前一致", view_row(cur) == view_before,
            "改前 %r 现在 %r" % (view_before, view_row(cur)))
         cur.execute("SELECT charac_name,HEX(charac_name) FROM taiwan_cain.charac_info "

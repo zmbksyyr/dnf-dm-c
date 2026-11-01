@@ -266,15 +266,29 @@ static LRESULT bad_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
     return -1;
 }
 
-static void item_bad_clear(void) {
+// 四条写库存的路径共用这道闸。检查放在弹框 / 确认框之前，别让人填完十来个字段
+// 才被告知白填。app_item_set 里那句兜底的 app_status 保留，不动它。
+static int item_writable(void) {
     if (!g.char_ok) {
         app_info("请先选择角色。");
-        return;
+        return 0;
     }
     if (g.cur.online) {
         app_info("该角色当前在线，改动会被服务器覆盖。请先退出游戏。");
-        return;
+        return 0;
     }
+    // 清错误物品会一次动到所有容器，所以任一页还有未完成写入都先挡住：
+    // 再排一次只会落在队尾覆盖，用户同样看不到任何提示。
+    for (int sub = 0; sub < 6; sub++)
+        if (app_page_busy(sub)) {
+            app_info("还有写入没完成，请稍候再改。");
+            return 0;
+        }
+    return 1;
+}
+
+static void item_bad_clear(void) {
+    if (!item_writable()) return;
     Vec rows;
     vec_init(&rows, sizeof(BadRow));
     int loaded = 0;
@@ -420,6 +434,7 @@ static void item_edit_sel(void) {
     if (!b || !b->ok || row < 0) return;
     int slot = (int)ui_row_data(s_list, row);
     if (slot < 0 || slot >= b->n) return;
+    if (!item_writable()) return;        // 放在 item_edit 弹框之前
     Item out;
     if (!item_edit(g_main, &b->items[slot], &out)) return;
     app_item_set(sub, slot, &out);        // 确定即写库，不再走「保存改动」
@@ -433,6 +448,7 @@ static void item_clear_sel(void) {
     if (!b || !b->ok || row < 0) return;
     int slot = (int)ui_row_data(s_list, row);
     if (slot < 0 || slot >= b->n) return;
+    if (!item_writable()) return;        // 放在确认框之前
     if (!app_confirm(fmt_new("清空第 %d 格？（立即写库）", slot + 1))) return;
     Item z;
     memset(&z, 0, sizeof(z));
@@ -444,7 +460,7 @@ static void item_clear_all(void) {
     int sub = ui_combo_sel(s_sub);
     Blob *b = app_page_blob(sub < 0 ? 0 : sub);
     if (!b || !b->ok) return;
-    if (g.cur.online) { app_info("该角色当前在线，改动会被服务器覆盖。请先退出游戏。"); return; }
+    if (!item_writable()) return;
     if (!app_confirm(fmt_new("把「%s」全部 %d 格清空？立即写库。", kSubName[sub], b->n)))
         return;
     Item z;
@@ -1042,6 +1058,38 @@ static void grant_load_sel(void) {
 // ---- 队列导出 / 导入：TSV，列名可读，人能直接拿记事本改 ----
 // 导出时把类型名写出来，是为了让人拿到记事本里能看懂；导入时这一列不看 ——
 // 类型只认 PVF，写上去也改不了。
+
+// 发放队列 tsv 各字段的上下限（下标 = tsv 列号）。界面 ui_num（grant_build）与
+// tsv 导入（grant_import）共用这一份，别手抄第二张表 —— 上限就是写回物品二进制时
+// 的字段宽度（item.h 的 & 0x1F / & 7 / (u8) 掩码），超了会被静默截成另一件东西。
+// hi < 0 的列不是数值列（名称 / 类型 / 封装由各自的解析处理），导入不夹界。
+typedef struct { const char *name; i64 lo, hi; } GrantRange;
+static const GrantRange kGrantRange[11] = {
+    {"编号",     1, 4294967295LL},             // 0
+    {"名称",     0, -1},                      // 1
+    {"数量",     1, 4294967295LL},             // 2
+    {"类型",     0, -1},                      // 3 只导出给人看，不回读
+    {"强化",     0, 31},                      // 4
+    {"增幅",     0, COUNT_OF(kIncList) - 1},   // 5 kIncList 的下标
+    {"增幅值",   0, 65535},                    // 6
+    {"锻造",     0, 255},                      // 7
+    {"封装",     0, -1},                      // 8 是/否
+    {"封印次数", 0, 7},                       // 9
+    {"耐久",     0, 65535},                    // 10
+};
+
+// 导入时把 tsv 第 col 列的文本按上表夹到界上，越界往日志报一行（不是静默截断）。
+// 空串 / 非数字按 0 处理，与原来的 atoi 一致；编号列另在调用方按「0 就跳过整行」处理。
+static i64 grant_clamp(const char *text, int col, int lineno) {
+    const GrantRange *rg = &kGrantRange[col];
+    i64 v = strtoll(text, NULL, 10);
+    if (rg->hi < 0) return v;
+    i64 c = v < rg->lo ? rg->lo : (v > rg->hi ? rg->hi : v);
+    if (c != v)
+        app_log("第 %d 行的%s %lld 已夹到 %lld", lineno, rg->name, (long long)v, (long long)c);
+    return c;
+}
+
 static int inc_from_text(const char *s) {
     for (int i = 0; i < (int)COUNT_OF(kIncList); i++)
         if (strcmp(s, kIncList[i]) == 0) return i;
@@ -1097,6 +1145,19 @@ static void grant_export(void) {
     utf8(file, path, sizeof(path));
 
     Str s = {0};
+    // 导出头用 # 注释写明导入时的越界策略（导入方会跳过 # 开头的行）。范围由
+    // kGrantRange 生成，不在这里手抄一份 —— 改了表，导出的说明跟着改。
+    str_cat(&s, "# 导入时超出上下限的数值会夹到界上，并在日志里逐行报出，不会静默截断。\r\n");
+    str_cat(&s, "# 各数值列上下限：");
+    int first = 1;
+    for (int i = 0; i < (int)COUNT_OF(kGrantRange); i++) {
+        const GrantRange *rg = &kGrantRange[i];
+        if (rg->hi < 0) continue;
+        str_catf(&s, "%s%s %lld~%lld", first ? "" : "，", rg->name,
+                 (long long)rg->lo, (long long)rg->hi);
+        first = 0;
+    }
+    str_cat(&s, "\r\n");
     str_cat(&s, "编号\t名称\t数量\t类型\t强化\t增幅\t增幅值\t锻造\t封装\t封印次数\t耐久\r\n");
     for (int i = 0; i < g.grant.n; i++) {
         NamedId *n = VEC_AT(&g.grant, NamedId, i);
@@ -1160,12 +1221,13 @@ static void grant_import(void) {
     Buf b = {0};
     if (!file_read(path, &b)) { app_info("读不到文件。"); return; }
 
-    int added = 0;
+    int added = 0, lineno = 0;
     for (int i = 0; i < (int)b.n;) {
         int st = i;
         while (i < (int)b.n && b.p[i] != '\n') i++;
         int len = i - st;
         i++;
+        lineno++;                       // 报错用物理行号，跟记事本里看到的一致
         if (len > 0 && b.p[st + len - 1] == '\r') len--;
         if (len <= 0 || b.p[st] == '#') continue;
         if (len >= 6 && memcmp(b.p + st, "编号", 6) == 0) continue;   // 跳过表头
@@ -1184,20 +1246,26 @@ static void grant_import(void) {
         fld(b.p + st, len, 10, f10, sizeof(f10));
 
         u32 id = (u32)atol(f0);
-        if (!id) continue;
+        if (!id) continue;                      // 编号空 / 0 的行跳过，沿用旧行为
         NamedId v;
         memset(&v, 0, sizeof(v));
         v.id = id;
-        v.num = (u32)(atoi(f2) > 0 ? atoi(f2) : 1);
+        v.num = (u32)grant_clamp(f2, 2, lineno);
         v.type = app_item_type(id);              // 第 4 列（类型）只导出给人看，不回读
-        v.enhance = (u8)atoi(f4);
+        v.enhance = (u8)grant_clamp(f4, 4, lineno);
         int inc = inc_from_text(f5);
-        v.inc_type = (u8)(inc < 0 ? 0 : inc);
-        v.inc_val = (u16)atoi(f6);
-        v.forge = (u8)atoi(f7);
+        if (inc < 0) inc = 0;
+        // 增幅是 kIncList 的下标，界面下拉最多到表尾；导入的数字越界会顶穿 kIncList[inc_type]
+        if (inc > kGrantRange[5].hi) {
+            app_log("第 %d 行的增幅 %d 已夹到 %lld", lineno, inc, (long long)kGrantRange[5].hi);
+            inc = (int)kGrantRange[5].hi;
+        }
+        v.inc_type = (u8)inc;
+        v.inc_val = (u16)grant_clamp(f6, 6, lineno);
+        v.forge = (u8)grant_clamp(f7, 7, lineno);
         v.seal = (strcmp(f8, "是") == 0 || atoi(f8) > 0) ? 1 : 0;
-        v.seal_cnt = (u8)atoi(f9);
-        v.dur = (u16)atoi(f10);
+        v.seal_cnt = (u8)grant_clamp(f9, 9, lineno);
+        v.dur = (u16)grant_clamp(f10, 10, lineno);
         if (f1[0]) snprintf(v.name, sizeof(v.name), "%s", f1);
         else {
             char nb[96];
@@ -1380,13 +1448,14 @@ static void grant_build(Page *p, HWND parent) {
     g_sealc = ui_edit(parent, "0", G_SEALC, 0);
     // 每个字段按它写回物品结构时的宽度收窄：强化只有 5 位、封印次数 3 位，
     // 多填的部分原本会被 & 0x1F 悄悄截掉，用户以为设成了 50。
-    ui_num(g_id, 1, 4294967295LL);
-    ui_num(g_num, 1, 4294967295LL);
-    ui_num(g_dur, 0, 65535);
-    ui_num(g_enh, 0, 31);
-    ui_num(g_incv, 0, 65535);
-    ui_num(g_forge, 0, 255);
-    ui_num(g_sealc, 0, 7);
+    // 上下限与 tsv 导入共用 kGrantRange（下标就是 tsv 列号），别手抄第二张表。
+    ui_num(g_id,    kGrantRange[0].lo,  kGrantRange[0].hi);
+    ui_num(g_num,   kGrantRange[2].lo,  kGrantRange[2].hi);
+    ui_num(g_dur,   kGrantRange[10].lo, kGrantRange[10].hi);
+    ui_num(g_enh,   kGrantRange[4].lo,  kGrantRange[4].hi);
+    ui_num(g_incv,  kGrantRange[6].lo,  kGrantRange[6].hi);
+    ui_num(g_forge, kGrantRange[7].lo,  kGrantRange[7].hi);
+    ui_num(g_sealc, kGrantRange[9].lo,  kGrantRange[9].hi);
     g_info = ui_label(parent, "请先选择角色", G_INFO);
     g_sep = ui_hline(parent);
     ui_button(parent, "加入队列", G_ADD);

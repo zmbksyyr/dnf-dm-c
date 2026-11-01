@@ -3,6 +3,7 @@
 // 但两条路径的其它字段完全一样，拆成两个只是让人每次先判断"我这次算哪种"。
 // 目标可设为「当前角色 / 全服 / 在线玩家」；另有「删除全服邮件」这类清服维护。
 #include "ui.h"
+#include "act.h"
 
 enum {
     M_LIST = PAGE_ID(PAGE_MAIL, 1), M_DEL, M_DELALL, M_DELALLS, M_INFO,
@@ -51,7 +52,7 @@ static void mail_type_sync(void) {
 }
 
 // ---- 异步动作 ----
-enum { A_LIST = 1, A_DEL, A_DELALL, A_SENDT, A_SENDI, A_DELALLS };
+enum { A_DEL = 1, A_DELALL, A_SENDT, A_SENDI, A_DELALLS };
 typedef struct {
     int  kind;
     u64  postal;
@@ -67,9 +68,7 @@ static MailCtx mc;
 
 static int mail_work(void *ctx, Err err) {
     MailCtx *c = (MailCtx *)ctx;
-    if (c->kind == A_LIST) g.lists_ready |= L_MAILS;
     switch (c->kind) {
-        case A_LIST: return db_list_mails(&g.db, &g.cur, &g.mails, err);
         case A_DEL: return db_delete_mail(&g.db, c->postal, err);
         case A_DELALL: return db_delete_all_mails(&g.db, &g.cur, err);
         case A_SENDT: return db_send_text_mail(&g.db, &g.cur, "GM", c->text, err);
@@ -122,8 +121,13 @@ static void mail_reload(Page *p) {
     if (!g.char_ok) { ui_text(m_info, "请先选择角色"); return; }
     if (!(g.lists_ready & L_MAILS)) {
         if (!job_running(&g.job_act)) {
-            mc.kind = A_LIST;
-            app_act("读取邮件", mail_work, &mc);
+            // 与封停/活动页的列表动作同形：查询写 act.c 的 s_mails_next 暂存，
+            // 成功后由 char_work 标脏，act_apply_lists() 在 job_poll 之后搬到 g.mails
+            // 才置 L_MAILS。查询失败不标脏，重试分支下次 reload 还会再拉。
+            memset(&kc, 0, sizeof(kc));
+            kc.kind = K_MAILLIST;
+            kc.cno = g.cur.no;
+            app_act("读取邮件", char_work, &kc);
         }
         ui_text(m_info, "正在读取邮件…");
         return;
@@ -155,22 +159,27 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             if (!app_confirm(fmt_new("删除邮件 %llu？", (unsigned long long)r->postal_id))) return 0;
             mc.kind = A_DEL;
             mc.postal = r->postal_id;
-            g.mails.n = 0;
-            g.lists_ready &= ~(u32)L_MAILS;
-            app_act("删除邮件", mail_work, &mc);
+            if (app_act("删除邮件", mail_work, &mc)) {
+                g.mails.n = 0;
+                g.lists_ready &= ~(u32)L_MAILS;
+            }
             return 0;
         }
         case M_DELALL:
             if (!app_confirm("清空该角色的全部邮件？")) return 0;
             mc.kind = A_DELALL;
-            g.mails.n = 0;
-            g.lists_ready &= ~(u32)L_MAILS;
-            app_act("清空邮件", mail_work, &mc);
+            if (app_act("清空邮件", mail_work, &mc)) {
+                g.mails.n = 0;
+                g.lists_ready &= ~(u32)L_MAILS;
+            }
             return 0;
         case M_DELALLS:
             if (!app_confirm("清空【全服】所有角色的邮件？\n\n此操作不可恢复，建议先整库备份。")) return 0;
             mc.kind = A_DELALLS;
-            app_act("删除全服邮件", mail_work, &mc);
+            if (app_act("删除全服邮件", mail_work, &mc)) {
+                g.mails.n = 0;
+                g.lists_ready &= ~(u32)L_MAILS;
+            }
             return 0;
         case M_SEND: {
             int target = ui_combo_sel(m_target);
@@ -194,7 +203,10 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             // 附件 ID 留空 = 纯文本邮件；当前角色才有「单发文本」这条路径，
             // 全服/在线两种情况 db_send_mail_bulk 自己会按 item_id=0 发纯文本
             mc.kind = (!id && target == 0) ? A_SENDT : A_SENDI;
-            app_act(target == 0 ? (id ? "发送附件邮件" : "发送文本邮件") : "批量发信", mail_work, &mc);
+            if (app_act(target == 0 ? (id ? "发送附件邮件" : "发送文本邮件") : "批量发信", mail_work, &mc)) {
+                g.mails.n = 0;
+                g.lists_ready &= ~(u32)L_MAILS;
+            }
             return 0;
         }
     }
