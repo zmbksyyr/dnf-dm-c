@@ -11,14 +11,65 @@ static HWND p_sep;   // 列表和底部改名条之间的分隔线
 
 enum { D_PETS = 1, D_PETNAME, D_PETFULL, D_PETEXPIRE, D_PETDEL };
 
+// 任务页的动作都围绕「当前选中那一行」：放弃/完成只改槽位，
+// 完美清除还会顺带清掉背包里为它攒的任务材料。
+typedef struct {
+    int  slot;
+    u32  id, trigger;
+    int  purge;               // 是否连带清材料
+    u32  purge_id[4];
+    int  purge_n;
+} QJob;
+
 typedef struct {
     int  kind;
     u32  ui_id;
     char s[64];
     int  sub;          // 通用：avatar 标记等
     u64  u64v;         // 通用：大 id
+    // 任务页的动作参数必须跟上下文一起走。以前放在文件级 static qj / qsend 里、
+    // 由作业线程直接读：连接被占时 app_act 会把动作排进 g_pq（最多 4 个），
+    // 排队期间用户再点另一行任务，这两个全局就被后一次赋值覆盖 —— 两次都按
+    // 后者执行，A 没被放弃、B 被当成要清材料的那一条。app_act 按值拷贝整个
+    // DCtx，放进来就天然是「每次点击一份」。
+    QJob q;
+    GrantItem send[4];        // 补发材料的清单
+    int  send_n;
 } DCtx;
 static DCtx dc;
+
+// 宠物/时装/任务三张表的列表暂存：作业线程只写这里，UI 线程在 job_poll
+// 之后搬到 g.pets/g.avatars/g.quests。
+// 直接写 g.* 是 vec_clear + VEC_ADD，满仓时 xrealloc 会把旧缓冲还给堆，而 UI
+// 线程这时可能正拿着 VEC_AT 遍历同一个 Vec（act_ver/data_ver 一变就会重填页面）。
+// 封停/活动列表早就是这套双缓冲（act.c:6-10），这三张表当时没跟上。
+static Vec s_pets_next, s_avas_next, s_quests_next;
+static volatile LONG s_lists_dirty;   // L_PETS | L_AVAS | L_QUESTS
+static u32 s_pets_cno, s_avas_cno, s_quests_cno;   // 这三份是按哪个角色查的
+
+// 暂存列表换给 g.*，成功返回 1（调用方据此置 L_*）。
+// 只接受「查的正是当前角色」的那份：切角色时 lists_ready 被清零、g.cur 要等载入
+// 完成才换代，中途回来的旧角色数据换上去，列表就会把 A 的宠物挂到 B 名下。
+static int take_list(Vec *dst, Vec *src, u32 cno, int esz) {
+    if (!g.char_ok || cno != g.cur.no) { vec_clear(src); return 0; }
+    vec_free(dst);
+    *dst = *src;                              // 缓冲整体交出去，所有权只走这一条路
+    vec_init(src, esz);
+    return 1;
+}
+
+// UI 线程调用（app_tick 的 job_poll 之后）：暂存列表换给 g.*。
+// L_* 也在这里置位 —— 在查询之前置位等于告诉界面「数据已就绪」，
+// 而那份数据要么还没开始填，要么正被 realloc。
+void ui_data_apply_lists(void) {
+    LONG dirty = InterlockedExchange(&s_lists_dirty, 0);
+    if ((dirty & L_PETS) && take_list(&g.pets, &s_pets_next, s_pets_cno, sizeof(PetRow)))
+        g.lists_ready |= L_PETS;
+    if ((dirty & L_AVAS) && take_list(&g.avatars, &s_avas_next, s_avas_cno, sizeof(AvatarRow)))
+        g.lists_ready |= L_AVAS;
+    if ((dirty & L_QUESTS) && take_list(&g.quests, &s_quests_next, s_quests_cno, sizeof(QuestRow)))
+        g.lists_ready |= L_QUESTS;
+}
 
 // ================================================================ 表内错误记录
 // 宠物表 / 时装表里的错误行：it_id 在 PVF 里查不到，或所属角色已删。
@@ -163,9 +214,14 @@ static void tab_show(void) {
 
 static int pet_work(void *ctx, Err err) {
     DCtx *c = (DCtx *)ctx;
-    if (c->kind == D_PETS) g.lists_ready |= L_PETS;
+    if (c->kind == D_PETS) {
+        if (!s_pets_next.cap) vec_init(&s_pets_next, sizeof(PetRow));
+        s_pets_cno = g.cur.no;
+        int ok = db_list_pets(&g.db, &g.cur, &s_pets_next, err);
+        InterlockedOr(&s_lists_dirty, L_PETS);   // 失败也要换：界面按空列表重填，别反复重查
+        return ok;
+    }
     switch (c->kind) {
-        case D_PETS: return db_list_pets(&g.db, &g.cur, &g.pets, err);
         case D_PETNAME: return db_set_pet_name(&g.db, c->ui_id, c->s, err);
         case D_PETFULL: return db_set_pet_full(&g.db, c->ui_id, err);
         case D_PETEXPIRE: return db_set_pet_expire(&g.db, c->ui_id, err);
@@ -328,9 +384,14 @@ static HWND a_sep;
 
 static int ava_work(void *ctx, Err err) {
     DCtx *c = (DCtx *)ctx;
-    if (c->kind == D_AVAS) g.lists_ready |= L_AVAS;
+    if (c->kind == D_AVAS) {
+        if (!s_avas_next.cap) vec_init(&s_avas_next, sizeof(AvatarRow));
+        s_avas_cno = g.cur.no;
+        int ok = db_list_avatars(&g.db, &g.cur, &s_avas_next, err);
+        InterlockedOr(&s_lists_dirty, L_AVAS);
+        return ok;
+    }
     switch (c->kind) {
-        case D_AVAS: return db_list_avatars(&g.db, &g.cur, &g.avatars, err);
         case D_AVAHIDE: return db_set_avatar_hidden(&g.db, c->ui_id, (int)c->s[0], err);
         case D_AVAEXPIRE: return db_set_avatar_expire(&g.db, c->ui_id, err);
         case D_AVADEL: return db_delete_avatar(&g.db, c->ui_id, err);
@@ -470,19 +531,6 @@ enum { D_QUESTS = 30, D_QUESTCLR, D_QSLOT, D_QSEND, D_QPURGE };
 static HWND q_list, q_info;
 static HWND q_sep;
 
-// 任务页的动作都围绕「当前选中那一行」：放弃/完成只改槽位，
-// 完美清除还会顺带清掉背包里为它攒的任务材料。
-typedef struct {
-    int  slot;
-    u32  id, trigger;
-    int  purge;               // 是否连带清材料
-    u32  purge_id[4];
-    int  purge_n;
-} QJob;
-static QJob qj;
-static GrantItem qsend[4];
-static int  qsend_n;
-
 static void quest_enrich(void) {
     if (!g.pvf_ok) {
         for (int i = 0; i < g.quests.n; i++) {
@@ -503,7 +551,7 @@ static void quest_enrich(void) {
             continue;
         }
         snprintf(r->name, sizeof(r->name), "%s", q.name);
-        // 这里的 4 是三处数组共同的容量（QuestRow.need_id / QJob.purge_id / qsend），
+        // 这里的 4 是三处数组共同的容量（QuestRow.need_id / QJob.purge_id / DCtx.send），
         // 现在靠 pvf.c:1399 的 `nitem < 4` 保证。夹一下，将来那边放宽了也不会直接越界。
         r->nneed = q.nitem > 4 ? 4 : q.nitem;
         r->need[0] = 0;
@@ -522,19 +570,22 @@ static void quest_enrich(void) {
 static int quest_work(void *ctx, Err err) {
     DCtx *c = (DCtx *)ctx;
     if (c->kind == D_QUESTS) {
-        g.lists_ready |= L_QUESTS;
-        return db_list_quests(&g.db, &g.cur, &g.quests, err);
+        if (!s_quests_next.cap) vec_init(&s_quests_next, sizeof(QuestRow));
+        s_quests_cno = g.cur.no;
+        int ok = db_list_quests(&g.db, &g.cur, &s_quests_next, err);
+        InterlockedOr(&s_lists_dirty, L_QUESTS);
+        return ok;
     }
     if (c->kind == D_QUESTCLR) return db_clear_quests(&g.db, &g.cur, err);
     if (c->kind == D_QSLOT) {
-        if (!db_set_quest_slot(&g.db, &g.cur, qj.slot, qj.id, qj.trigger, err)) return 0;
-        if (qj.purge && qj.purge_n)
-            return db_purge_quest_items(&g.db, &g.cur, qj.purge_id, qj.purge_n, NULL, err);
+        if (!db_set_quest_slot(&g.db, &g.cur, c->q.slot, c->q.id, c->q.trigger, err)) return 0;
+        if (c->q.purge && c->q.purge_n)
+            return db_purge_quest_items(&g.db, &g.cur, c->q.purge_id, c->q.purge_n, NULL, err);
         return 1;
     }
     if (c->kind == D_QSEND) {
-        for (int i = 0; i < qsend_n; i++)
-            if (!db_send_item_mail_ex(&g.db, &g.cur, "GM", "任务材料补发", &qsend[i], 0, 0, err))
+        for (int i = 0; i < c->send_n; i++)
+            if (!db_send_item_mail_ex(&g.db, &g.cur, "GM", "任务材料补发", &c->send[i], 0, 0, err))
                 return 0;
         return 1;
     }
@@ -608,8 +659,8 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         if (id == Q_DROP) {
             if (!app_confirm(fmt_new("放弃任务「%s」(%u)？", r->name[0] ? r->name : "?", r->id)))
                 return 0;
-            memset(&qj, 0, sizeof(qj));
-            qj.slot = r->slot;
+            memset(&dc.q, 0, sizeof(dc.q));
+            dc.q.slot = r->slot;
             dc.kind = D_QSLOT;
             app_act("放弃任务", quest_work, &dc);
             quest_rerun();
@@ -620,9 +671,9 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
                                      "需要交物品的任务，请改用「补发材料」。",
                                      r->name[0] ? r->name : "?", r->id)))
                 return 0;
-            memset(&qj, 0, sizeof(qj));
-            qj.slot = r->slot;
-            qj.id = r->id;
+            memset(&dc.q, 0, sizeof(dc.q));
+            dc.q.slot = r->slot;
+            dc.q.id = r->id;
             dc.kind = D_QSLOT;
             app_act("标记完成", quest_work, &dc);
             quest_rerun();
@@ -632,9 +683,9 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             if (!r->nneed) { app_info("这个任务没有可补发的物品。"); return 0; }
             if (!app_confirm(fmt_new("把任务所需材料 %s 邮件发给 %s？", r->need, g.cur.name)))
                 return 0;
-            qsend_n = r->nneed;
+            dc.send_n = r->nneed;
             for (int k = 0; k < r->nneed; k++) {
-                GrantItem *g0 = &qsend[k];
+                GrantItem *g0 = &dc.send[k];
                 memset(g0, 0, sizeof(*g0));
                 g0->id = r->need_id[k];
                 g0->num = r->need_cnt[k] ? r->need_cnt[k] : 1;
@@ -651,11 +702,11 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
                                  r->name[0] ? r->name : "?", r->id,
                                  r->nneed ? r->need : "（此任务无需材料）")))
             return 0;
-        memset(&qj, 0, sizeof(qj));
-        qj.slot = r->slot;
-        qj.purge = 1;
-        qj.purge_n = r->nneed;
-        for (int k = 0; k < r->nneed; k++) qj.purge_id[k] = r->need_id[k];
+        memset(&dc.q, 0, sizeof(dc.q));
+        dc.q.slot = r->slot;
+        dc.q.purge = 1;
+        dc.q.purge_n = r->nneed;
+        for (int k = 0; k < r->nneed; k++) dc.q.purge_id[k] = r->need_id[k];
         dc.kind = D_QSLOT;
         app_act("完美清除", quest_work, &dc);
         quest_rerun();

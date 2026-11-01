@@ -929,7 +929,13 @@ int db_save_blob(Db *d, const Charac *c, const char *table, const char *field,
 // ---------------- 基础信息 ----------------
 int db_name_taken(Db *d, const char *name, u32 except_no) {
     int taken = 0;
-    set_names(d, "latin1");
+    // 用配置里的字符集（默认 45=utf8mb4），和读路径一致。早先这里切到 latin1，
+    // 理由是「写 UTF-8 字节流」；charac_name 实际是 varchar(20) CHARACTER SET utf8，
+    // 服务端会按 latin1 逐字节解释我们送进去的 UTF-8，再转成 utf8 存 —— 双重编码。
+    // 写按 latin1、读按 utf8mb4，两边不可能同时成立：库里正确存着「测试角色」时
+    // 这条查询恒不命中，重名检查形同虚设。
+    // 每次都显式设一遍：邮件/管理员那几条路径会把会话停在 latin1 或 utf8mb3。
+    set_names(d, db_cs_name(s_cs));
     char *e = mysql_escape(name);
     Str s = {0};
     MyResult r = {0};
@@ -941,22 +947,22 @@ int db_name_taken(Db *d, const char *name, u32 except_no) {
     }
     my_free(&r);
     str_free(&s);
-    // 复原要回到「配置的那个」字符集，不能写死 utf8。
-    // 配置默认 45（utf8mb4），写死 utf8 等于把会话降成 utf8mb3：之后读到含 4 字节
-    // 字符的名字会被服务端替换成 '?'，再往后写库就按 mb3 转义 —— 静默的乱码/截断。
-    set_names(d, db_cs_name(s_cs));
     return taken;
 }
 
 int db_set_name(Db *d, const Charac *c, const char *name, Err err) {
-    // 必须 latin1 连接写 UTF-8 字节流，否则中文名变乱码
-    set_names(d, "latin1");
+    // 与读路径用同一个字符集（db_cs_name(s_cs)），别再手工切 latin1：
+    // 那样写进去的是双重编码的乱码，工具自己下一次读都还原不回来；而且列上限
+    // 按「字符」算，切到 latin1 后一个汉字占 3 个字符，7 个汉字（21 字节）就会被
+    // 截成 20 个字符、末字切一半。用配置的字符集，21 字节只是 7 个字符，不会被截。
+    // 显式设一遍而不是「假定会话是对的」：邮件/管理员那几条路径会把会话停在
+    // latin1 或 utf8mb3，不设就会按上一个动作的字符集转义，同样写出乱码。
+    set_names(d, db_cs_name(s_cs));
     char *e = mysql_escape(name);
     int ok = db_exec(d, "改角色名", "taiwan_cain.charac_info", "charac_no", c->no, err,
                      "UPDATE taiwan_cain.charac_info SET charac_name='%s' WHERE charac_no=%u",
                      e ? e : "", c->no);
     free(e);
-    set_names(d, db_cs_name(s_cs));   // 同上：回到配置的字符集，不是写死 utf8
     return ok;
 }
 
@@ -1176,7 +1182,13 @@ int db_open_equip_slot(Db *d, const Charac *c, Err err) {
                    c->no);
 }
 
-// 先删后插，中途断掉会连原来的上限也一起没了，所以包事务
+// 行可能不存在（角色从没碰过装备等级管理），所以用「有行则改、无行则建」，
+// 和 db_set_qp 同一写法。
+//
+// 早先这里是 DELETE + INSERT 只写两列：charac_manage_info 实际有四列
+// （charac_no / tag_charac_no / striker_skill_index / max_equip_level），
+// 整行删掉再补两列，等于把标签角色和支援兵技能选择清成 0 —— 工具没提示，
+// 也不在 undo 快照里。只写目标列就不会碰到另外两列，连事务都不需要了。
 //
 // lev_max 传等级的封顶值（settings.ini [gm] lev_max，默认 85），不是 999：
 // max_equip_level 是「能穿多少级的装备」，服务端拿它跟角色等级比。写成 999
@@ -1185,21 +1197,14 @@ int db_open_equip_slot(Db *d, const Charac *c, Err err) {
 int db_unlock_lev_equip(Db *d, const Charac *c, int lev_max, Err err) {
     int lv = lev_max;
     if (lv < 1 || lv > 255) lv = 85;          // 调用方没传就退回默认，别把 0 写进去
-    if (!db_tx_begin(d, err)) return 0;
     Str s = {0};
-    str_catf(&s, "DELETE FROM taiwan_cain.charac_manage_info WHERE charac_no=%u", c->no);
-    run(d, &s);
-    str_clear(&s);
     str_catf(&s, "INSERT INTO taiwan_cain.charac_manage_info (charac_no,max_equip_level) "
-                 "VALUES (%u,%d)", c->no, lv);
+                 "VALUES (%u,%d) ON DUPLICATE KEY UPDATE max_equip_level=VALUES(max_equip_level)",
+             c->no, lv);
     int ok = run(d, &s);
     str_free(&s);
-    if (!ok) {
-        snprintf(err, ERRBUF, "解锁装备等级：%s", d->err);
-        db_tx_rollback(d);
-        return 0;
-    }
-    return db_tx_commit(d, err);
+    if (!ok) snprintf(err, ERRBUF, "解锁装备等级：%s", d->err);
+    return ok;
 }
 
 int db_max_expert(Db *d, const Charac *c, Err err) {

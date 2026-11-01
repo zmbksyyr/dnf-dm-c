@@ -1,6 +1,7 @@
 // app 实现：配置、异步任务、连接/角色/数据/保存。
 #include "app.h"
 #include "act.h"       // act_apply_lists（列表暂存搬入）
+#include "ui.h"        // ui_data_apply_lists（宠物/时装/任务列表暂存搬入）
 #include <stdio.h>     // app_bubble_export 用 FILE/fopen
 #include <time.h>      // 泡点生效时长的绝对截止时刻
 
@@ -634,6 +635,15 @@ void app_connect(void) {
 }
 
 void app_disconnect(void) {
+    // 先等占用这条连接的作业退出，再关连接。
+    // db_close 会 free 收发包缓冲并关掉 socket，而 w_write / w_load / w_poll 此刻
+    // 可能正在这条连接上 recv/memmove；紧接着的 db_free_data 释放的又正是它们手中
+    // 那份容器。写 6 个容器要几百毫秒，这几百毫秒里「断开」一直可点 ——
+    // 退出路径（main.c:929 WM_CLOSE）早就是这个顺序，断开这条漏了同一步。
+    job_stop(&g.job_load);
+    job_stop(&g.job_act);
+    job_stop(&g.job_poll);
+    job_stop(&g.job_bubble);
     if (g.db_ok) db_close(&g.db);
     g.lists_ready = 0;
     g.db_ok = 0;
@@ -1716,6 +1726,7 @@ void app_tick(void) {
     if (job_poll(&g.job_act, err)) {
         app_sync_apply();                    // 写后校验的结果搬到 g.*（job 线程只暂存）
         act_apply_lists();                   // 列表暂存搬到 g.bans/g.events/g.event_info
+        ui_data_apply_lists();               // 宠物/时装/任务列表暂存搬到 g.pets/…
         int was_write = g.write_mask != 0;
         if (err[0]) {
             app_status("%s 失败：%s", g.act_what, err);

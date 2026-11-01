@@ -176,3 +176,8 @@ void page_bubble_create(Page *p);
 void page_bubble_pump(void);            // 泡点状态行（倒计时/上次结算）跟着 tick 刷
 void page_ban_create(Page *p);
 void page_log_create(Page *p);
+
+// 宠物/时装/任务三页的列表暂存搬到 g.pets/g.avatars/g.quests（UI 线程，
+// app_tick 在 job_poll(&g.job_act) 之后调）。作业线程只写各自的暂存 Vec，
+// 不再原地重建 g.* —— 那会在 UI 线程遍历同一份 Vec 时 realloc 掉旧缓冲。
+void ui_data_apply_lists(void);

@@ -402,7 +402,20 @@ static LRESULT scan_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
         }
         return 0;
     }
-    if (m == WM_DESTROY) { KillTimer(d, 1); s_slv = s_sinfo = NULL; return 0; }
+    if (m == WM_DESTROY) {
+        KillTimer(d, 1);
+        s_slv = s_sinfo = NULL;
+        // 关窗时必须把扫描状态一起复位：WM_TIMER 是这里唯一的完成检测点，
+        // 窗口没了它就断了，而 s_scan_open 只在 on_scanbad 里置 1、又被 gm_reload
+        // 清成 0 —— 于是 s_scan_busy 再也回不到 0，入口（on_scanbad / 6002 / 6003）
+        // 此后一律回「上一轮还没跑完」，全服清错误物品整页废掉，直到重启进程。
+        // 关窗时若作业还在跑，就让它照旧在后台把库改完 —— 这里放弃的只是
+        // 「等它跑完再填列表」这件事，不能连入口一起锁死。
+        s_scan_busy = 0;
+        s_phase = 0;
+        s_scan_open = 0;
+        return 0;
+    }
     if (m == WM_COMMAND) {
         switch (LOWORD(wp)) {
         case 6002:                               // 清除全部
