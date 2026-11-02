@@ -759,9 +759,18 @@ static int view_sync_char(Db *d, u32 mid, u32 cno, Err err) {
     u64 aff = 0;
     int ok = run_aff(d, &u, &aff);
     if (ok && aff == 0) {
-        // 没有这一行：不擅自建（charac_view 还有别的列），报出来让人知道差这一步
-        snprintf(err, ERRBUF, "账号 %u 在 charac_view 里没有行，角色 %u 的槽位没写回", mid, cno);
-        ok = 0;
+        // 0 行受影响也可能只是「内容本来就一样」，先确认这一行到底在不在
+        Str cq = {0};
+        MyResult cr = {0};
+        str_catf(&cq, "SELECT COUNT(*) FROM taiwan_cain.charac_view WHERE `m_id`=%u", mid);
+        int exists = select1(d, &cq, &cr) && cr.nrow && my_u64(&cr, 0, 0, 0) > 0;
+        my_free(&cr);
+        str_free(&cq);
+        if (!exists) {
+            // 没有这一行：不擅自建（charac_view 还有别的列），报出来让人知道差这一步
+            snprintf(err, ERRBUF, "账号 %u 在 charac_view 里没有行，角色 %u 的槽位没写回", mid, cno);
+            ok = 0;
+        }
     } else if (!ok) {
         snprintf(err, ERRBUF, "写回角色槽位失败：%s", d->err);
     }

@@ -765,7 +765,11 @@ def jobstop_cancel(ctx):
 
         mark = _log_mark()
         core.press(disc, 0.0)
-        time.sleep(33.0)                      # 等 job_stop 的 30 秒超时走完
+        # 等待期间窗口必须还能处理消息：卡死的窗口会被系统标成「未响应」
+        time.sleep(4.0)
+        ping = u.SendMessageTimeoutW(ctx.main, 0x0000, 0, 0, 0x0002, 2000, None)  # WM_NULL / SMTO_ABORTIFHUNG
+        ctx.ok("等作业退出期间窗口仍在响应", bool(ping), "SendMessageTimeout=%s" % (ping,))
+        time.sleep(29.0)                      # 等 job_stop 的 30 秒超时走完
         hit = [l for l in _log_since_lines(mark) if "断开取消" in l]
         ctx.ok("日志里有「断开取消：后台任务 30 秒内没有退出」的拒绝分支",
                bool(hit), hit[0] if hit else "(日志里没有)")

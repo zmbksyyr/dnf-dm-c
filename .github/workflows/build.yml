@@ -66,7 +66,7 @@ jobs:
           $cc += @(
             'build/res.obj',
             '-lcomctl32', '-lcomdlg32', '-lshell32', '-luser32',
-            '-lgdi32', '-lole32', '-lws2_32', '-ladvapi32', '-lmsimg32',
+            '-lgdi32', '-lole32', '-lws2_32', '-ladvapi32', '-lmsimg32', '-ldbghelp',
             '-o', $env:EXE_NAME
           )
 

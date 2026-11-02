@@ -34,7 +34,7 @@ set "CFLAGS=%TARGET% -std=c11 -O2 -DNDEBUG -DUNICODE -D_UNICODE %WARN%"
 rem One source list for both build systems: every src\*.c, no manual updates.
 set "SRC="
 for %%F in ("%ROOT%\src\*.c") do set "SRC=!SRC! "%%F""
-set "LIBS=-lcomctl32 -lcomdlg32 -lshell32 -luser32 -lgdi32 -lole32 -lws2_32 -ladvapi32 -lmsimg32"
+set "LIBS=-lcomctl32 -lcomdlg32 -lshell32 -luser32 -lgdi32 -lole32 -lws2_32 -ladvapi32 -lmsimg32 -ldbghelp"
 
 cd /d "%ROOT%" || goto :fail
 if not exist "%OUT%" mkdir "%OUT%" 2>nul

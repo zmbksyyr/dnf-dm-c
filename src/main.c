@@ -4,8 +4,49 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <dbghelp.h>
 
 HWND g_main;
+
+// 未捕获异常写一份转储：崩了至少知道崩在哪，不至于只有一个「程序已停止工作」
+static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep) {
+    char dir[MAX_PATH], file[MAX_PATH], ts[32], name[64];
+    app_config_dir(dir, sizeof(dir));
+    path_join(dir, sizeof(dir), dir, "crash");
+    dir_make(dir);
+    now_str(ts, sizeof(ts), "%Y%m%d-%H%M%S");
+    snprintf(name, sizeof(name), "crash-%s.dmp", ts);
+    path_join(file, sizeof(file), dir, name);
+
+    HANDLE h = CreateFileA(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mi;
+        mi.ThreadId = GetCurrentThreadId();
+        mi.ExceptionPointers = ep;
+        mi.ClientPointers = FALSE;
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), h,
+                          MiniDumpNormal, &mi, NULL, NULL);
+        CloseHandle(h);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+// 启动时看一眼上次有没有留下转储
+static void crash_check(void) {
+    char dir[MAX_PATH], pat[MAX_PATH];
+    app_config_dir(dir, sizeof(dir));
+    path_join(dir, sizeof(dir), dir, "crash");
+    path_join(pat, sizeof(pat), dir, "*.dmp");
+    WCHAR wpat[MAX_PATH];
+    utf16(pat, wpat, MAX_PATH);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(wpat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    FindClose(h);
+    app_log("上次运行异常退出，转储在 %s", dir);
+    app_status("上次异常退出 · 转储见 config\\crash");
+}
 
 static HINSTANCE g_hinst;
 
@@ -962,6 +1003,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     (void)prev;
     (void)cmd;
     g_hinst = inst;
+    SetUnhandledExceptionFilter(crash_filter);   // 崩了先把现场写下来
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
@@ -1021,6 +1063,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     buttons_refresh();
     chars_fill();
     status_refresh();
+    crash_check();                     // 上次异常退出的话给一句提示
     SetTimer(g_main, 1, 100, NULL);
 
     MSG msg;

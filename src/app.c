@@ -268,15 +268,42 @@ static int db_busy(void) {
            job_running(&g.job_bubble);
 }
 
-int job_stop(Job *j) {
+// 等作业线程退出。等的同时泵消息：停机可能持续几十秒，不泵的话窗口会变白、
+// 系统把它标成「未响应」。消息里只跳过主窗口的 WM_TIMER —— 那一拍会去 poll
+// 正在等的这个作业，和停机抢状态机。
+static int wait_job(Job *j, u64 deadline) {
+    int was = g_main && IsWindowEnabled(g_main);
+    if (g_main) EnableWindow(g_main, FALSE);      // 停机期间不接受新操作
+    int ok = 0;
+    for (;;) {
+        u64 now = now_ms();
+        if (now >= deadline) { ok = WaitForSingleObject(j->th, 0) == WAIT_OBJECT_0; break; }
+        DWORD left = (DWORD)(deadline - now);
+        DWORD r = MsgWaitForMultipleObjects(1, &j->th, FALSE, left, QS_ALLINPUT);
+        if (r == WAIT_OBJECT_0) { ok = 1; break; }
+        if (r == WAIT_TIMEOUT) { ok = 0; break; }
+        MSG m;
+        while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
+            if (m.message == WM_TIMER && m.hwnd == g_main) continue;
+            if (!IsDialogMessageW(g_main, &m)) {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        }
+    }
+    if (g_main && was) EnableWindow(g_main, TRUE);   // 原本就禁用（模态中）就别解锁
+    return ok;
+}
+
+static int job_stop_by(Job *j, u64 deadline) {
     if (j->th) {
-        if (WaitForSingleObject(j->th, 30000) != WAIT_OBJECT_0) {
+        if (!wait_job(j, deadline)) {
             // 超时：线程还在跑，不能关句柄（线程退出时句柄才可关）。
             // 标记 abandoned 并记日志，泄漏一个句柄但状态机不会假空闲。
             // 必须把「没等到」这件事告诉调用方：它接着要释放的正是这个线程
             // 正在读的收发包缓冲（db_close → free(m->buf)），不看返回值就等于
             // 一边 free 一边 recv。
-            app_log("任务线程 30 秒未退出，放弃等待（句柄保留）");
+            app_log("任务线程未在期限内退出，放弃等待（句柄保留）");
             return 0;                     // 保留 j->th 和 state，等下次 job_poll 收
         }
         CloseHandle(j->th);
@@ -285,6 +312,8 @@ int job_stop(Job *j) {
     InterlockedExchange(&j->state, 0);
     return 1;
 }
+
+int job_stop(Job *j) { return job_stop_by(j, now_ms() + 30000); }
 
 // ---------------- 页面 ----------------
 Blob *app_page_blob(int page) {
@@ -680,12 +709,16 @@ static int g_pq_head, g_pq_n;            // 环形：head 出队，n 排队数
 
 // 「断开」与「退出」共用的停机顺序：先停用这条连接的作业，再关连接。
 // 只列这 5 个；pvf / npk / grab 不碰 MySQL 连接，退出时才需要等。
+// 整批共用 30 秒截止，而不是每个作业各等 30 秒。
+static u64 s_stop_deadline;
+
 static int stop_db_jobs(void) {
-    int stopped = job_stop(&g.job_conn);
-    stopped &= job_stop(&g.job_load);
-    stopped &= job_stop(&g.job_act);
-    stopped &= job_stop(&g.job_poll);
-    stopped &= job_stop(&g.job_bubble);
+    s_stop_deadline = now_ms() + 30000;
+    int stopped = job_stop_by(&g.job_conn, s_stop_deadline);
+    stopped &= job_stop_by(&g.job_load, s_stop_deadline);
+    stopped &= job_stop_by(&g.job_act, s_stop_deadline);
+    stopped &= job_stop_by(&g.job_poll, s_stop_deadline);
+    stopped &= job_stop_by(&g.job_bubble, s_stop_deadline);
     return stopped;
 }
 
@@ -1468,9 +1501,25 @@ static int w_db_dump(void *ctx, Err err) {
 
 static int w_db_restore(void *ctx, Err err) {
     DbJobCtx *c = (DbJobCtx *)ctx;
+    // 还原是唯一「先删后插」的破坏性动作：动手前先自动存一份整库备份，
+    // 还原错了还能退回去。备份失败就不还原，别拿唯一的数据赌。
+    char dir[MAX_PATH], safe[MAX_PATH], ts[32];
+    art_dir("backup", dir, sizeof(dir));
+    art_stamp(ts, sizeof(ts));
+    snprintf(safe, sizeof(safe), "%s\\pre-restore-%s.sql", dir, ts);
+    int nt = 0;
+    u64 nr = 0;
+    if (!db_dump_sql(&g.db, safe, &nt, &nr, err)) {
+        snprintf(err, ERRBUF, "还原前自动备份失败，已中止：%s", err);
+        return 0;
+    }
+    app_log("还原前自动备份：%s（%d 表 / %llu 行）", safe, nt, (unsigned long long)nr);
+    art_prune(dir, "pre-restore-", 5);
+
     int n = 0;
     if (!db_restore_sql(&g.db, c->path, &n, err)) return 0;
     app_log("还原数据库 · 执行 %d 条语句 ← %s", n, c->path);
+    app_log("还原前快照：%s", safe);
     g.lists_ready = 0;
     return 1;
 }
@@ -1686,9 +1735,9 @@ void app_shutdown(void) {
     // 手里那 6 个 blob，db_close 收的是它的收发包缓冲，这时候「不释放」比「释放了
     // 崩」正确：进程马上就结束，泄漏的那点内存交给 OS 回收，是可接受的代价。
     int stopped = stop_db_jobs();
-    stopped &= job_stop(&g.job_pvf);
-    stopped &= job_stop(&g.job_grab);
-    stopped &= job_stop(&g.job_npk);
+    stopped &= job_stop_by(&g.job_pvf, s_stop_deadline);
+    stopped &= job_stop_by(&g.job_grab, s_stop_deadline);
+    stopped &= job_stop_by(&g.job_npk, s_stop_deadline);
     if (!stopped)
         app_log("退出：有任务线程 30 秒未退出，跳过资源释放（连接与容器交给系统回收）");
     if (stopped) {
