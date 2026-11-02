@@ -238,7 +238,7 @@ static int item_edit(HWND owner, int page, int slot, const Item *in, Item *out) 
 }
 
 // ================================================================ 物品页
-enum { I_SUB = PAGE_ID(PAGE_ITEM, 1), I_LIST, I_EDIT, I_CLR, I_CLRALL, I_INFO, I_BAD };
+enum { I_SUB = PAGE_ID(PAGE_ITEM, 1), I_LIST, I_EDIT, I_CLR, I_CLRALL, I_INFO, I_BAD, I_TIDY };
 
 static const char *kSubName[] = {"背包", "穿戴", "宠物", "仓库", "珠宝", "账号金库"};
 static HWND s_sub, s_list, s_info, s_sep;
@@ -476,6 +476,29 @@ static void item_clear_sel(void) {
     item_reload(NULL);
 }
 
+static void item_tidy(void) {
+    int sub = ui_combo_sel(s_sub);
+    if (sub < 0) sub = 0;
+    Blob *b = app_page_blob(sub);
+    if (!b || !b->ok) return;
+    if (!item_writable()) return;
+    int used = 0;
+    for (int i = 0; i < b->n; i++) if (!item_empty(&b->items[i])) used++;
+    if (!app_confirm(fmt_new("把「%s」的 %d 件物品前移、空槽挤到后面？\n\n立即写库。",
+                             kSubName[sub], used)))
+        return;
+    int n = 0;
+    for (int i = 0; i < b->n; i++) {
+        if (item_empty(&b->items[i])) continue;
+        if (i != n) b->items[n] = b->items[i];
+        n++;
+    }
+    for (int i = n; i < b->n; i++) memset(b->items[i].raw, 0, ITEM_SIZE);
+    if (!app_pending_page(sub)) { app_reload(); return; }
+    app_status("已整理「%s」：%d 件物品前移", kSubName[sub], n);
+    item_reload(NULL);
+}
+
 static void item_clear_all(void) {
     int sub = ui_combo_sel(s_sub);
     if (sub < 0) sub = 0;               // 没选中子页时按背包处理，别拿 -1 去索引名字表
@@ -508,6 +531,7 @@ static LRESULT item_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             case I_CLR: item_clear_sel(); return 0;
             case I_CLRALL: item_clear_all(); return 0;
             case I_BAD: item_bad_clear(); return 0;
+            case I_TIDY: item_tidy(); return 0;
         }
     }
     if (m == WM_NOTIFY) {
@@ -530,6 +554,7 @@ static void item_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, I_EDIT, "编辑"), ui_scale(60));
     ui_add(&r, ui_btn_at(p->wnd, I_CLR, "清空所选"), ui_scale(76));
     ui_add(&r, ui_btn_at(p->wnd, I_CLRALL, "整页清空"), ui_scale(76));
+    ui_add(&r, ui_btn_at(p->wnd, I_TIDY, "整理背包"), ui_scale(76));
     ui_add(&r, ui_btn_at(p->wnd, I_BAD, "清除错误物品"), ui_scale(104));
     // 窄窗口先保按钮，提示收起来（状态栏还有一份）
     RECT rc;
@@ -566,7 +591,10 @@ static void item_build(HWND parent) {
     ui_button(parent, "编辑", I_EDIT);
     ui_button(parent, "清空所选", I_CLR);
     ui_button(parent, "整页清空", I_CLRALL);
+    ui_button(parent, "整理背包", I_TIDY);
     ui_button(parent, "清除错误物品", I_BAD);
+    ui_tip(parent, GetDlgItem(parent, I_TIDY),
+           "把当前子页的空槽挤到后面、物品按原顺序前移（立即写库，可用撤销恢复）");
     ui_tip(parent, GetDlgItem(parent, I_BAD),
            "把当前角色各容器里类型/编号/数量非法或 PVF 认不出的物品写成空槽（确定后立即写库）");
 }
