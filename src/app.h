@@ -127,6 +127,8 @@ enum { L_MAILS = 1, L_PETS = 2, L_AVAS = 4, L_QUESTS = 8, L_BANS = 16, L_EVENTS 
 extern App g;
 
 void app_init(void);
+// 内部自检（--selftest）：不依赖窗口与数据库，返回非 0 表示有失败项
+int  selftest_run(void);
 void app_tick(void);
 void app_shutdown(void);
 void app_log(const char *fmt, ...);

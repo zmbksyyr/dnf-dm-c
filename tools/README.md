@@ -65,8 +65,19 @@ python tools\regress.py --only gm.       # 名字前缀过滤
 ```
 python tools\fuzz.py --config     # 损坏 settings.ini
 python tools\fuzz.py --pvf 5      # 截断/变异真实 PVF 的副本，跑 5 轮
+python tools\fuzz.py --npk        # 合成病态 npk（坏头/超大计数/越界索引）
 python tools\fuzz.py --sql        # 语法错误的还原文件
 ```
 
-判据只有一条：**报错但活着**。每轮都会备份并还原 `settings.ini`，PVF 用配置里真实文件的副本。
+判据只有一条：**报错但活着**。每轮都会备份并还原 `settings.ini`，PVF/NPK 用真实文件的副本。
+
+## 自检
+
+```
+DNF_GM.exe --selftest
+```
+
+不建窗口、不连库，只跑纯函数：编码、MD5/SHA1、zlib 往返与校验、物品 blob 打包解包、
+PVF 解密互逆。结果同时写 `config/selftest.txt`，退出码非 0 表示有失败项；CI 每次构建都会跑。
+
 

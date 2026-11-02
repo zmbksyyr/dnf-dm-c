@@ -78,6 +78,14 @@ jobs:
           "产物 $($f.Name)  $($f.Length) 字节  sha256=$h"
           "SIZE=$($f.Length)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # ---- 自检（不依赖数据库与窗口）----
+      - name: 自检
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath ".\$env:EXE_NAME" -ArgumentList '--selftest' -Wait -PassThru
+          if (Test-Path .\config\selftest.txt) { Get-Content .\config\selftest.txt }
+          if ($p.ExitCode -ne 0) { throw "自检失败（exit=$($p.ExitCode)）" }
+
       # ---- 打包 ----
       - name: 打包
         shell: pwsh

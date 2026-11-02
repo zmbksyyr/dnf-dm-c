@@ -17,6 +17,18 @@ void pvf_decrypt(u8 *p, size_t n, u32 crc) {
     }
 }
 
+// 解密是「异或密钥 + 右旋 6 位」，逆变换是「左旋 6 位 + 异或密钥」。
+// 目前只有读取需要解密；写在这里是为了自检能验证互逆。
+void pvf_encrypt(u8 *p, size_t n, u32 crc) {
+    const u32 k = crc ^ XOR_KEY;
+    size_t words = n / 4;
+    for (size_t i = 0; i < words; i++) {
+        u32 v = rd32(p + i * 4);
+        v = (v << 6) | (v >> 26);
+        wr32(p + i * 4, v ^ k);
+    }
+}
+
 // ---------------- 字符串表 ----------------
 const char *stab_get(const StrTab *t, int i) {
     if (!t || i < 0 || i >= t->n || !t->blob) return "";

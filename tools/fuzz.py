@@ -63,23 +63,33 @@ def with_ini(reader):
                 pass
 
 
-def set_pvf_path(path):
+def set_ini(section, key, value):
+    """临时把 ini 的某一项改成 value（结束时由 with_ini 整体还原）。"""
     def apply(raw):
         txt = raw.decode("utf-8", "replace")
-        out, in_pvf = [], False
-        found = False
+        out, cur, found = [], None, False
         for line in txt.splitlines():
-            if line.strip().startswith("["):
-                in_pvf = line.strip() == "[pvf]"
-            if in_pvf and line.startswith("path="):
-                out.append("path=" + path)
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                cur = s[1:-1]
+            if cur == section and line.startswith(key + "="):
+                out.append("%s=%s" % (key, value))
                 found = True
                 continue
             out.append(line)
         if not found:
-            out += ["[pvf]", "path=" + path]
+            out += ["[%s]" % section, "%s=%s" % (key, value)]
         open(INI, "w", encoding="utf-8").write("\n".join(out) + "\n")
     return apply
+
+
+def set_pvf_path(path):
+    return set_ini("pvf", "path", path)
+
+
+def set_img_dir(path):
+    return set_ini("pvf", "img", path)
+
 
 
 def pvf_cases(count):
@@ -127,6 +137,69 @@ def check_config(args):
     return alive
 
 
+def npk_cases():
+    """合成病态 npk：坏头、超大计数、越界索引，外加真实包的截断副本。"""
+    import configparser
+    cfg = configparser.RawConfigParser()
+    cfg.read(INI, encoding="utf-8")
+    img = cfg.get("pvf", "img", fallback="")
+    real = None
+    if img and os.path.isdir(img):
+        for name in sorted(os.listdir(img)):
+            if name.lower().endswith(".npk"):
+                real = os.path.join(img, name)
+                break
+    out = []
+    tmp = os.path.join(core.BUILD, "config", "fuzz-npk")
+    os.makedirs(tmp, exist_ok=True)
+
+    def add(name, data):
+        p = os.path.join(tmp, name)
+        open(p, "wb").write(data)
+        out.append((tmp, p, name))
+
+    add("random.npk", bytes(random.getrandbits(8) for _ in range(4096)))
+    hdr = b"NeoplePack_Bill" + b"\0" * 8          # 头 20 字节
+    # 计数 200000，但文件只有头部：read_at 必然失败
+    add("hugecount.npk", hdr[:16] + (200000).to_bytes(4, "little"))
+    # 一条索引，off/len 全 F：解析能过，取图必须失败
+    ent = (0xFFFFFFFF).to_bytes(4, "little") + (0xFFFFFFFF).to_bytes(4, "little") + b"A" * 256
+    add("badindex.npk", hdr[:16] + (1).to_bytes(4, "little") + ent)
+
+    if real:
+        size = os.path.getsize(real)
+        with open(real, "rb") as f:
+            add("trunc-real.npk", f.read(min(size, 1 << 20)))
+    return tmp, out
+
+
+def check_npk(args):
+    if not args.npk:
+        return True
+    root, cases = npk_cases()
+    bad = 0
+    try:
+        for i, (_dir, path, name) in enumerate(cases, 1):
+            with_ini(set_img_dir(root))
+            alive, _ = boot_check("贴图包", 12.0)
+            print("[%d/%d] %-20s alive=%s" % (i, len(cases), name, alive))
+            if not alive:
+                bad += 1
+    finally:
+        core.kill_stale()
+        try:
+            shutil.rmtree(root, ignore_errors=True)
+        except Exception:
+            pass
+        for _d, path, _n in cases:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return bad == 0
+
+
+
 def check_sql(args):
     """语法错误的还原文件：报错并回滚，进程活着。"""
     path = os.path.join(core.BUILD, "config", "backup", "fuzz-bad.sql")
@@ -172,8 +245,9 @@ def main():
     ap.add_argument("--config", action="store_true", help="损坏 settings.ini")
     ap.add_argument("--sql", action="store_true", help="语法错误的还原文件")
     ap.add_argument("--pvf", type=int, default=0, help="PVF 畸形副本轮数")
+    ap.add_argument("--npk", action="store_true", help="合成病态 npk 贴图包")
     a = ap.parse_args()
-    if not (a.config or a.sql or a.pvf):
+    if not (a.config or a.sql or a.pvf or a.npk):
         ap.print_help()
         return 1
     if not os.path.exists(core.EXE):
@@ -186,6 +260,8 @@ def main():
         ok &= check_sql(a)
     if a.pvf:
         ok &= check_pvf(a)
+    if a.npk:
+        ok &= check_npk(a)
     print("\n结果：%s" % ("全部存活且报错正常" if ok else "有异常，见上"))
     return 0 if ok else 1
 

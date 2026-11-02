@@ -1005,6 +1005,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     (void)cmd;
     g_hinst = inst;
     SetUnhandledExceptionFilter(crash_filter);   // 崩了先把现场写下来
+    // 自测模式：跑一遍纯函数自检后退出，不建窗口、不连库
+    if (wcsstr(GetCommandLineW(), L"--selftest")) return selftest_run();
     // 自测用：置这个环境变量启动即崩一次，验证转储链路本身能跑通
     if (getenv("DNF_GM_CRASH_TEST")) RaiseException(0xE0000001, 0, 0, NULL);
 

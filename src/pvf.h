@@ -71,7 +71,8 @@ typedef struct {
 
 int   pvf_open(Pvf *p, const char *path, PvfProg prog);   // 命中缓存秒开
 void  pvf_close(Pvf *p);
-void  pvf_decrypt(u8 *p, size_t n, u32 crc);              // 自反：解密与加密同一变换
+void  pvf_decrypt(u8 *p, size_t n, u32 crc);              // 读：异或 + 右旋 6 位
+void  pvf_encrypt(u8 *p, size_t n, u32 crc);              // 逆变换：左旋 6 位 + 异或（自检用）
 const Leaf *pvf_find(const Pvf *p, const char *path);
 int   pvf_read(const Pvf *p, const Leaf *lf, Buf *out);
 
