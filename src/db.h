@@ -212,6 +212,8 @@ void db_undo_flush(int force);      // 把本会话的写前快照落盘（force
 const char *db_cs_name(int charset);// 连接字符集编号 → SET NAMES 用的名字（备份头要用它，不能写死）
 int  db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err);
 int  db_restore_sql(Db *d, const char *path, int *stmts, Err err);
+// 还原前先验文件完整性：整库备份缺结尾标记说明写到一半，不能拿它去清库
+int  db_sql_file_complete(const char *path, int *is_full, Err err);
 
 // 长任务（备份/还原/全服扫描）的协作式取消与进度：
 // db_* 在每个循环边界查一次；进度回调由 app 层设置，可为 NULL。

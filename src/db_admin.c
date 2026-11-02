@@ -6,6 +6,26 @@
 #include "item.h"
 #include "zlib.h"
 #include <time.h>
+#include <stdio.h>
+
+// 备份「成功」必须等于文件完整：磁盘满、路径被占、中途被杀都会留下半截文件，
+// 那种备份比没有更危险——用户以为有后路。写完统一验一次结尾标记。
+static int file_ends_with(const char *path, const char *tail) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    int ok = 0;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long n = ftell(f), m = (long)strlen(tail);
+        if (n >= m) {
+            char buf[128];
+            if (m < (long)sizeof(buf) && fseek(f, n - m, SEEK_SET) == 0 &&
+                fread(buf, 1, (size_t)m, f) == (size_t)m)
+                ok = memcmp(buf, tail, (size_t)m) == 0;
+        }
+    }
+    fclose(f);
+    return ok;
+}
 
 // 把「列名, 数据类型」两列读进两个 Str Vec（整库备份 / 单表导出两处共用）。
 static void read_col_pairs(const MyResult *r, Vec *names, Vec *types) {
@@ -517,6 +537,11 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
     str_free(&out);
     for (int i = 0; i < tabs.n; i++) str_free(VEC_AT(&tabs, Str, i));
     vec_free(&tabs);
+    if (!file_ends_with(path, "SET FOREIGN_KEY_CHECKS=1;\n")) {
+        snprintf(err, ERRBUF, "备份文件不完整（写入失败或磁盘已满）：%s", path);
+        remove(path);
+        return 0;
+    }
     if (tables) *tables = nt;
     if (rows) *rows = nr;
     {   // 只留最近 5 份整库备份
@@ -537,7 +562,23 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
 // （带建表语句）做不到端到端原子，只能保证两个 DDL 之间的 DML 段是原子的。角色
 // 备份是纯 DML，能完整回滚 —— 而它恰恰是最需要回滚的那一种。
 static int view_sync_char(Db *d, u32 mid, u32 cno, Err err);
+int db_sql_file_complete(const char *path, int *is_full, Err err) {
+    Buf f = {0};
+    if (!file_read(path, &f)) { snprintf(err, ERRBUF, "读不到 %s", path); return 0; }
+    buf_reserve(&f, f.n + 1);
+    f.p[f.n] = 0;
+    int full = strstr((const char *)f.p, "-- DNF GM 数据库备份") != NULL;
+    int ok = !full ||
+             strstr((const char *)f.p + (f.n > 64 ? f.n - 64 : 0), "SET FOREIGN_KEY_CHECKS=1;") != NULL;
+    if (is_full) *is_full = full;
+    if (!ok) snprintf(err, ERRBUF, "备份文件不完整（缺少结尾标记），已拒绝还原：%s", path);
+    buf_free(&f);
+    return ok;
+}
+
 int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
+    // 先验完整性再动手：宁可什么都不做，也不拿半截备份去清库
+    if (!db_sql_file_complete(path, NULL, err)) return 0;
     Buf f = {0};
     if (!file_read(path, &f)) { snprintf(err, ERRBUF, "读不到 %s", path); return 0; }
     set_names(d, db_cs_name(d->charset));
@@ -555,6 +596,15 @@ int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
                 vmid = a;
                 vcno = b;
             }
+        }
+        // 整库备份必须带结尾标记：没有就是写到一半（磁盘满/被杀）。
+        // 这种文件里 DELETE 已经全了而 INSERT 只有一部分，执行等于清空。
+        int is_full = strstr((const char *)f.p, "-- DNF GM 数据库备份") != NULL;
+        if (is_full && !strstr((const char *)f.p + (f.n > 64 ? f.n - 64 : 0),
+                               "SET FOREIGN_KEY_CHECKS=1;")) {
+            snprintf(err, ERRBUF, "备份文件不完整（缺少结尾标记），已拒绝还原：%s", path);
+            buf_free(&f);
+            return 0;
         }
     }
 
@@ -988,6 +1038,17 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
         vec_free_strs(&types);
     }
     vec_free(&tabs);
+    {   // 结尾标记：还原端/用户都能据此判断文件是不是完整的
+        Str fin = {0};
+        str_cat(&fin, "-- 备份结束\n");
+        file_append(path, fin.p, (size_t)fin.n);
+        str_free(&fin);
+    }
+    if (!file_ends_with(path, "-- 备份结束\n")) {
+        snprintf(err, ERRBUF, "角色备份文件不完整（写入失败或磁盘已满）：%s", path);
+        remove(path);
+        return 0;
+    }
     if (tables) *tables = nt;
     if (rows) *rows = nr;
     {   // 角色备份只留最近 6 份

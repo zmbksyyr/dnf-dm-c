@@ -179,7 +179,7 @@ void app_bubble_tick(void) {
         const char *tg = bub_target_name(g.cfg.bubble_target);
         char d[88];
         if (err[0]) {
-            app_log("泡点结算失败：%s", err);
+            app_err("泡点结算失败：%s", err);
             snprintf(d, sizeof(d), "%s", err);
             bub_plan_add(tg, d, "发放失败");
         } else if (s_bubble_paid) {

@@ -162,19 +162,39 @@ void app_log_flush(void) {
     LeaveCriticalSection(&s_log_cs);
 }
 
-void app_log(const char *fmt, ...) {
+// 日志分三级：普通流水、警告、错误。级别只是行前缀，看日志时能一眼筛出来。
+static void log_v(const char *tag, const char *fmt, va_list ap) {
     char msg[1024], line[1200], ts[32];
-    va_list ap;
-    va_start(ap, fmt);
     fmtv(msg, sizeof(msg), fmt, ap);
-    va_end(ap);
     now_str(ts, sizeof(ts), "%H:%M:%S");
-    snprintf(line, sizeof(line), "[%s] %s\r\n", ts, msg);
+    if (tag) snprintf(line, sizeof(line), "[%s] %s %s\r\n", ts, tag, msg);
+    else snprintf(line, sizeof(line), "[%s] %s\r\n", ts, msg);
     if (s_log_cs_ok) EnterCriticalSection(&s_log_cs);
     str_cat(&s_log, line);
     int full = s_log.n >= 8192;
     if (s_log_cs_ok) LeaveCriticalSection(&s_log_cs);
     if (full) app_log_flush();
+}
+
+void app_log(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    log_v(NULL, fmt, ap);
+    va_end(ap);
+}
+
+void app_warn(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    log_v("警告", fmt, ap);
+    va_end(ap);
+}
+
+void app_err(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    log_v("错误", fmt, ap);
+    va_end(ap);
 }
 
 // 状态栏那一行带上时刻：连着点几下、或者「正在写入…」卡住了，看一眼就知道
@@ -924,7 +944,7 @@ static int w_load(void *ctx, Err err) {
     if (InterlockedExchange(&s_load_recheck, 0)) {     // 取走即清零
         Err e = {0};
         if (!db_read_charac(&g.db, c->c.no, &c->c, e))
-            app_log("重载：回读角色失败，按内存快照载入：%s", e);
+            app_err("重载：回读角色失败，按内存快照载入：%s", e);
     }
     db_free_data(&c->d);                 // 上一轮失败留下的半成品
     return db_load_data(&g.db, &c->c, &c->d, err);
@@ -1046,11 +1066,11 @@ int app_sync_char(void) {
     Charac c = g.cur;                      // no/mid/account 原样保留
     CharData d = g.data;
     if (!db_read_charac(&g.db, g.cur.no, &c, err)) {
-        app_log("写后校验失败（角色）：%s", err);
+        app_err("写后校验失败（角色）：%s", err);
         return 0;
     }
     if (!db_read_state(&g.db, &c, &d, err)) {
-        app_log("写后校验失败（状态）：%s", err);
+        app_err("写后校验失败（状态）：%s", err);
         return 0;
     }
     c.online = g.cur.online;               // 在线状态归轮询管，别被这次快照覆盖回去
@@ -1076,7 +1096,7 @@ void app_sync_apply(void) {
     g.data = s_sync_d;
     if (form_changed) {
         g.data_ver++;                      // 快照换代 → 表单重填一次
-        app_log("写后校验：库里的值跟写入的不一致，已按库里的值刷新");
+        app_warn("写后校验：库里的值跟写入的不一致，已按库里的值刷新");
     }
     app_row_sync();
 }
@@ -1518,6 +1538,11 @@ static int w_db_dump(void *ctx, Err err) {
 // 还原：不管从 GUI 还是命令行进来，都先自动整库备份。
 // 还原是唯一「先删后插」的破坏性动作，备份失败就不还原。
 int app_restore_file(const char *path, int *stmts, Err err) {
+    Err verr;
+    if (!db_sql_file_complete(path, NULL, verr)) {   // 坏文件不值得先做一次整库备份
+        snprintf(err, ERRBUF, "%s", verr);
+        return 0;
+    }
     char dir[MAX_PATH], safe[MAX_PATH], ts[32];
     art_dir("backup", dir, sizeof(dir));
     art_stamp(ts, sizeof(ts));
@@ -1804,7 +1829,7 @@ void app_tick(void) {
             snprintf(g.db_err, sizeof(g.db_err), "%s", err);
             g.db_ok = 0;
             app_status("连接失败：%s", err);
-            app_log("连接失败：%s", err);
+            app_err("连接失败：%s", err);
         } else {
             chars_apply();                  // 连接作业填好的角色列表在这里换上
             g.db_ok = 1;
@@ -1853,7 +1878,7 @@ void app_tick(void) {
         if (err[0]) {
             g.pvf_ok = 0;
             app_status("PVF 加载失败：%s", err);
-            app_log("PVF 加载失败：%s", err);
+            app_err("PVF 加载失败：%s", err);
         } else {
             g.pvf_ok = 1;
             app_status("PVF 已加载 · %d 个文件 · %d 条物品名", g.pvf.nleaf, g.pvf.items.n);
@@ -1880,7 +1905,7 @@ void app_tick(void) {
                 app_ui_refresh_buttons();
             } else {
                 app_status("%s 失败：%s", g.act_what, err);
-                app_log("%s 失败：%s", g.act_what, err);
+                app_err("%s 失败：%s", g.act_what, err);
                 if (was_write) {              // 写库失败：以库里的值为准，别让界面停在假数据
                     g.write_mask = 0;
                     g.pend_mask = 0;

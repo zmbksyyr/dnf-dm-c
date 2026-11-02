@@ -324,7 +324,7 @@ static int db_restore_main(void) {
     Err err;
     int n = 0;
     int ok = app_restore_file(path, &n, err);
-    if (!ok) app_log("还原失败：%s", err);
+    if (!ok) app_err("还原失败：%s", err);
     app_shutdown();
     return ok ? 0 : 1;
 }
@@ -351,7 +351,7 @@ static int db_dump_main(void) {
     u64 nr = 0;
     int ok = db_dump_sql(&g.db, path, &nt, &nr, err);
     if (ok) app_log("备份数据库 · %d 张表 / %llu 行 → %s", nt, (unsigned long long)nr, path);
-    else app_log("备份失败：%s", err);
+    else app_err("备份失败：%s", err);
     app_shutdown();
     return ok ? 0 : 1;
 }
@@ -367,7 +367,7 @@ static int db_test_main(void) {
     Vec v = {0};
     vec_init(&v, sizeof(Charac));
     int ok = db_poll_chars(&g.db, &v, 500, err);
-    if (!ok) app_log("db-test 轮询失败：%s", err);
+    if (!ok) app_err("db-test 轮询失败：%s", err);
     int online = 0;
     for (int i = 0; i < v.n; i++)
         if (VEC_AT(&v, Charac, i)->online) online++;
@@ -377,7 +377,7 @@ static int db_test_main(void) {
         Charac c = *(Charac *)vec_at(&v, 0);
         CharData d = {0};
         int ok2 = db_load_data(&g.db, &c, &d, err);
-        if (!ok2) app_log("db-test 载入失败：%s", err);
+        if (!ok2) app_err("db-test 载入失败：%s", err);
         else
             app_log("db-test 载入 %s(%u)：金币 %llu · 复活币 %llu · 点券 %llu+%llu · 背包 %d 格 · "
                     "仓库 %d 格 · SP %d · PVP %d/%d/%d",
@@ -396,7 +396,7 @@ static int db_test_main(void) {
                     (unsigned long long)s2.cera_point, s2.cargo_cap, s2.sp, s2.sp2, s2.tp, s2.tp2,
                     s2.qp, s2.pvp_grade, s2.pvp_win, s2.pvp_point);
         else
-            app_log("db-test 状态回读失败：%s", err);
+            app_err("db-test 状态回读失败：%s", err);
         ok = ok && ok2;
     }
     vec_free(&v);

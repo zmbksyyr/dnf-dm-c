@@ -132,6 +132,8 @@ int  selftest_run(void);
 void app_tick(void);
 void app_shutdown(void);
 void app_log(const char *fmt, ...);
+void app_warn(const char *fmt, ...);       // 行首加「警告」
+void app_err(const char *fmt, ...);        // 行首加「错误」
 void app_log_block(const char *s);        // 多行文本按行写日志
 void app_status(const char *fmt, ...);
 int  app_confirm(const char *text);

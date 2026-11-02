@@ -1548,3 +1548,30 @@ def scan_then_backup(ctx):
         lock.unlock()
     ctx.ok("扫描结束后备份自动完成", _wait_status(ctx, "备份数据库 完成", 120.0), _status(ctx))
     ctx.ok("进程仍然活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
+
+@core.case("db.reject_truncated", needs=("db",), group="always",
+           desc="写到一半的整库备份被拒绝还原：结尾标记校验")
+def reject_truncated(ctx):
+    """验：备份「成功」必须文件完整；不完整的文件在还原前就被拦住。"""
+    import subprocess
+
+    d = os.path.dirname(core.EXE)
+    full = os.path.join(core.BUILD, "config", "backup", "regress-trunc-full.sql")
+    trunc = os.path.join(core.BUILD, "config", "backup", "regress-trunc.sql")
+    try:
+        r = subprocess.run([core.EXE, "--db-dump=" + full], cwd=d,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+        if not ctx.check("备份退出码", r.returncode, 0):
+            return
+        data = open(full, "rb").read()
+        ctx.ok("备份文件带结尾标记", b"SET FOREIGN_KEY_CHECKS=1;" in data[-64:], "尾部 64 字节")
+        open(trunc, "wb").write(data[:-40])          # 模拟写到一半
+        r = subprocess.run([core.EXE, "--db-restore=" + trunc], cwd=d,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        ctx.ok("截断的备份被拒绝", r.returncode != 0, "rc=%d" % r.returncode)
+    finally:
+        for p in (full, trunc):
+            try:
+                os.remove(p)
+            except OSError:
+                pass

@@ -85,7 +85,7 @@ static int mail_work(void *ctx, Err err) {
             int ok = db_send_mail_bulk(&g.db, c->target == 2, "GM", c->text, c->iid,
                                        (u32)(c->inum > 0 ? c->inum : 1), c->avata, c->creature, &sent, err);
             if (ok) app_log("批量发信：成功发往 %u 个角色", sent);
-            else app_log("批量发信中断：已发送 %u 个后失败", sent);
+            else app_err("批量发信中断：已发送 %u 个后失败", sent);
             return ok;
         }
         case A_DELALLS: return db_delete_all_mails_global(&g.db, err);
