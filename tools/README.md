@@ -60,6 +60,16 @@ python tools\regress.py --only gm.       # 名字前缀过滤
 - 控件编号是 `1000 + page*100 + n`（`core.PID`），界面改了要同步。
 - 跨进程读文本只用 `WM_GETTEXT`（Edit/Static/ListBox）；列表只读行数，不读单元格文本。
 
+## 压测与一致性
+
+```
+python tools\soak.py --sec 480        # 随机操作压测：盯崩溃、句柄、内存
+python tools\kill_test.py             # 写操作卡住时硬杀进程，验数据没被写一半
+```
+
+`soak.py` 判据：进程活着、没有新转储、GDI/USER 句柄与工作集在首轮建页后不再增长。
+`kill_test.py` 判据：杀进程后目标列仍是原值（服务端回滚），重启后能正常连库读数据。
+
 ## 模糊测试
 
 ```
