@@ -2,6 +2,14 @@
 #include "db_priv.h"
 #include "db.h"
 
+// ---------------- 长任务取消 / 进度 ----------------
+static volatile LONG s_cancel;
+DbProgress db_progress_cb;
+
+void db_cancel_request(void) { InterlockedExchange(&s_cancel, 1); }
+void db_cancel_clear(void) { InterlockedExchange(&s_cancel, 0); }
+int db_cancelled(void) { return s_cancel != 0; }
+
 // ---------------- 基础设施 ----------------
 // 影响行数顺手带出来：写操作靠它区分「改了」和「一条都没碰到」。
 // MyResult 里本来就有 affected，原来 run() 直接扔了。

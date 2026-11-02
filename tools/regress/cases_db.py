@@ -42,6 +42,8 @@ PAGE_MAIL, PAGE_PET, PAGE_GM, PAGE_BUBBLE = 3, 4, 8, 9
 
 G_NAME, G_UNLOCK, G_NO_WEIGHT, G_FATIGUE = 1801, 1817, 1815, 1819
 G_SCANBAD, G_CLONE = 1827, 1828
+G_RESTORE = 1824
+IDC_CANCEL = 119
 
 M_TEXT, M_AID, M_SEND = 1310, 1308, 1311
 P_LIST, P_NAME, P_RENAME = 1401, 1402, 1403
@@ -1469,5 +1471,51 @@ def full_roundtrip(ctx):
     finally:
         try:
             os.remove(dump)
+        except OSError:
+            pass
+
+@core.case("db.cancel_restore", needs=("gui", "db"), group="always",
+           desc="还原大文件时点「取消」：任务中止、事务整体回滚、连接可继续用")
+def cancel_restore(ctx):
+    """验：长任务可取消，且取消不等于「半途写入」——跑过的那 6 万条必须回滚。"""
+    cno = ctx.char_no()
+    if not ctx.ok("库里有角色", cno is not None):
+        return
+    lev0 = ctx.q1("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%s", (cno,))
+    d = os.path.join(core.BUILD, "config", "backup")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "regress-cancel.sql")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("SET NAMES utf8mb4;\n")
+        for _ in range(60000):
+            f.write("UPDATE taiwan_cain.charac_info SET lev=1 WHERE charac_no=%d;\n" % cno)
+        for _ in range(60000):
+            f.write("UPDATE taiwan_cain.charac_info SET lev=lev WHERE charac_no=%d;\n" % cno)
+    try:
+        ctx.page(PAGE_GM)
+        core.press(ctx.ctl(G_RESTORE), 0.6)
+        if not ctx.ok("弹出文件选择框", _file_dialog_set(ctx, path)):
+            return
+        for _ in range(2):
+            b, t = _wait_box(ctx.main, 8.0)
+            if not b:
+                break
+            _close_box(ctx.main, b, 1)
+        # 等任务真跑起来（取消按钮可用），并确认状态栏有进度百分比
+        if not ctx.ok("取消按钮可用",
+                      core.wait_until(lambda: _enabled(u.GetDlgItem(ctx.main, IDC_CANCEL)), 20.0)):
+            return
+        ctx.ok("状态栏显示进度百分比",
+               core.wait_until(lambda: "%" in _status(ctx), 10.0), _status(ctx))
+        core.press(u.GetDlgItem(ctx.main, IDC_CANCEL), 0.2)
+        ctx.ok("任务被取消", _wait_status(ctx, "已取消", 120.0), _status(ctx))
+        ctx.check("取消后角色等级未变（整体回滚）",
+                  ctx.q1("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%s", (cno,)), lev0)
+        ctx.ok("进程仍然活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
+        ctx.ok("连接仍可用（能重新载入角色）",
+               core.wait_until(lambda: (_select_char(ctx) or True), 30.0))
+    finally:
+        try:
+            os.remove(path)
         except OSError:
             pass

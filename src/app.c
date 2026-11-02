@@ -7,6 +7,21 @@
 
 App g;
 
+// ---------------- 长任务进度 / 取消 ----------------
+static volatile LONG s_job_pct = -1;       // 0..100；-1 表示这个任务不报进度
+
+static void progress_cb(int pct) { InterlockedExchange(&s_job_pct, pct); }
+
+void app_cancel_current(void) {
+    if (!job_running(&g.job_act)) {
+        app_status("当前没有可取消的任务");
+        return;
+    }
+    db_cancel_request();
+    app_status("正在取消…");
+    app_log("用户请求取消当前任务：%s", g.act_what);
+}
+
 // 载入暂存区。断开连接、退出、载入完成这三处都要动它，所以实例放在全局区，
 // 别藏在「角色」小节里——那边看到它的人容易以为它只跟选角色有关。
 typedef struct {
@@ -1105,6 +1120,8 @@ static struct {
 
 static int act_start(const char *what, ActFn fn, void *ctx, int ctxsz) {
     snprintf(g.act_what, sizeof(g.act_what), "%s", what);
+    db_cancel_clear();                  // 新任务从「未被取消」开始
+    InterlockedExchange(&s_job_pct, -1);
     g_act_ctx.fn = fn;
     if (ctx && ctxsz > 0 && ctxsz <= PEND_BUF) {
         memcpy(g_act_ctx.buf, ctx, (size_t)ctxsz);
@@ -1716,6 +1733,7 @@ void app_init(void) {
     vec_init(&g.event_info, sizeof(EventInfo));
     vec_init(&g.cre_ids, sizeof(u32));
     act_init();                              // 列表暂存 Vec（act.c 内部）
+    db_progress_cb = progress_cb;            // db 层长任务把进度回传到这里
     vec_init(&s_chars_next, sizeof(Charac)); // 角色列表暂存（作业线程写）
 
     cfg_load(&g.cfg, g.cfg_path);
@@ -2101,6 +2119,18 @@ void app_tick(void) {
             if (!strncmp(g.act_what, "邮件发放", 8)) vec_clear(&g.grant);
             if (!strncmp(g.act_what, "直接入包", 8)) { vec_clear(&g.grant); app_reload(); }
         }
+    }
+
+    // 长任务：进度写进状态栏，同时让「取消」按钮跟着任务起落
+    {
+        static int last_ar = -1;
+        int ar = job_running(&g.job_act);
+        if (ar != last_ar) {
+            last_ar = ar;
+            app_ui_refresh_buttons();
+        }
+        int pct = (int)s_job_pct;
+        if (ar && pct >= 0) app_status("%s… %d%%", g.act_what, pct);
     }
 
     if (job_poll(&g.job_poll, err)) {

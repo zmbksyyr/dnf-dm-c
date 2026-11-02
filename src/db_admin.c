@@ -370,6 +370,14 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
     int nt = 0;
     u64 nr = 0;
     for (int ti = 0; ti < tabs.n; ti++) {
+        if (db_cancelled()) {
+            snprintf(err, ERRBUF, "已取消");
+            for (int k = 0; k < tabs.n; k++) str_free(VEC_AT(&tabs, Str, k));
+            vec_free(&tabs);
+            str_free(&out);
+            return 0;
+        }
+        if (db_progress_cb) db_progress_cb(tabs.n ? ti * 100 / tabs.n : 100);
         Str *full = VEC_AT(&tabs, Str, ti);
         char sc[80], tb[128];
         if (!split_tbl(str_c(full), sc, sizeof(sc), tb, sizeof(tb))) continue;
@@ -603,6 +611,7 @@ int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
         }
         if (c == ';') {
             if (cur.n) {
+                if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); goto fail; }
                 if (!run(d, &cur)) { snprintf(err, ERRBUF, "第 %d 条：%s", n + 1, d->err); goto fail; }
                 n++;
                 str_clear(&cur);
@@ -615,6 +624,7 @@ int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
         int only_ws = 1;
         for (int i = 0; i < cur.n; i++)
             if (cur.p[i] > ' ') { only_ws = 0; break; }
+        if (!only_ws && db_cancelled()) { snprintf(err, ERRBUF, "已取消"); goto fail; }
         if (!only_ws && !run(d, &cur)) { snprintf(err, ERRBUF, "第 %d 条：%s", n + 1, d->err); goto fail; }
         if (!only_ws) n++;
     }
@@ -1843,6 +1853,14 @@ int db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, ItemStackLim lim, 
     Vec mids;                       // 账号金库按账号扫一次就够
     vec_init(&mids, sizeof(u32));
     for (int ci = 0; ci < ch.nrow; ci++) {
+        if (db_cancelled()) {
+            snprintf(err, ERRBUF, "已取消");
+            my_free(&ch);
+            str_free(&s);
+            vec_free(&mids);
+            return 0;
+        }
+        if (db_progress_cb) db_progress_cb(ch.nrow ? ci * 100 / ch.nrow : 100);
         Charac c;
         memset(&c, 0, sizeof(c));
         c.no = (u32)my_u64(&ch, ci, 0, 0);

@@ -213,6 +213,14 @@ const char *db_cs_name(int charset);// 连接字符集编号 → SET NAMES 用�
 int  db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err);
 int  db_restore_sql(Db *d, const char *path, int *stmts, Err err);
 
+// 长任务（备份/还原/全服扫描）的协作式取消与进度：
+// db_* 在每个循环边界查一次；进度回调由 app 层设置，可为 NULL。
+void db_cancel_request(void);
+void db_cancel_clear(void);
+int  db_cancelled(void);
+typedef void (*DbProgress)(int pct);
+extern DbProgress db_progress_cb;
+
 // 全服错误物品扫描：容器槽位 / 邮件附件 / 时装宠物表行，一份清单全覆盖
 typedef struct {
     u32  cno, mid;

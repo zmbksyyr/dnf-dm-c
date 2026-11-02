@@ -213,6 +213,8 @@ void app_money_text(u64 v, char *buf, int cap);
 // 异步写操作：忙时排队（复制 ctx），空闲后自动执行
 int  app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz);
 int  app_act_idle(void);                 // 连接空闲且没有排队动作：能直接发
+// 取消正在跑的长任务（备份/还原/全服扫描）；没有可取消的任务时只提示
+void app_cancel_current(void);
 #define app_act(what, fn, ctx) app_act_n((what), (fn), (void *)(ctx), (int)sizeof(*(ctx)))
 // 无上下文的动作：不要用 app_act(..., NULL)，那会对 void 取 sizeof
 #define app_act_null(what, fn) app_act_n((what), (fn), NULL, 0)
