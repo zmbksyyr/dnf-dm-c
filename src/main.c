@@ -1012,6 +1012,18 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     SetUnhandledExceptionFilter(crash_filter);   // 崩了先把现场写下来
     // 自测模式：跑一遍纯函数自检后退出，不建窗口、不连库
     if (wcsstr(GetCommandLineW(), L"--selftest")) return selftest_run();
+    // 贴图包自测：--npk-test=<目录>，把索引里前若干条真解一遍（模糊测试用）
+    if (wcsstr(GetCommandLineW(), L"--npk-test=")) {
+        const WCHAR *at = wcsstr(GetCommandLineW(), L"--npk-test=");
+        char dir[MAX_PATH];
+        utf8(at + 11, dir, sizeof(dir));
+        str_trim(dir);
+        app_init();
+        int n = app_npk_decode_all(dir, 300);
+        app_log("npk-test：%s 解出 %d 个图标", dir, n);
+        app_log_flush();                 // 立刻退出，缓冲区里的日志要主动落盘
+        return n < 0 ? 2 : 0;
+    }
     // 自测用：置这个环境变量启动即崩一次，验证转储链路本身能跑通
     if (getenv("DNF_GM_CRASH_TEST")) RaiseException(0xE0000001, 0, 0, NULL);
 

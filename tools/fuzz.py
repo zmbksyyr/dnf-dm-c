@@ -173,6 +173,70 @@ def npk_cases():
     return tmp, out
 
 
+def npk_deep(args):
+    """变异真实贴图包并用 --npk-test 真解图标：走 zlib + IMG 帧表这条路径。
+
+    只看「有没有崩」：返回码 0（解出若干净表）或 2（索引都建不起来）都算正常。
+    """
+    import configparser
+    import subprocess
+
+    cfg = configparser.RawConfigParser()
+    cfg.read(INI, encoding="utf-8")
+    img = cfg.get("pvf", "img", fallback="")
+    cand = []
+    if img and os.path.isdir(img):
+        for name in os.listdir(img):
+            if name.lower().endswith(".npk"):
+                p = os.path.join(img, name)
+                n = os.path.getsize(p)
+                if 5000 < n < 400000:
+                    cand.append((n, p))
+    if not cand:
+        print("跳过贴图包深度模糊：没找到大小合适的 npk")
+        return True
+    cand.sort()
+    src = cand[len(cand) // 2][1]
+    data = open(src, "rb").read()
+    tmp = os.path.join(core.BUILD, "config", "fuzz-npk")
+    exe_dir = os.path.dirname(core.EXE)
+    rounds = args.npk_deep
+    bad = 0
+    try:
+        for i in range(rounds):
+            mode = i % 4
+            b = bytearray(data)
+            if mode == 0:
+                b = bytearray(data[: random.randrange(100, len(data))])
+            elif mode == 1:
+                for _ in range(30):
+                    b[random.randrange(len(b))] ^= 0xFF
+            elif mode == 2:
+                for _ in range(120):
+                    b[random.randrange(min(len(b), 2048))] ^= 0xFF
+            else:
+                for _ in range(50):
+                    b[random.randrange(min(len(b), 264 * 20))] ^= 0xFF
+            shutil.rmtree(tmp, ignore_errors=True)
+            os.makedirs(tmp, exist_ok=True)
+            open(os.path.join(tmp, "mut.NPK"), "wb").write(b)
+            try:
+                r = subprocess.run([core.EXE, "--npk-test=" + tmp], cwd=exe_dir,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=120)
+                rc = r.returncode
+            except subprocess.TimeoutExpired:
+                rc = "TIMEOUT"
+            good = rc in (0, 2)
+            print("[%d/%d] %-10s %7d 字节 rc=%s %s"
+                  % (i + 1, rounds, ["trunc", "sparse", "head", "index"][mode],
+                     len(b), rc, "" if good else "<-- 异常"))
+            if not good:
+                bad += 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return bad == 0
+
 def check_npk(args):
     if not args.npk:
         return True
@@ -271,8 +335,9 @@ def main():
     ap.add_argument("--sql", type=int, nargs="?", const=1, default=0, help="随机词法碎片喂还原器（可给轮数）")
     ap.add_argument("--pvf", type=int, default=0, help="PVF 畸形副本轮数")
     ap.add_argument("--npk", action="store_true", help="合成病态 npk 贴图包")
+    ap.add_argument("--npk-deep", type=int, default=0, metavar="N", help="变异真实 npk 并真解图标 N 轮")
     a = ap.parse_args()
-    if not (a.config or a.sql or a.pvf or a.npk):
+    if not (a.config or a.sql or a.pvf or a.npk or a.npk_deep):
         ap.print_help()
         return 1
     if not os.path.exists(core.EXE):
@@ -287,6 +352,8 @@ def main():
         ok &= check_pvf(a)
     if a.npk:
         ok &= check_npk(a)
+    if a.npk_deep:
+        ok &= npk_deep(a)
     print("\n结果：%s" % ("全部存活且报错正常" if ok else "有异常，见上"))
     return 0 if ok else 1
 

@@ -6,6 +6,28 @@
 
 App g;
 
+// ---------------- 贴图包自测 ----------------
+// 给 --npk-test 用：把索引里前若干条目的前几帧真解一遍。图标解码是唯一直接吃
+// 外部二进制（zlib + IMG 帧表）的路径，模糊测试要的是这条路径，不是目录扫描。
+int app_npk_decode_all(const char *dir, int max_ents) {
+    Npk p;
+    memset(&p, 0, sizeof(p));
+    int pct = 0;
+    char stage[64];
+    if (!npk_build(&p, dir, &pct, stage, sizeof(stage))) return -1;
+    int decoded = 0;
+    for (int i = 0; i < p.nents && i < max_ents; i++) {
+        for (int fr = 0; fr < 3; fr++) {
+            int w = 0, h = 0;
+            HBITMAP b = npk_icon(&p, p.ents[i].key, fr, &w, &h);
+            if (b) { DeleteObject(b); decoded++; }
+        }
+    }
+    npk_free(&p);
+    npk_cache_clear();
+    return decoded;
+}
+
 // ---------------- 长任务进度 / 取消 ----------------
 static volatile LONG s_job_pct = -1;       // 0..100；-1 表示这个任务不报进度
 

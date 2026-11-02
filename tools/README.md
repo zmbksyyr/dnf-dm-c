@@ -66,6 +66,7 @@ python tools\regress.py --only gm.       # 名字前缀过滤
 python tools\fuzz.py --config     # 损坏 settings.ini
 python tools\fuzz.py --pvf 5      # 截断/变异真实 PVF 的副本，跑 5 轮
 python tools\fuzz.py --npk        # 合成病态 npk（坏头/超大计数/越界索引）
+python tools\fuzz.py --npk-deep 20  # 变异真实 npk 并真解图标 20 轮（zlib + IMG 帧表）
 python tools\fuzz.py --sql 20     # 20 轮随机词法碎片喂还原器（只报警不崩）
 ```
 
