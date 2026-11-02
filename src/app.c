@@ -550,6 +550,12 @@ void app_money_text(u64 v, char *buf, int cap) {
 }
 
 // ---------------- 连接 ----------------
+// 角色列表：作业线程只写暂存，UI 线程在 job_poll 之后整体交换。
+// 直接写 g.chars 会让正在遍历列表的 UI 线程读到 realloc 后的旧指针。
+static Vec s_chars_next;               // 暂存：作业线程写，UI 线程接管
+static volatile LONG s_chars_dirty;    // 暂存里有一份等着换
+static u32 s_chars_total_next;
+
 static int w_connect(void *ctx, Err err) {
     (void)ctx;
     if (!db_open(&g.db, g.cfg.host, g.cfg.port, g.cfg.user, g.cfg.pwd, g.cfg.charset, err)) return 0;
@@ -563,12 +569,12 @@ static int w_connect(void *ctx, Err err) {
     err[0] = 0;
     g.self_bad = db_selfcheck(&g.db, g.self, (int)sizeof(g.self), err);
     err[0] = 0;
-    if (!db_list_chars(&g.db, &g.chars, 200, "", err)) {
+    if (!db_list_chars(&g.db, &s_chars_next, 200, "", err)) {
         db_close(&g.db);          // 连接已建成：失败也要关，否则重试会漏 socket
         return 0;
     }
-    g.char_total = db_count_chars(&g.db, "");
-    g.chars_ver++;
+    s_chars_total_next = db_count_chars(&g.db, "");
+    InterlockedExchange(&s_chars_dirty, 1);
     return 1;
 }
 
@@ -579,9 +585,9 @@ static KwCtx g_kw_ctx;
 
 static int w_chars(void *ctx, Err err) {
     KwCtx *k = (KwCtx *)ctx;
-    if (!db_list_chars(&g.db, &g.chars, 200, k->kw, err)) return 0;
-    g.char_total = db_count_chars(&g.db, k->kw);
-    g.chars_ver++;
+    if (!db_list_chars(&g.db, &s_chars_next, 200, k->kw, err)) return 0;
+    s_chars_total_next = db_count_chars(&g.db, k->kw);
+    InterlockedExchange(&s_chars_dirty, 1);
     return 1;
 }
 
@@ -595,8 +601,6 @@ void app_list_chars(const char *kw) {
 // 它是「左栏」的唯一数据源 —— 列表、在线人数、角色卡都只看 g.chars，
 // 所以这里只更新 g.chars 让列表重排，绝不碰 data_ver：g.cur/g.data 是当前角色的
 // 快照，玩家自己在游戏里升级、GM 页正开着的表单都不该被这几秒一次的轮询冲掉。
-static Vec s_poll;
-
 static int chars_differs(const Vec *a, const Vec *b) {
     if (a->n != b->n) return 1;
     for (int i = 0; i < a->n; i++) {
@@ -612,13 +616,21 @@ static int chars_differs(const Vec *a, const Vec *b) {
 
 static int w_poll(void *ctx, Err err) {
     (void)ctx;
-    if (!s_poll.cap) vec_init(&s_poll, sizeof(Charac));
-    if (!db_poll_chars(&g.db, &s_poll, 500, err)) return 1;   // 轮询失败不打扰界面
-    if (!chars_differs(&s_poll, &g.chars)) return 1;
-    Vec t = g.chars;
-    g.chars = s_poll;
-    s_poll = t;                    // 交换缓冲，省一次整体拷贝
-    if (g.chars.n < 500) g.char_total = (u32)g.chars.n;
+    if (!db_poll_chars(&g.db, &s_chars_next, 500, err)) return 1;   // 轮询失败不打扰界面
+    if (s_chars_next.n < 500) s_chars_total_next = (u32)s_chars_next.n;
+    InterlockedExchange(&s_chars_dirty, 1);
+    return 1;
+}
+
+// UI 线程：把暂存换成正式列表。只在对应作业 poll 完之后调用。
+static void chars_apply(void) {
+    if (!InterlockedExchange(&s_chars_dirty, 0)) return;
+    // 内容没变就不换：换一次列表要重建、选中会丢，轮询每几秒一次扛不住
+    if (g.chars.n && s_chars_next.n && !chars_differs(&s_chars_next, &g.chars)) return;
+    vec_free(&g.chars);
+    g.chars = s_chars_next;
+    vec_init(&s_chars_next, sizeof(Charac));          // 缓冲区交出去，暂存重新为空
+    g.char_total = s_chars_total_next;
     // 列表可能插了新角色/少了角色，选中索引跟着角色编号重新定位
     g.sel = -1;
     for (int i = 0; i < g.chars.n; i++) {
@@ -632,8 +644,8 @@ static int w_poll(void *ctx, Err err) {
         }
     }
     g.chars_ver++;
-    return 1;
 }
+
 
 void app_connect(void) {
     if (job_running(&g.job_conn)) return;
@@ -647,6 +659,9 @@ void app_connect(void) {
     g.char_ok = 0;
     g.sel = -1;
     vec_clear(&g.chars);
+    vec_clear(&s_chars_next);          // 上一个会话的暂存结果作废
+    InterlockedExchange(&s_chars_dirty, 0);
+    g.char_total = 0;
     app_status("正在连接数据库…");
     job_start(&g.job_conn, w_connect, NULL);
 }
@@ -698,6 +713,8 @@ void app_disconnect(void) {
     g.sel = -1;
     g.pend_mask = g.write_mask = 0;
     vec_clear(&g.chars);
+    vec_clear(&s_chars_next);
+    InterlockedExchange(&s_chars_dirty, 0);
     vec_clear(&g.cre_ids);          // 换库连就得换清单，留着旧的等于认错宠物
     db_free_data(&g.data);
     db_free_data(&g_load_ctx.d);      // 载入到一半断开时，暂存区里还有东西
@@ -1644,7 +1661,7 @@ void app_init(void) {
     vec_init(&g.event_info, sizeof(EventInfo));
     vec_init(&g.cre_ids, sizeof(u32));
     act_init();                              // 列表暂存 Vec（act.c 内部）
-    vec_init(&s_poll, sizeof(Charac));
+    vec_init(&s_chars_next, sizeof(Charac)); // 角色列表暂存（作业线程写）
 
     cfg_load(&g.cfg, g.cfg_path);
     app_status("就绪 · 请先连接数据库");
@@ -1933,6 +1950,7 @@ void app_tick(void) {
             app_status("连接失败：%s", err);
             app_log("连接失败：%s", err);
         } else {
+            chars_apply();                  // 连接作业填好的角色列表在这里换上
             g.db_ok = 1;
             app_status("数据库已连接 · 共 %u 个角色", g.char_total);
             app_log("数据库已连接 · 共 %u 个角色", g.char_total);
@@ -1991,6 +2009,7 @@ void app_tick(void) {
         app_sync_apply();                    // 写后校验的结果搬到 g.*（job 线程只暂存）
         act_apply_lists();                   // 列表暂存搬到 g.bans/g.events/g.event_info
         ui_data_apply_lists();               // 宠物/时装/任务列表暂存搬到 g.pets/…
+        chars_apply();                       // 「刷新角色」的结果
         int was_write = g.write_mask != 0;
         if (err[0]) {
             app_status("%s 失败：%s", g.act_what, err);
@@ -2012,7 +2031,7 @@ void app_tick(void) {
     }
 
     if (job_poll(&g.job_poll, err)) {
-        /* 角色列表/在线状态已刷新，界面下一帧自会取用 */
+        chars_apply();                       // 轮询结果：左栏列表/在线状态
     }
 
     // 写失败的回滚请求：重读当前角色，把乐观更新改过的内存恢复成库里的值
