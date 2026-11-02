@@ -43,7 +43,6 @@ PAGE_MAIL, PAGE_PET, PAGE_GM, PAGE_BUBBLE = 3, 4, 8, 9
 G_NAME, G_UNLOCK, G_NO_WEIGHT, G_FATIGUE = 1801, 1817, 1815, 1819
 G_SCANBAD, G_CLONE = 1827, 1828
 G_RESTORE = 1824
-IDC_CANCEL = 119
 G_QEXP, G_QIMP = 1851, 1852
 
 M_TEXT, M_AID, M_SEND = 1310, 1308, 1311
@@ -781,8 +780,10 @@ def jobstop_cancel(ctx):
         ctx.ok("进程还活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
 
         t = _probe_scan_entry(ctx)
-        ctx.ok("连接没有被关（入口回「上一轮还没跑完」而不是「请先连接数据库」）",
-               ctx.proc.poll() is None and "上一轮还没跑完" in (t or ""),
+        # 入口还认这条连接：要么回「上一轮还没跑完」，要么重开进度窗；
+        # 唯独不能是「请先连接数据库」——那说明连接被误关了
+        ctx.ok("连接没有被关（入口回「上一轮还没跑完」或重开进度窗）",
+               ctx.proc.poll() is None and bool(t) and "请先连接数据库" not in t,
                "%r / poll=%s" % (t, ctx.proc.poll()))
     finally:
         lock.unlock()
@@ -805,11 +806,19 @@ def jobstop_cancel(ctx):
 
 
 def _probe_scan_entry(ctx, timeout=8.0):
-    """点全服扫描入口，返回第一个弹框的文案，取消掉不开扫。"""
+    """点全服扫描入口，返回它的回应。
+
+    作业还在跑时入口现在会重开进度窗（不再回「上一轮还没跑完」），
+    所以两种回应都接受：提示框文案，或者「(进度窗)」。
+    """
     _press_cid(ctx, G_SCANBAD, 0.0)
     b, t = _wait_box(ctx.main, timeout)
     if b:
         _close_box(ctx.main, b, 2)
+        return t
+    if core.progress_wait(ctx.proc.pid, 3.0):
+        core.progress_bg(ctx.proc.pid)
+        return "(进度窗)"
     return t
 
 
@@ -1551,6 +1560,12 @@ def scan_then_backup(ctx):
         ctx.ok("进度窗挡住主窗口", not u.IsWindowEnabled(ctx.main))
         ctx.ok("点「后台运行」关掉进度窗", core.progress_bg(ctx.proc.pid))
         ctx.ok("主窗口恢复可用", core.wait_until(lambda: u.IsWindowEnabled(ctx.main), 8.0))
+        # 转后台之后工具栏不再有「取消」：再点同一个入口 = 重开进度窗
+        core.press(ctx.ctl(G_SCANBAD), 0.4)
+        d2 = core.progress_wait(ctx.proc.pid)
+        ctx.ok("再点入口能重开进度窗", d2 is not None)
+        ctx.ok("重开的窗口仍挡住主窗口", d2 is not None and not u.IsWindowEnabled(ctx.main))
+        core.progress_bg(ctx.proc.pid)
         core.press(ctx.ctl(1823), 0.4)               # 整库备份（应当排队）
         b, t = _wait_box(ctx.main, 8.0)
         ctx.ok("备份确认框出现", b is not None, (t or "")[:60])

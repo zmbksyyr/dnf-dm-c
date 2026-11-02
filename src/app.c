@@ -36,6 +36,9 @@ static void progress_cb(int pct) { InterlockedExchange(&s_job_pct, pct); }
 void app_job_pct_reset(void) { InterlockedExchange(&s_job_pct, -1); }
 int  app_job_progress(void) { return (int)s_job_pct; }   // -1 = 这个任务不报进度
 int  app_act_running(void) { return job_running(&g.job_act); }
+int  app_act_running_named(const char *what) {
+    return what && job_running(&g.job_act) && strcmp(g.act_what, what) == 0;
+}
 const char *app_act_name(void) { return g.act_what; }
 
 void app_cancel_current(void) {

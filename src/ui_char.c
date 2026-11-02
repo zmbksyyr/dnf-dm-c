@@ -254,6 +254,8 @@ static void gm_refill(void) {
 // 备份：直接落到 config/backup/db_<时间戳>.sql，不再弹「另存为」打断操作
 static void on_dump(void) {
     if (!g.db_ok) { app_info("请先连接数据库。"); return; }
+    // 正在备份时再点一次 = 重新打开进度窗（窗口可以随时转后台）
+    if (app_act_running_named("备份数据库")) { ui_progress_modal("备份数据库"); return; }
     char path[MAX_PATH];
     db_dump_path(path, sizeof(path));      // 命名和留存策略统一在 db 层：backup/db-<时间>.sql
     if (!app_confirm(fmt_new("把整库备份到\n%s？\n\n备份期间请勿关闭程序。", path))) return;
@@ -263,6 +265,7 @@ static void on_dump(void) {
 
 static void on_restore(void) {
     if (!g.db_ok) { app_info("请先连接数据库。"); return; }
+    if (app_act_running_named("还原数据库")) { ui_progress_modal("还原数据库"); return; }
     char dir[MAX_PATH], back[MAX_PATH];
     exe_dir(dir, sizeof(dir));
     snprintf(back, sizeof(back), "%s\\config\\backup", dir);
@@ -296,6 +299,7 @@ static void on_restore(void) {
 static void on_char_dump(void) {
     if (!g.db_ok) { app_info("请先连接数据库。"); return; }
     if (!g.char_ok) { app_info("请先选择角色。"); return; }
+    if (app_act_running_named("备份角色")) { ui_progress_modal("备份角色"); return; }
     char path[MAX_PATH];
     db_backup_char_path(path, sizeof(path), &g.cur);
     if (!app_confirm(fmt_new("备份角色「%s」(%u) 到\n%s？\n\n"
@@ -410,6 +414,7 @@ static int scan_start(void) {
 
 static void on_scanbad(void) {
     if (!g.db_ok) { app_info("请先连接数据库。"); return; }
+    if (app_act_running_named("全服扫描")) { ui_progress_modal("全服扫描"); return; }
     if (s_scan_busy) { app_info("上一轮还没跑完。"); return; }
     if (!app_confirm("扫描全服所有角色的容器、邮件、时装、宠物，找出错误物品？\n\n"
                      "角色较多时需要一点时间。"))
@@ -1142,13 +1147,13 @@ static void gm_build(HWND parent) {
     ui_button(parent, "还原备份", G_RESTORE);
     ui_button(parent, "全服清错误物品", G_SCANBAD);
     ui_button(parent, "克隆角色", G_CLONE);
-    ui_tip(parent, GetDlgItem(parent, G_DUMP), "导出整库 SQL 到 config/backup（只读，不动库里数据）");
-    ui_tip(parent, GetDlgItem(parent, G_CDUMP), "只导出当前角色的 15 张表，可用于单角色回滚");
-    ui_tip(parent, GetDlgItem(parent, G_RESTORE), "选一个 .sql 备份导入数据库（写库，建议先备份一次）");
+    ui_tip(parent, GetDlgItem(parent, G_DUMP), "导出整库 SQL 到 config/backup（只读，不动库里数据）；进行中再点一次可看进度/取消");
+    ui_tip(parent, GetDlgItem(parent, G_CDUMP), "只导出当前角色的 15 张表，可用于单角色回滚；进行中再点一次可看进度/取消");
+    ui_tip(parent, GetDlgItem(parent, G_RESTORE), "选一个 .sql 备份导入数据库（写库，建议先备份一次）；进行中再点一次可看进度/取消");
     ui_tip(parent, GetDlgItem(parent, G_UNLCREATE), "清掉当前角色所属账号的建角次数限制");
     ui_tip(parent, GetDlgItem(parent, G_SCANBAD),
            "扫描全服所有角色的背包/穿戴/宠物栏/仓库/珠宝/账号金库/邮件/时装/宠物，"
-           "列出错误物品并一键清除（容器写前自动备份）");
+           "列出错误物品并一键清除（容器写前自动备份）；进行中再点一次可看进度/取消");
     ui_tip(parent, GetDlgItem(parent, G_CLONE),
            "把当前角色整份复制成一个新角色：背包/穿戴/仓库/技能/任务/时装宠物一起复制，"
            "新角色自动取名（原名 + 数字后缀）。整个过程是一个事务，出错会整体回滚。"

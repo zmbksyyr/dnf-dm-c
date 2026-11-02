@@ -1004,10 +1004,18 @@ def scan_gate(ctx):
         blocked, st = _wait_blocked(ctx, INVENTORY)
         ctx.ok("B：扫描作业真的卡在库上（不是靠 sleep 猜的）", blocked, st)
         ctx.ok("B：扫描窗已关闭", _close_scan(ctx, d))
-        started, why, _d = _try_scan(ctx)
-        ctx.ok("B：作业没结束 → 扫描被拒，提示「上一轮还没跑完」",
-               (not started) and SCAN_STUCK in why, why)
+        # 作业还卡在库上时再点入口：不再回「上一轮还没跑完」，而是重开进度窗；
+        # 关键是不能再起一次扫描
+        core.press(ctx.ctl(G_SCANBAD), 0)
+        h, t = _wait_box(ctx, 2.0)
+        prog = core.progress_wait(ctx.proc.pid, 5.0)
+        ctx.ok("B：作业没结束 → 入口重开进度窗（或提示上一轮还没跑完）",
+               prog is not None or SCAN_STUCK in (t or ""), t or "进度窗")
+        if h:
+            _click_box(ctx, h, IDCANCEL)
+        core.progress_bg(ctx.proc.pid)
     # 放锁：作业收尾，闸由作业自己放下
+    core.progress_bg(ctx.proc.pid)
     started, why, d = _try_scan(ctx)
     ctx.ok("B：作业收尾后能正常再扫", started and d is not None, why)
     if d:

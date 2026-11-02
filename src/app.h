@@ -279,6 +279,7 @@ int  app_db_restore(const char *path);
 // 长任务状态（进度窗轮询这几个）
 int  app_job_progress(void);                 // 0..100；-1 = 该任务不报进度
 int  app_act_running(void);
+int  app_act_running_named(const char *what);  // 正在跑的就是这个动作（再点入口时重开进度窗）
 const char *app_act_name(void);
 // 还原前自动整库备份，再执行 SQL；GUI 与命令行共用这一条路径
 int  app_restore_file(const char *path, int *stmts, Err err);

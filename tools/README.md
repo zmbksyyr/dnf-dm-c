@@ -55,7 +55,7 @@ python tools\regress.py --only gm.       # 名字前缀过滤
 
 - 长任务（备份 / 还原 / 全服扫描）会先弹**模态进度窗**，主窗口被禁用。用例要在任务跑着的时候
   继续驱动界面，必须先 `core.scan_bg(pid)`（扫描）或 `core.progress_bg(pid)` 点「后台运行」；
-  验证取消用 `core.progress_cancel(pid)`。
+  验证取消用 `core.progress_cancel(pid)`；转后台后再点同一个入口按钮会重开进度窗（工具栏没有取消按钮）。
 - 一个用例一个函数：`@core.case("域.名字", needs=("gui", "db"), group="always", desc="一句话")`。
 - 断言用 `ctx.check(tag, got, want)` / `ctx.ok(tag, cond)`；失败自动计入该用例。
 - 写库前快照、`finally` 里还原；角色编号用 `ctx.char_no()`，不要写死。

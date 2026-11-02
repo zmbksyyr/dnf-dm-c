@@ -52,7 +52,7 @@ static HINSTANCE g_hinst;
 
 static HWND g_tab, g_status;
 static HWND g_lhost, g_host, g_lport, g_port, g_luser, g_user, g_lpwd, g_pwd;
-static HWND g_conn, g_disc, g_cancel;
+static HWND g_conn, g_disc;
 static HWND g_lkw, g_kw, g_kwgo, g_kwclr, g_chlist, g_chinfo, g_online;
 static HWND g_lpvf, g_pvf, g_pvfbtn;
 static HWND g_limg, g_img, g_imgbtn;      // ImagePacks2 目录（悬浮卡图标来源）
@@ -280,7 +280,6 @@ static void status_refresh(void) {
 static void buttons_refresh(void) {
     ui_enable(g_conn, !g.db_ok && !job_running(&g.job_conn));
     ui_enable(g_disc, g.db_ok);
-    ui_enable(g_cancel, job_running(&g.job_act));   // 有长任务才可点
     ui_enable(g_lkw, g.db_ok);
     ui_enable(g_kw, g.db_ok);
     ui_enable(g_kwgo, g.db_ok);
@@ -659,7 +658,6 @@ static void do_layout(void) {
     ui_add(&r, g_pwd, ui_scale(84));
     ui_add(&r, g_conn, ui_scale(60));
     ui_add(&r, g_disc, ui_scale(60));
-    ui_add(&r, g_cancel, ui_scale(60));
 
     // 右上角不再有「保存/放弃」：各页改完即写库，状态见状态栏右段
 
@@ -810,8 +808,6 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                    "预置 uu5!^%jg 与 123456 可直接选，也可以自己填");
             g_conn = ui_button(h, "连接", IDC_CONN);
             g_disc = ui_button(h, "断开", IDC_DISC);
-            g_cancel = ui_button(h, "取消", IDC_CANCEL);
-            ui_tip(h, g_cancel, "取消正在跑的备份 / 还原 / 全服扫描（还原会整体回滚）");
 
             g_lkw = ui_label(h, "搜索", 0);
             g_kw = ui_edit(h, "", IDC_KW, 0);
@@ -929,7 +925,6 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int id = LOWORD(wp), code = HIWORD(wp);
             if (id == IDC_CONN) { on_connect(); return 0; }
             if (id == IDC_DISC) { app_disconnect(); buttons_refresh(); return 0; }
-            if (id == IDC_CANCEL) { app_cancel_current(); return 0; }
             if (id == IDC_PVFS) { on_pick_pvf(); return 0; }
             if (id == IDC_IMGS) { on_pick_img(); return 0; }
             if (id == IDC_IMGB && code == EN_KILLFOCUS) {   // 手敲路径，失焦生效
