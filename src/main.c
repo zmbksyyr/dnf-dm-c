@@ -287,6 +287,8 @@ static void buttons_refresh(void) {
     ui_enable(g_chlist, g.db_ok && g.chars.n > 0);
 }
 
+void app_ui_refresh_buttons(void) { buttons_refresh(); }
+
 static void do_layout(void);
 
 // 连库就绪（命令行模式共用）：最多等 10 秒
@@ -320,9 +322,8 @@ static int db_restore_main(void) {
     }
     Err err;
     int n = 0;
-    int ok = db_restore_sql(&g.db, path, &n, err);
-    if (ok) app_log("还原数据库 · 执行 %d 条语句 ← %s", n, path);
-    else app_log("还原失败（第 %d 条起）：%s", n + 1, err);
+    int ok = app_restore_file(path, &n, err);
+    if (!ok) app_log("还原失败：%s", err);
     app_shutdown();
     return ok ? 0 : 1;
 }
@@ -1004,6 +1005,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     (void)cmd;
     g_hinst = inst;
     SetUnhandledExceptionFilter(crash_filter);   // 崩了先把现场写下来
+    // 自测用：置这个环境变量启动即崩一次，验证转储链路本身能跑通
+    if (getenv("DNF_GM_CRASH_TEST")) RaiseException(0xE0000001, 0, 0, NULL);
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);

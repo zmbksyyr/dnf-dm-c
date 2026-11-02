@@ -1336,3 +1336,90 @@ def bubble_stop(ctx):
             time.sleep(1.5)               # 等在飞的结算收尾，再回写快照
             _bubble_restore(ctx, snap, cno, mid)
         _bubble_ini_restore(ini)
+
+# ================================================================ 异常路径
+G_RESTORE = 1824
+
+
+def _file_dialog_set(ctx, path, timeout=15.0):
+    """公用文件对话框：把路径填进文件名框并点「打开」。"""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        for h in _boxes(ctx.main):
+            edits = [w for w in core.kids(h) if core.cls_of(w) == "Edit"]
+            if edits:
+                for e in edits:
+                    core.set_text(e, path)
+                time.sleep(0.3)
+                core.press(u.GetDlgItem(h, 1), 1.0)
+                return True
+        time.sleep(0.2)
+    return False
+
+
+@core.case("db.restore_bad_sql", needs=("gui", "db"), group="always",
+           desc="还原一个语法错误的 SQL：明确报错、整体回滚、进程不崩")
+def restore_bad_sql(ctx):
+    """验：坏文件不会把库改一半，也不会把程序带崩。"""
+    cno = ctx.char_no()
+    if not ctx.ok("库里有角色", cno is not None):
+        return
+    lev0 = ctx.q1("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%s", (cno,))
+    d = os.path.join(core.BUILD, "config", "backup")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "regress-bad.sql")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("SET NAMES utf8mb4;\n"
+                "UPDATE taiwan_cain.charac_info SET lev=1 WHERE charac_no=%d;\n"
+                "THIS IS NOT SQL;;;\n" % cno)
+    try:
+        ctx.page(PAGE_GM)
+        core.press(ctx.ctl(G_RESTORE), 0.6)
+        if not ctx.ok("弹出文件选择框", _file_dialog_set(ctx, path)):
+            return
+        for _ in range(2):                       # 两级确认
+            b, t = _wait_box(ctx.main, 8.0)
+            if not b:
+                break
+            _close_box(ctx.main, b, 1)
+        ctx.ok("报出还原失败", _wait_status(ctx, "还原数据库 失败", 90.0), _status(ctx))
+        ctx.check("失败后角色等级已回滚", ctx.q1("SELECT lev FROM taiwan_cain.charac_info "
+                                                 "WHERE charac_no=%s", (cno,)), lev0)
+        ctx.ok("进程仍然活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+@core.case("db.conn_killed", needs=("gui", "db"), group="always",
+           desc="服务端掐断连接：明确提示断开、按钮恢复可用、重连后能继续用")
+def conn_killed(ctx):
+    """验：连接被 KILL 之后不会静默失败，也不会卡死。"""
+    if not ctx.ok("库里有角色", ctx.char_no() is not None):
+        return
+    ctx.page(PAGE_GM)
+    if not ctx.ok("角色可选中", _select_char(ctx)):
+        return
+    lock = _TableLock(["taiwan_cain.charac_stat"])
+    try:
+        lock.lock()
+        core.press(ctx.ctl(G_FATIGUE), 1.0)
+        blocked, st = _wait_blocked(ctx, "charac_stat")
+        if not ctx.ok("写操作被表锁挡住", blocked, st):
+            return
+        ids = [r[0] for r in ctx.q("SELECT ID FROM information_schema.PROCESSLIST "
+                                   "WHERE STATE LIKE '%%metadata lock%%'")]
+        ctx.ok("找到被挡住的查询", bool(ids), "id=%s" % (ids,))
+        for pid in ids:
+            ctx.cur.execute("KILL %s" % pid)
+    finally:
+        lock.unlock()
+
+    ctx.ok("界面提示连接已断开", _wait_status(ctx, "连接已断开", 20.0), _status(ctx))
+    ctx.ok("进程仍然活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
+    ctx.ok("「连接」按钮恢复可用",
+           core.wait_until(lambda: _enabled(u.GetDlgItem(ctx.main, IDC_CONN)), 10.0))
+    core.press(u.GetDlgItem(ctx.main, IDC_CONN), 3.0)
+    ctx.ok("重连成功", _wait_status(ctx, "数据库已连接", 30.0), _status(ctx))

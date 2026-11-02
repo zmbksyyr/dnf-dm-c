@@ -1499,29 +1499,35 @@ static int w_db_dump(void *ctx, Err err) {
     return 1;
 }
 
-static int w_db_restore(void *ctx, Err err) {
-    DbJobCtx *c = (DbJobCtx *)ctx;
-    // 还原是唯一「先删后插」的破坏性动作：动手前先自动存一份整库备份，
-    // 还原错了还能退回去。备份失败就不还原，别拿唯一的数据赌。
+// 还原：不管从 GUI 还是命令行进来，都先自动整库备份。
+// 还原是唯一「先删后插」的破坏性动作，备份失败就不还原。
+int app_restore_file(const char *path, int *stmts, Err err) {
     char dir[MAX_PATH], safe[MAX_PATH], ts[32];
     art_dir("backup", dir, sizeof(dir));
     art_stamp(ts, sizeof(ts));
     snprintf(safe, sizeof(safe), "%s\\pre-restore-%s.sql", dir, ts);
     int nt = 0;
     u64 nr = 0;
-    if (!db_dump_sql(&g.db, safe, &nt, &nr, err)) {
-        snprintf(err, ERRBUF, "还原前自动备份失败，已中止：%s", err);
+    Err derr;
+    if (!db_dump_sql(&g.db, safe, &nt, &nr, derr)) {
+        snprintf(err, ERRBUF, "还原前自动备份失败，已中止：%s", derr);
         return 0;
     }
     app_log("还原前自动备份：%s（%d 表 / %llu 行）", safe, nt, (unsigned long long)nr);
     art_prune(dir, "pre-restore-", 5);
 
     int n = 0;
-    if (!db_restore_sql(&g.db, c->path, &n, err)) return 0;
-    app_log("还原数据库 · 执行 %d 条语句 ← %s", n, c->path);
+    if (!db_restore_sql(&g.db, path, &n, err)) return 0;
+    app_log("还原数据库 · 执行 %d 条语句 ← %s", n, path);
     app_log("还原前快照：%s", safe);
     g.lists_ready = 0;
+    if (stmts) *stmts = n;
     return 1;
+}
+
+static int w_db_restore(void *ctx, Err err) {
+    DbJobCtx *c = (DbJobCtx *)ctx;
+    return app_restore_file(c->path, NULL, err);
 }
 
 void app_db_backup(const char *path) {
@@ -1982,6 +1988,13 @@ void app_bubble_export(void) {
     app_info(fmt_new("已导出 %d 条泡点记录到：\n%s", n, outp));
 }
 
+// 服务端把连接掐断（不是查询失败）时，整条连接已经没用了：标记断开，
+// 让用户看到「请重连」而不是对着每条操作各报一次错。
+static int conn_lost(const char *e) {
+    return e && (strstr(e, "连接被重置") || strstr(e, "服务器关闭了连接") ||
+                 strstr(e, "WSA 10054"));
+}
+
 void app_tick(void) {
     Err err;
     static u64 last_poll = 0;
@@ -2061,13 +2074,24 @@ void app_tick(void) {
         chars_apply();                       // 「刷新角色」的结果
         int was_write = g.write_mask != 0;
         if (err[0]) {
-            app_status("%s 失败：%s", g.act_what, err);
-            app_log("%s 失败：%s", g.act_what, err);
             g.act_ver++;                      // 让页面按库里的值重填（失败时控件别停在假值上）
-            if (was_write) {                  // 写库失败：以库里的值为准，别让界面停在假数据
+            if (conn_lost(err)) {
+                // 连接没了：标记断开，后续操作直接提示「请先连接」，不再逐条报错
+                g.db_ok = 0;
+                g.char_ok = 0;
                 g.write_mask = 0;
                 g.pend_mask = 0;
-                app_reload();
+                app_log("数据库连接已断开：%s", err);
+                app_status("数据库连接已断开，请点「连接」重连");
+                app_ui_refresh_buttons();
+            } else {
+                app_status("%s 失败：%s", g.act_what, err);
+                app_log("%s 失败：%s", g.act_what, err);
+                if (was_write) {              // 写库失败：以库里的值为准，别让界面停在假数据
+                    g.write_mask = 0;
+                    g.pend_mask = 0;
+                    app_reload();
+                }
             }
         } else {
             app_status("%s 完成", g.act_what);

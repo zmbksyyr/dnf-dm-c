@@ -225,7 +225,15 @@ static int buffered(MySql *m, size_t need) {
     }
     while (m->buf_n < need) {
         int r = recv((SOCKET)m->sock, (char *)m->buf + m->buf_n, (int)(m->buf_cap - m->buf_n), 0);
-        if (r <= 0) return 0;
+        if (r <= 0) {
+            // 把系统错误写进 m->err：连接被掐断时上层能看到 10054/10060 这类真实原因，
+            // 而不是一句笼统的「读取查询结果失败」
+            int e = WSAGetLastError();
+            if (r == 0) snprintf(m->err, ERRBUF, "服务器关闭了连接");
+            else snprintf(m->err, ERRBUF, "接收失败（WSA %d%s）", e,
+                          e == 10060 ? " 超时" : e == 10054 ? " 连接被重置" : "");
+            return 0;
+        }
         m->buf_n += (size_t)r;
     }
     return 1;
@@ -285,7 +293,8 @@ void mysql_close(MySql *m) {
 }
 
 static void die(MySql *m, const char *msg) {
-    snprintf(m->err, ERRBUF, "%s", msg);
+    // 底层（recv/send）可能已经写了更具体的原因，别用一句笼统的话盖掉它
+    if (!m->err[0]) snprintf(m->err, ERRBUF, "%s", msg);
     mysql_close(m);
 }
 
@@ -448,6 +457,7 @@ int mysql_query(MySql *m, const char *sql, MyResult *r) {
     else memset(r, 0, sizeof(*r));
 
     if (!mysql_alive(m)) { snprintf(m->err, ERRBUF, "未连接"); goto fail; }
+    m->err[0] = 0;                     // 每条命令开始时清掉上一次的残留
     m->seq = 0;                        // 每条命令序号从 0 开始（否则 1156）
 
     Buf req = {0};

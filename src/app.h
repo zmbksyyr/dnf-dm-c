@@ -144,6 +144,8 @@ int  job_running(const Job *j);
 // 会话边界（断开 / 重连）：丢掉所有还没开始的动作，并让页面复位自己的队列与闸。
 // 页面在自己的 create 里调 app_on_drop() 注册，新增页面不用回头改 app.c。
 void app_on_drop(void (*fn)(void));
+// 连接被服务端掐断时，按钮的可用状态要跟着变（main.c 实现）
+void app_ui_refresh_buttons(void);
 void app_drop_queued(void);
 
 // 日志：先攒在内存里，1s 或 8KB 落一次盘（按天分文件）
@@ -249,6 +251,8 @@ int  app_grant_send(int by_mail);
 void app_db_backup(const char *path);
 void app_db_backup_char(void);          // 只备份当前选中角色
 void app_db_restore(const char *path);
+// 还原前自动整库备份，再执行 SQL；GUI 与命令行共用这一条路径
+int  app_restore_file(const char *path, int *stmts, Err err);
 
 // 角色克隆（后台执行，单个事务，失败整体回滚）
 void app_clone_char(void);
