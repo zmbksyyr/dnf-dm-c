@@ -9,6 +9,7 @@
 退出码：全部通过 0，任一崩溃/无失败提示 1。
 """
 import argparse
+import contextlib
 import os
 import random
 import shutil
@@ -47,12 +48,14 @@ def boot_check(expect, timeout=12.0):
         core.kill_stale()
 
 
-def with_ini(reader):
-    """临时改配置：先备份原始字节，结束时原样写回。"""
+@contextlib.contextmanager
+def ini_scope(apply):
+    """临时改配置的作用域：进入时 apply(raw)，退出时原样写回。"""
     had = os.path.exists(INI)
     raw = open(INI, "rb").read() if had else b""
     try:
-        reader(raw)
+        apply(raw)
+        yield
     finally:
         if had:
             open(INI, "wb").write(raw)
@@ -61,6 +64,12 @@ def with_ini(reader):
                 os.remove(INI)
             except OSError:
                 pass
+
+
+def with_ini(apply):
+    """不关心作用域的用法：改一下、跑完立刻还原。"""
+    with ini_scope(apply):
+        pass
 
 
 def set_ini(section, key, value):
@@ -244,8 +253,8 @@ def check_npk(args):
     bad = 0
     try:
         for i, (_dir, path, name) in enumerate(cases, 1):
-            with_ini(set_img_dir(root))
-            alive, _ = boot_check("贴图包", 12.0)
+            with ini_scope(set_img_dir(root)):
+                alive, _ = boot_check("贴图包", 12.0)
             print("[%d/%d] %-20s alive=%s" % (i, len(cases), name, alive))
             if not alive:
                 bad += 1
@@ -313,8 +322,8 @@ def check_pvf(args):
     bad = 0
     try:
         for i, (path, label) in enumerate(cases, 1):
-            with_ini(set_pvf_path(path))
-            alive, failed = boot_check("PVF 加载失败", 15.0)
+            with ini_scope(set_pvf_path(path)):
+                alive, failed = boot_check("PVF 加载失败", 15.0)
             good = alive and failed
             print("[%d/%d] %-40s alive=%s failed=%s" % (i, len(cases), label, alive, failed))
             if not good:
