@@ -719,9 +719,9 @@ static int view_sync_char(Db *d, u32 mid, u32 cno, Err err) {
     }
 
     int nslot = (int)(plain.n / CV_SLOT);
-    int t = -1;
+    int t = -1, existing = 0;
     for (int k = 0; k < nslot && t < 0; k++)
-        if (rd32(plain.p + k * CV_SLOT) == cno) t = k;      // 已有槽：原地更新
+        if (rd32(plain.p + k * CV_SLOT) == cno) { t = k; existing = 1; }  // 已有槽：原地更新
     for (int k = 0; k < nslot && t < 0; k++) {
         int z = 1;
         for (int j = 0; j < CV_SLOT; j++)
@@ -735,8 +735,10 @@ static int view_sync_char(Db *d, u32 mid, u32 cno, Err err) {
     }
 
     u8 *slot = plain.p + t * CV_SLOT;
-    memset(slot, 0, CV_SLOT);
+    // 已有槽只改已知字段：其余字节是客户端/服务端填的，别抹掉
+    if (!existing) memset(slot, 0, CV_SLOT);
     wr32(slot + 0, cno);
+    memset(slot + 4, 0, CV_NAME);
     size_t nl = strlen(name);
     memcpy(slot + 4, name, nl < CV_NAME - 1 ? nl : CV_NAME - 1);
     slot[24] = (u8)job;
@@ -754,8 +756,15 @@ static int view_sync_char(Db *d, u32 mid, u32 cno, Err err) {
     sql_lit(&u, (const char *)out.p, (int)out.n, 1);
     str_catf(&u, ", `charac_count`=(SELECT COUNT(*) FROM taiwan_cain.charac_info"
                  " WHERE `m_id`=%u AND `delete_flag`=0) WHERE `m_id`=%u", mid, mid);
-    int ok = run(d, &u);
-    if (!ok) snprintf(err, ERRBUF, "写回角色槽位失败：%s", d->err);
+    u64 aff = 0;
+    int ok = run_aff(d, &u, &aff);
+    if (ok && aff == 0) {
+        // 没有这一行：不擅自建（charac_view 还有别的列），报出来让人知道差这一步
+        snprintf(err, ERRBUF, "账号 %u 在 charac_view 里没有行，角色 %u 的槽位没写回", mid, cno);
+        ok = 0;
+    } else if (!ok) {
+        snprintf(err, ERRBUF, "写回角色槽位失败：%s", d->err);
+    }
     str_free(&u);
     buf_free(&out);
     buf_free(&pk);
