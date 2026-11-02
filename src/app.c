@@ -33,6 +33,8 @@ static volatile LONG s_job_pct = -1;       // 0..100；-1 表示这个任务不�
 
 static void progress_cb(int pct) { InterlockedExchange(&s_job_pct, pct); }
 
+void app_job_pct_reset(void) { InterlockedExchange(&s_job_pct, -1); }
+
 void app_cancel_current(void) {
     if (!job_running(&g.job_act)) {
         app_status("当前没有可取消的任务");
@@ -660,7 +662,7 @@ static volatile LONG s_reload_later;     // 写失败的回滚请求（job 线�
 // 载入前要不要先把 name/job/grow/lev 从库里读回来（UI 线程置 1，载入作业取走）。
 // 跨线程所以用 Interlocked：和 s_reload_later 同一套写法。
 static volatile LONG s_load_recheck;
-static int g_pq_head, g_pq_n;            // 环形：head 出队，n 排队数
+// 写队列本体在 app_act.c：这里只剩「能不能发」与出队入口
 
 // 「断开」与「退出」共用的停机顺序：先停用这条连接的作业，再关连接。
 // 只列这 5 个；pvf / npk / grab 不碰 MySQL 连接，退出时才需要等。
@@ -1029,84 +1031,7 @@ void app_save_draft(void) {
     app_flush_pending();
 }
 
-// ---------------- 通用异步动作 ----------------
-// 上下文一律拷贝一份再交给线程。调用方多半传的是共享的静态结构（gm 页的 kc、
-// 写容器时的 g_warg），当场不改、任务线程稍后才读，中间被下一次点击改写，
-// 就会出现"点 A 执行 B"这种查不出来的错。
-// 容器写入的快照（WriteCtx）走堆 + 指针，不放进这里的固定缓冲：
-// 它带 6 个动态 Buf，按值拷贝会让两个副本各认一份所有权。
-#define PEND_BUF 768
-#define PEND_N   4
-typedef struct {
-    ActFn fn;
-    void *ctx;
-    unsigned char buf[PEND_BUF];
-} ActCtx;
-static ActCtx g_act_ctx;
-
-static int w_act(void *ctx, Err err) {
-    ActCtx *a = (ActCtx *)ctx;
-    return a->fn(a->ctx, err);
-}
-
-// 一次只能有一个写操作在跑（共用一条 MySQL 连接）；忙时排队，完成后按顺序自动执行。
-// 单槽会被后来的动作直接覆盖：活动页连点「启用」再点「停用」，第一个就静默消失了，
-// 状态栏还把两个都写成"…"，用户以为都提交了。
-static struct {
-    char   what[64];
-    ActFn  fn;
-    int    sz;
-    unsigned char buf[PEND_BUF];
-} g_pq[PEND_N];
-
-static int act_start(const char *what, ActFn fn, void *ctx, int ctxsz) {
-    snprintf(g.act_what, sizeof(g.act_what), "%s", what);
-    db_cancel_clear();                  // 新任务从「未被取消」开始
-    InterlockedExchange(&s_job_pct, -1);
-    g_act_ctx.fn = fn;
-    if (ctx && ctxsz > 0 && ctxsz <= PEND_BUF) {
-        memcpy(g_act_ctx.buf, ctx, (size_t)ctxsz);
-        g_act_ctx.ctx = g_act_ctx.buf;
-    } else {
-        g_act_ctx.ctx = ctx;             // 无上下文：fn 自己不读
-    }
-    app_status("%s…", what);
-    return job_start(&g.job_act, w_act, &g_act_ctx);
-}
-
-int app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz) {
-    // 加载 PVF 期间物品类型/附件种类都算不出来，这时提交写库会写错字段
-    if (job_running(&g.job_pvf)) {
-        app_status("PVF 正在加载，稍后再操作");
-        return 0;
-    }
-    if (!g.db_ok) {
-        app_status("请先连接数据库");
-        return 0;
-    }
-    if (!app_db_busy() && !g_pq_n) return act_start(what, fn, ctx, ctxsz);
-    if (ctxsz < 0 || ctxsz > PEND_BUF) return 0;
-    if (g_pq_n >= PEND_N) {
-        app_status("已有 %d 个操作在排队，这个没提交", g_pq_n);
-        return 0;
-    }
-    int i = (g_pq_head + g_pq_n) % PEND_N;
-    snprintf(g_pq[i].what, sizeof(g_pq[i].what), "%s", what);
-    g_pq[i].fn = fn;
-    // 上下文和上下文大小必须一起为空：app_act 的 ctxsz 是 sizeof(*(ctx))，
-    // 传 NULL 时算出来是 sizeof(void)==1（GCC 扩展），照抄进队列就是
-    // memcpy(..., NULL, 1) —— 全服扫描/清除这两个无上下文的动作一旦排队就崩。
-    g_pq[i].sz = ctx ? ctxsz : 0;
-    if (ctx && ctxsz > 0) memcpy(g_pq[i].buf, ctx, (size_t)ctxsz);
-    g_pq_n++;
-    return 1;
-}
-
-// 现在能不能直接发一个写动作：连接空闲，且队列是空的。
-// 页面自己攒队列时用它判断，免得自己的动作排到队尾等太久
-int app_act_idle(void) {
-    return !app_db_busy() && !g_pq_n;
-}
+// 通用异步动作与写队列见 app_act.c；这里只保留会话边界与丢弃钩子。
 
 // ---------------- 会话边界：丢弃还没开始的动作 ----------------
 // 断开的语义是「丢掉所有还没开始的动作」。页面层的写队列、扫描闸、待弹窗标记
@@ -1129,7 +1054,7 @@ void app_on_drop(void (*fn)(void)) {
 }
 
 void app_drop_queued(void) {
-    g_pq_n = g_pq_head = 0;
+    app_act_clear_queue();
     s_load_want = 0;
     for (int i = 0; i < s_drop_hooks; i++) s_drop_hook[i]();
 }
@@ -1890,11 +1815,12 @@ void app_tick(void) {
     // 连接空出来了：先把排队的动作发完，再补载入。
     // 顺序不能反 —— 载入会换掉 g.data，若排队的写还在等，它拿到的就是新角色的数据。
     if (!app_db_busy()) {
-        if (g_pq_n) {
-            int i = g_pq_head;
-            g_pq_head = (g_pq_head + 1) % PEND_N;
-            g_pq_n--;
-            act_start(g_pq[i].what, g_pq[i].fn, g_pq[i].buf, g_pq[i].sz);
+        char what[64];
+        ActFn fn = NULL;
+        void *ctx = NULL;
+        int sz = 0;
+        if (app_act_take_queued(what, sizeof(what), &fn, &ctx, &sz)) {
+            app_act_run(what, fn, ctx, sz);
         } else if (s_load_want) {
             load_kick();
         }
