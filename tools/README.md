@@ -59,3 +59,14 @@ python tools\regress.py --only gm.       # 名字前缀过滤
 - 用例之间不共享状态，也不假设库的初始行数。
 - 控件编号是 `1000 + page*100 + n`（`core.PID`），界面改了要同步。
 - 跨进程读文本只用 `WM_GETTEXT`（Edit/Static/ListBox）；列表只读行数，不读单元格文本。
+
+## 模糊测试
+
+```
+python tools\fuzz.py --config     # 损坏 settings.ini
+python tools\fuzz.py --pvf 5      # 截断/变异真实 PVF 的副本，跑 5 轮
+python tools\fuzz.py --sql        # 语法错误的还原文件
+```
+
+判据只有一条：**报错但活着**。每轮都会备份并还原 `settings.ini`，PVF 用配置里真实文件的副本。
+
