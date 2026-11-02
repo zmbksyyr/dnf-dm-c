@@ -282,11 +282,12 @@ static void on_restore(void) {
     char path[MAX_PATH];
     utf8(file, path, sizeof(path));
     if (!app_confirm(fmt_new("把 %s 导入数据库？\n\n%s", path,
-                             strstr(path, "char_")
+                             strstr(path, "char-")
                                  ? "角色备份：会先删掉该角色现有数据，再按备份写回。"
-                                 : "整库备份：按语句逐条执行，已存在的行可能重复。")))
+                                 : "整库备份：先清空各表的现有行，再按备份写回。")))
         return;
-    if (!app_confirm("确认执行导入？建议先做一次整库备份。")) return;
+    // 还原前会自动整库备份（app_restore_file），这里只需要确认意图
+    if (!app_confirm("确认执行导入？\n\n会先自动做一次整库备份，备份失败则中止。")) return;
     app_status("正在还原整库…");
     app_db_restore(path);
 }

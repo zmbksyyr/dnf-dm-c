@@ -447,7 +447,8 @@ static void item_reload(Page *p) {
 
 static void item_edit_sel(void) {
     int sub = ui_combo_sel(s_sub);
-    Blob *b = app_page_blob(sub < 0 ? 0 : sub);
+    if (sub < 0) sub = 0;
+    Blob *b = app_page_blob(sub);
     int row = ui_row_sel(s_list);
     if (!b || !b->ok || row < 0) return;
     int slot = (int)ui_row_data(s_list, row);
@@ -461,7 +462,8 @@ static void item_edit_sel(void) {
 
 static void item_clear_sel(void) {
     int sub = ui_combo_sel(s_sub);
-    Blob *b = app_page_blob(sub < 0 ? 0 : sub);
+    if (sub < 0) sub = 0;
+    Blob *b = app_page_blob(sub);
     int row = ui_row_sel(s_list);
     if (!b || !b->ok || row < 0) return;
     int slot = (int)ui_row_data(s_list, row);
@@ -476,7 +478,8 @@ static void item_clear_sel(void) {
 
 static void item_clear_all(void) {
     int sub = ui_combo_sel(s_sub);
-    Blob *b = app_page_blob(sub < 0 ? 0 : sub);
+    if (sub < 0) sub = 0;               // 没选中子页时按背包处理，别拿 -1 去索引名字表
+    Blob *b = app_page_blob(sub);
     if (!b || !b->ok) return;
     if (!item_writable()) return;
     if (!app_confirm(fmt_new("把「%s」全部 %d 格清空？立即写库。", kSubName[sub], b->n)))
