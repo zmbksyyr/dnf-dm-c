@@ -1527,6 +1527,7 @@ def scan_then_backup(ctx):
     if not ctx.ok("角色可选中", _select_char(ctx)):
         return
     lock = _TableLock(["taiwan_cain_2nd.inventory"])
+    mark = _log_mark()
     try:
         lock.lock()
         core.press(ctx.ctl(G_SCANBAD), 0.4)          # 全服扫描
@@ -1546,6 +1547,8 @@ def scan_then_backup(ctx):
     finally:
         lock.unlock()
     ctx.ok("扫描结束后备份自动完成", _wait_status(ctx, "备份数据库 完成", 120.0), _status(ctx))
+    bad = [l for l in _log_since(mark) if "作业并发" in l]
+    ctx.ok("没有出现作业并发（串行不变量成立）", not bad, bad[:2])
     ctx.ok("进程仍然活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
 
 @core.case("db.reject_truncated", needs=("db",), group="always",
@@ -1683,3 +1686,51 @@ def quest_tpl_roundtrip(ctx):
             os.remove(tpl)
         except OSError:
             pass
+
+@core.case("db.single_query_invariant", needs=("gui", "db"), group="always",
+           desc="长任务期间应用同时最多只有 1 条查询在飞（单连接串行不变量）")
+def single_query_invariant(ctx):
+    """验：所有作业共用一条连接，靠队列与 db_busy 串行；这里直接查 PROCESSLIST 看。"""
+    ctx.page(PAGE_GM)
+    if not ctx.ok("角色可选中", _select_char(ctx)):
+        return
+    ctx.cur.execute("SELECT CONNECTION_ID()")
+    my_ids = {int(ctx.cur.fetchone()[0])}
+
+    def app_queries():
+        rows = ctx.q("SELECT ID, INFO FROM information_schema.PROCESSLIST "
+                     "WHERE COMMAND='Query' AND INFO IS NOT NULL AND USER='game'")
+        return [(i, (inf or "")[:60]) for i, inf in rows if int(i) not in my_ids]
+
+    lock = _TableLock(["taiwan_cain_2nd.inventory"])
+    mark = _log_mark()
+    try:
+        lock.lock()
+        core.press(ctx.ctl(G_SCANBAD), 0.4)
+        b, t = _wait_box(ctx.main, 8.0)
+        if not ctx.ok("扫描确认框出现", b is not None, (t or "")[:60]):
+            return
+        _close_box(ctx.main, b, 1)
+        blocked, st = _wait_blocked(ctx, "taiwan_cain_2nd.inventory")
+        if not ctx.ok("扫描卡在库上", blocked, st):
+            return
+        # 再点一个会写库的动作：它必须排队，而不是在同一条连接上另起一条查询
+        core.press(ctx.ctl(1823), 0.4)
+        b, t = _wait_box(ctx.main, 8.0)
+        if b:
+            _close_box(ctx.main, b, 1)
+        peak = 0
+        seen = []
+        for _ in range(40):                     # 4 秒
+            qs = app_queries()
+            if len(qs) > peak:
+                peak = len(qs)
+                seen = qs
+            time.sleep(0.1)
+        ctx.ok("同时最多 1 条查询", peak <= 1, "峰值 %d：%s" % (peak, seen[:2]))
+    finally:
+        lock.unlock()
+    ctx.ok("扫描结束后备份自动完成", _wait_status(ctx, "备份数据库 完成", 120.0), _status(ctx))
+    bad = [l for l in _log_since(mark) if "作业并发" in l]
+    ctx.ok("没有出现作业并发（串行不变量成立）", not bad, bad[:2])
+    ctx.ok("进程仍然活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))

@@ -21,6 +21,28 @@ static DWORD WINAPI job_thread(LPVOID param) {
 
 int job_running(const Job *j) { return j->state == 1; }
 
+// 共用一条 MySQL 连接的作业不许同时在跑：协议是严格串行的，两个作业交错收发会串包。
+// 这条不变量靠 db_busy / 写队列维持；这里再兜一道断言，将来谁绕过队列会立刻在日志里露头。
+static const char *db_job_name(const Job *j) {
+    if (j == &g.job_conn) return "连接";
+    if (j == &g.job_load) return "载入";
+    if (j == &g.job_act) return "动作";
+    if (j == &g.job_poll) return "轮询";
+    if (j == &g.job_bubble) return "泡点";
+    return NULL;
+}
+
+static void check_no_overlap(const Job *j) {
+    const char *me = db_job_name(j);
+    if (!me) return;
+    const Job *all[] = {&g.job_conn, &g.job_load, &g.job_act, &g.job_poll, &g.job_bubble};
+    for (int i = 0; i < COUNT_OF(all); i++) {
+        if (all[i] == j || !job_running(all[i])) continue;
+        app_warn("作业并发：%s 在跑时又起了 %s（协议要求串行）", db_job_name(all[i]), me);
+        return;
+    }
+}
+
 int job_start(Job *j, int (*fn)(void *ctx, Err err), void *ctx) {
     if (j->state == 1) return 0;                 // 还在跑：不能重入
     if (j->state == 2 || j->state == 3) {
@@ -30,6 +52,7 @@ int job_start(Job *j, int (*fn)(void *ctx, Err err), void *ctx) {
         job_poll(j, drop);
     }
     if (j->th) { CloseHandle(j->th); j->th = NULL; }
+    check_no_overlap(j);
     j->fn = fn;
     j->ctx = ctx;
     j->progress = 0;
