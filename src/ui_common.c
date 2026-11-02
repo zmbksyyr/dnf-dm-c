@@ -1059,11 +1059,8 @@ int ui_dlg_run(HWND dlg, HWND owner) {
     EnableWindow(owner ? owner : g_main, TRUE);
     if (owner ? owner : g_main) SetActiveWindow(owner ? owner : g_main);
     DlgBox *d = (DlgBox *)GetWindowLongPtrW(dlg, GWLP_USERDATA);
-    // 必须先 DestroyWindow 再 free(d)：DestroyWindow 是同步的，WM_DESTROY / WM_NCDESTROY
-    // 就在这一句里派发给 dlg_proc，而 dlg_proc 要靠 GWLP_USERDATA 找到 DlgBox 才能把
-    // 消息转给页面 proc。原来的顺序是「清 USERDATA → free(d) → DestroyWindow」，
-    // 页面 proc 一次 WM_DESTROY 都收不到，所有「关窗时清理」的代码全是死代码。
-    // USERDATA 随窗口一起消失，不用再单独清零。
+    // 顺序不能反：DestroyWindow 同步派发 WM_DESTROY，dlg_proc 要靠 USERDATA 找到
+    // DlgBox 才能转给页面 proc。先 free 会让页面收不到销毁通知。
     DestroyWindow(dlg);
     free(d);
     return g_dlg_ok;

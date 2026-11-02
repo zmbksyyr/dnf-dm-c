@@ -1,6 +1,6 @@
 # 编译产物
 # tools/build.bat 默认把产物放到项目目录之外（..\_build\DNF_GM_C），
-# 下面这几条只是兜底：万一有人在树内手动编译，也不会把 exe 提交上来。
+# 下面几条兜底：有人在树内手动编译时也不至于提交 exe。
 DNF_GM.exe
 build/
 *.o
@@ -9,22 +9,17 @@ build/
 *.pdb
 *.ilk
 
-# 运行数据（程序自己生成，唯一允许写入的位置）
+# 运行数据（程序自己生成）
 config/
 
-# Python 缓存与截图
+# Python
 __pycache__/
 *.pyc
-tools/out/
-# 验证脚本的截图（DNF_GM_BUILD 指向树内时会落在这里）
-shots/
 
-# 临时
+# 截图与临时文件
+shots/
 *.tmp
 *.bak
 
-# POSIX shell 下 `> nul` 会真的建出名为 nul 的文件，不是 Windows 设备名
+# POSIX shell 下 `> nul` 会建出名为 nul 的文件，不是设备名
 /nul
-
-# 回归脚本日志（run_regress.py 默认落这里）
-tools/regress-logs/
