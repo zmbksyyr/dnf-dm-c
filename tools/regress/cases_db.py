@@ -1573,3 +1573,40 @@ def reject_truncated(ctx):
                 os.remove(p)
             except OSError:
                 pass
+
+@core.case("db.clone_rollback", needs=("gui", "db"), group="always",
+           desc="克隆中途失败：整笔事务回滚，不会留下半个角色")
+def clone_rollback(ctx):
+    """验：克隆跨二十几张表，任一张失败必须整体作废。用 BEFORE INSERT 触发器
+    在 charac_stat 上制造 1644，检查 charac_info 那行也没留下。"""
+    cno = ctx.char_no()
+    if not ctx.ok("库里有角色", cno is not None):
+        return
+    mid = ctx.q1("SELECT m_id FROM taiwan_cain.charac_info WHERE charac_no=%s", (cno,))
+    before = ctx.q1("SELECT COUNT(*) FROM taiwan_cain.charac_info WHERE m_id=%s", (mid,))
+    maxno = ctx.q1("SELECT COALESCE(MAX(charac_no),0) FROM taiwan_cain.charac_info")
+    ctx.cur.execute("DROP TRIGGER IF EXISTS taiwan_cain.trg_clone_block")
+    ctx.cur.execute("CREATE TRIGGER taiwan_cain.trg_clone_block BEFORE INSERT "
+                    "ON taiwan_cain.charac_stat FOR EACH ROW "
+                    "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='clone blocked'")
+    try:
+        ctx.page(PAGE_GM)
+        if not ctx.ok("角色可选中", _select_char(ctx)):
+            return
+        core.press(ctx.ctl(G_CLONE), 0.6)
+        for _ in range(2):
+            b, t = _wait_box(ctx.main, 8.0)
+            if not b:
+                break
+            _close_box(ctx.main, b, 1)
+        ctx.ok("克隆报出失败", _wait_status(ctx, "克隆角色 失败", 90.0), _status(ctx))
+        ctx.check("角色数没有增加", ctx.q1("SELECT COUNT(*) FROM taiwan_cain.charac_info WHERE m_id=%s",
+                                          (mid,)), before)
+        ctx.ok("没有留下新角色行",
+               ctx.q1("SELECT COUNT(*) FROM taiwan_cain.charac_info WHERE charac_no>%s", (maxno,)) == 0)
+        ctx.ok("进程仍然活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
+    finally:
+        try:
+            ctx.cur.execute("DROP TRIGGER IF EXISTS taiwan_cain.trg_clone_block")
+        except Exception:
+            pass

@@ -187,12 +187,23 @@ void app_log_flush(void) {
 }
 
 // 日志分三级：普通流水、警告、错误。级别只是行前缀，看日志时能一眼筛出来。
+// 另外每条连接分一个 4 位会话号：断开重连后日志还接着写同一个文件，
+// 没有这个标记就分不清「这次」和「上次」的行。
+static volatile LONG s_log_sid;
+
+void app_log_session(void) {
+    u32 v = (u32)(now_ms() & 0xFFFFu) | 1u;   // 0 留给「还没连过」
+    InterlockedExchange(&s_log_sid, (LONG)v);
+}
+
 static void log_v(const char *tag, const char *fmt, va_list ap) {
-    char msg[1024], line[1200], ts[32];
+    char msg[1024], line[1200], ts[32], sid[16] = "";
     fmtv(msg, sizeof(msg), fmt, ap);
     now_str(ts, sizeof(ts), "%H:%M:%S");
-    if (tag) snprintf(line, sizeof(line), "[%s] %s %s\r\n", ts, tag, msg);
-    else snprintf(line, sizeof(line), "[%s] %s\r\n", ts, msg);
+    LONG s = s_log_sid;
+    if (s) snprintf(sid, sizeof(sid), "[#%04X]", (unsigned)s & 0xFFFFu);
+    if (tag) snprintf(line, sizeof(line), "[%s]%s %s %s\r\n", ts, sid, tag, msg);
+    else snprintf(line, sizeof(line), "[%s]%s %s\r\n", ts, sid, msg);
     if (s_log_cs_ok) EnterCriticalSection(&s_log_cs);
     str_cat(&s_log, line);
     int full = s_log.n >= 8192;
@@ -1688,6 +1699,7 @@ void app_tick(void) {
             if (s_recon_left > 0) s_recon_at = now_ms() + 3000;   // 自动重连还有次数就再来
         } else {
             s_recon_left = 0;               // 连上了，不再重试
+            app_log_session();              // 新会话：日志带上新的会话号
             chars_apply();                  // 连接作业填好的角色列表在这里换上
             g.db_ok = 1;
             app_status("数据库已连接 · 共 %u 个角色", g.char_total);
