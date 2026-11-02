@@ -76,7 +76,7 @@ void vec_init(Vec *v, int esz);
 void vec_free(Vec *v);
 void vec_clear(Vec *v);
 void *vec_add(Vec *v);             // 返回新元素地址，已清零
-void *vec_at(Vec *v, int i);
+void *vec_at(const Vec *v, int i);
 
 // ---------------- 数值 ----------------
 static inline u16 rd16(const void *p) {

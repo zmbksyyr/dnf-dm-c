@@ -383,7 +383,7 @@ static int purge_work(void *ctx, Err err) {
 static void scan_run(void) {
     s_scan_busy = 1;
     InterlockedExchange(&s_scan_live, 1);
-    if (!app_act("全服扫描", scan_work, NULL)) {     // 没提交出去：闸不能留着，否则这页再也扫不了
+    if (!app_act_null("全服扫描", scan_work)) {     // 没提交出去：闸不能留着，否则这页再也扫不了
         InterlockedExchange(&s_scan_live, 0);
         s_scan_busy = 0;
     }
@@ -475,7 +475,7 @@ static LRESULT scan_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
             s_phase = 1;
             s_scan_busy = 1;
             InterlockedExchange(&s_scan_live, 1);
-            if (!app_act("清除错误物品", purge_work, NULL)) {
+            if (!app_act_null("清除错误物品", purge_work)) {
                 InterlockedExchange(&s_scan_live, 0);
                 s_scan_busy = 0;
                 s_phase = 0;

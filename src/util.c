@@ -156,7 +156,7 @@ void *vec_add(Vec *v) {
     return e;
 }
 
-void *vec_at(Vec *v, int i) { return (u8 *)v->p + (size_t)i * (size_t)v->esz; }
+void *vec_at(const Vec *v, int i) { return (u8 *)v->p + (size_t)i * (size_t)v->esz; }
 
 // ---------------- 编码 ----------------
 int u16_from_u8(const char *src, int n, WCHAR *out, int cap) {

@@ -103,11 +103,12 @@ const char *pvf_kind_name(int kind);
 
 const char *pvf_item_name(const Pvf *p, u32 id);
 // 物品文件路径（如 equipment/character/.../xxx.equ）。没有返回空串。
-const char *pvf_item_path(const Pvf *p, u32 id, char *out, int cap);
+// 首次调用会补建「编号 → 文件」索引，因此接收可写 Pvf。
+const char *pvf_item_path(Pvf *p, u32 id, char *out, int cap);
 // [icon] 段：img 路径（如 Item/IconMaterial2.img）+ 帧号。没有返回 0。
-int  pvf_item_icon(const Pvf *p, u32 id, char *img, int cap, int *frame);
+int  pvf_item_icon(Pvf *p, u32 id, char *img, int cap, int *frame);
 // 物品详情（人类可读多行 UTF-8，供悬浮卡片用）。名字查 PVF，PVF 没有的编号返回 0。
-int  pvf_item_detail(const Pvf *p, u32 id, Str *out);
+int  pvf_item_detail(Pvf *p, u32 id, Str *out);
 int         pvf_quest_info(Pvf *p, u32 id, QuestInfo *out);
 
 // 任务材料（收集类任务要的东西）。同一件材料按「单个任务最多要多少个」记，

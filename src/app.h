@@ -206,6 +206,8 @@ void app_money_text(u64 v, char *buf, int cap);
 int  app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz);
 int  app_act_idle(void);                 // 连接空闲且没有排队动作：能直接发
 #define app_act(what, fn, ctx) app_act_n((what), (fn), (void *)(ctx), (int)sizeof(*(ctx)))
+// 无上下文的动作：不要用 app_act(..., NULL)，那会对 void 取 sizeof
+#define app_act_null(what, fn) app_act_n((what), (fn), NULL, 0)
 
 // 泡点：开关 / 间隔秒 / 目标人群 / 多奖励（赠送点券·D点·D币·物品）/ 生效时长。
 // 改完立即写回 settings.ini，计时从改的那一刻重来。

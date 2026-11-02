@@ -1,18 +1,14 @@
 @echo off
 rem ===========================================================================
-rem  Local build for debugging.  CI uses .github/workflows/build.yml with the
-rem  same flags, so the two stay in sync by hand.
+rem  Local build.  CI (.github/workflows/build.yml) uses the same flags.
 rem
-rem  Paths are derived from this file's own location - no drive letter, no
-rem  absolute path, so a clone anywhere works.  Output deliberately goes
-rem  OUTSIDE the project tree:
+rem  Paths are derived from this file's location, so a clone anywhere works.
+rem  Output goes outside the tree:  <project>\tools\build.bat
+rem                             -> <project>\..\_build\DNF_GM_C\
+rem  Override with the DNF_GM_BUILD environment variable.
 rem
-rem      <project>\tools\build.bat   ->   <project>\..\_build\DNF_GM_C\
-rem
-rem  The repo therefore never contains an exe, an .obj, or a config dir.
-rem  Override the output dir with the DNF_GM_BUILD environment variable.
-rem
-rem  ASCII only: a .bat with UTF-8 Chinese text is mangled by the OEM codepage.
+rem  ASCII only: cmd.exe renders UTF-8 Chinese in a .bat through the OEM
+rem  codepage and prints mojibake.
 rem ===========================================================================
 setlocal enabledelayedexpansion
 
@@ -28,14 +24,14 @@ if not defined ZBIN for %%C in ("C:\zig\zig.exe" "%LOCALAPPDATA%\zig\zig.exe") d
 if not defined ZBIN goto :nozig
 
 set "TARGET=-target x86_64-windows-gnu"
-rem 警告开关与 CI 保持一致：本地编译出来的告警和 CI 一样多，
-rem 不会出现「本地干净、CI 报错」或反过来。全库当前零告警。
-set "WARN=-Wall -Wextra -Wshadow -Wconversion"
+rem  Warnings are errors: a warning that survives a commit is a warning nobody
+rem  reads again.  Keep this list identical to CI.
+set "WARN=-Wall -Wextra -Wshadow -Wconversion -Wcast-qual -Wpedantic"
+set "WARN=%WARN% -Wstrict-prototypes -Wmissing-prototypes -Wmissing-declarations"
+set "WARN=%WARN% -Wundef -Wpointer-arith -Wwrite-strings -Wvla -Wdouble-promotion"
+set "WARN=%WARN% -Wold-style-definition -Wredundant-decls -Werror"
 set "CFLAGS=%TARGET% -std=c11 -O2 -DNDEBUG -DUNICODE -D_UNICODE %WARN%"
-rem Accumulate on separate lines rather than with a trailing caret: inside
-rem double quotes cmd treats ^ as a literal, so the continuation silently
-rem breaks and the later files never get compiled (undefined symbols at link).
-rem 跟 CI 一样按目录取 src\*.c —— 新增 .c 不用再来改这份清单
+rem One source list for both build systems: every src\*.c, no manual updates.
 set "SRC="
 for %%F in ("%ROOT%\src\*.c") do set "SRC=!SRC! "%%F""
 set "LIBS=-lcomctl32 -lcomdlg32 -lshell32 -luser32 -lgdi32 -lole32 -lws2_32 -ladvapi32 -lmsimg32"
@@ -69,7 +65,7 @@ echo   zig       %ZBIN%
 echo   source    %ROOT%
 echo   output    %OUT%
 echo.
-echo   Run tools\v_*.py to verify - pages.py picks the exe up from this path.
+echo   Regression: python tools\regress.py --list
 exit /b 0
 
 :nozig

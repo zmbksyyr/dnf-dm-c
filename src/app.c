@@ -600,8 +600,8 @@ static Vec s_poll;
 static int chars_differs(const Vec *a, const Vec *b) {
     if (a->n != b->n) return 1;
     for (int i = 0; i < a->n; i++) {
-        const Charac *x = (const Charac *)vec_at((Vec *)a, i);
-        const Charac *y = (const Charac *)vec_at((Vec *)b, i);
+        const Charac *x = (const Charac *)vec_at(a, i);
+        const Charac *y = (const Charac *)vec_at(b, i);
         if (x->no != y->no || x->mid != y->mid || x->lev != y->lev || x->job != y->job ||
             x->grow != y->grow || x->online != y->online || strcmp(x->name, y->name) != 0 ||
             strcmp(x->account, y->account) != 0)
