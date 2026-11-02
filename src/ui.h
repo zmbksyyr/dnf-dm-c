@@ -113,7 +113,6 @@ void ui_combo_set(HWND c, int i);
 
 // ---- 列表 ----
 void ui_cols(HWND lv, const char *const *titles, const int *widths, int n);
-void ui_cols_add(HWND lv, const char *title, int width);
 void ui_rows_clear(HWND lv);
 int  ui_row_add(HWND lv, const char *const *cells, int n, LPARAM data);
 void ui_row_set(HWND lv, int row, const char *const *cells, int n);   // 原地刷新一行，选中不丢
@@ -121,8 +120,6 @@ int  ui_row_sel(HWND lv);
 LPARAM ui_row_data(HWND lv, int row);
 void ui_row_sel_set(HWND lv, int row);
 void ui_batch(HWND lv, int begin);
-void ui_cols_width(HWND lv, const int *widths, int n);
-
 // ---- 布局游标：一行内顺序摆放 ----
 typedef struct {
     int x, y, h, gap;

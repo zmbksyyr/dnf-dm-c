@@ -1170,13 +1170,6 @@ int db_bubble_tick(Db *d, const BubbleCfg *cfg, u32 *paid, Err err) {
     return ok;
 }
 
-int db_set_delete_flag(Db *d, const Charac *c, int deleted, Err err) {
-    return db_exec(d, deleted ? "标记删除" : "取消删除", "taiwan_cain.charac_info", "charac_no",
-                   c->no, err,
-                   "UPDATE taiwan_cain.charac_info SET delete_flag=%d WHERE charac_no=%u",
-                   deleted ? 1 : 0, c->no);
-}
-
 // ---------------- GM 一键 ----------------
 int db_set_sp(Db *d, const Charac *c, int sp, int sp2, int tp, int tp2, Err err) {
     return db_exec(d, "改 SP/TP", "taiwan_cain_2nd.skill", "charac_no", c->no, err,

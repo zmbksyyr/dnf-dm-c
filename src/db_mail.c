@@ -131,16 +131,6 @@ int db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *te
     return ok;
 }
 
-int db_send_item_mail(Db *d, const Charac *c, const char *sender, const char *text,
-                      u32 item_id, u32 num, Err err) {
-    GrantItem g;
-    memset(&g, 0, sizeof(g));
-    g.id = item_id;
-    g.num = num;
-    g.type = IT_STACK;
-    return db_send_item_mail_ex(d, c, sender, text, &g, 0, 0, err);
-}
-
 int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char *text,
                          const GrantItem *g, int avata_flag, int creature_flag, Err err) {
     if (!db_send_text_mail(d, c, sender, text, err)) return 0;

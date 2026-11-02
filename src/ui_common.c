@@ -761,15 +761,6 @@ void ui_cols(HWND lv, const char *const *titles, const int *widths, int n) {
     for (int i = 0; i < n; i++) setcol(lv, i, titles[i], widths[i]);
 }
 
-void ui_cols_add(HWND lv, const char *title, int width) {
-    int n = Header_GetItemCount((HWND)SendMessageW(lv, LVM_GETHEADER, 0, 0));
-    setcol(lv, n, title, width);
-}
-
-void ui_cols_width(HWND lv, const int *widths, int n) {
-    for (int i = 0; i < n; i++) ListView_SetColumnWidth(lv, i, ui_scale(widths[i]));
-}
-
 void ui_rows_clear(HWND lv) {
     SendMessageW(lv, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(lv);

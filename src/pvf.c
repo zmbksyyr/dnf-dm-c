@@ -1027,8 +1027,6 @@ void pvf_close(Pvf *p) {
     p->path[0] = 0;
 }
 
-int pvf_loaded(const Pvf *p) { return p && p->opened; }
-
 const char *pvf_item_name(const Pvf *p, u32 id) { return idtab_get(&p->items, id); }
 
 // 物品编号在物品表里的下标（-1 = 没有这件）
@@ -1081,11 +1079,6 @@ const char *pvf_job_name(const Pvf *p, int job) { return idtab_get(&p->jobs, (u3
 
 const char *pvf_seal_name(const Pvf *p, int id) {
     return (id >= 0 && id < p->seals.n) ? stab_get(&p->seals, id) : "";
-}
-
-u32 pvf_exp_for(const Pvf *p, int lev) {
-    if (!p->exp || lev < 0 || lev >= p->nexp) return 0;
-    return p->exp[lev];
 }
 
 int pvf_is_equip(const Pvf *p, u32 id) {
@@ -1281,45 +1274,6 @@ int pvf_item_detail(const Pvf *p, u32 id, Str *out) {
     str_free(&v);
     buf_free(&c);
     return 1;
-}
-
-void pvf_stk_text(const Pvf *p, const void *c, size_t n, Str *out) {
-    str_clear(out);
-    if (n < 7) return;
-    const u8 *b = (const u8 *)c;
-    size_t cnt = (n - 2) / 5;
-    int seg = 0;
-    for (size_t i = 0; i < cnt; i++) {
-        u8 t = b[2 + i * 5];
-        u32 v = rd32(b + 2 + i * 5 + 1);
-        switch (t) {
-            case 2:
-            case 3: str_catf(out, "%u ", v); break;
-            case 4: {
-                float f;
-                memcpy(&f, &v, 4);
-                str_catf(out, "%g ", (double)f);
-                break;
-            }
-            case 5:
-            case 6:
-            case 7:
-            case 8: {
-                const char *s = stab_get(&p->strings, (int)v);
-                if (*s) {
-                    if (s[0] == '[') {
-                        if (seg) str_catc(out, '\n');
-                        seg = 1;
-                    }
-                    str_cat(out, s);
-                    str_catc(out, ' ');
-                }
-                break;
-            }
-            case 9: str_catf(out, "<ref:%u> ", v); break;
-            default: str_catf(out, "<%u:%u> ", t, v);
-        }
-    }
 }
 
 // ---------------- 任务（n_quest/*.qst）----------------

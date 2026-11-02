@@ -116,10 +116,7 @@ int  file_write(const char *path, const void *d, size_t n);
 int  file_append(const char *path, const char *text, size_t n);
 int  file_exists(const char *path);
 int  dir_exists(const char *path);
-u64  file_size(const char *path);
 int  dir_make(const char *path);
-int  file_copy(const char *from, const char *to);
-int  file_replace(const char *from, const char *to);   // 原子替换
 void exe_dir(char *out, int cap);
 void path_join(char *out, int cap, const char *a, const char *b);
 
@@ -132,7 +129,6 @@ void art_path(char *out, int cap, const char *sub, const char *prefix, const cha
 void art_prune(const char *dir, const char *prefix, int keep);
 
 // ---------------- 摘要 ----------------
-u32  crc32_buf(const void *d, size_t n);                  // zlib 多项式，初值/异或均 0xFFFFFFFF
 void hash_md5(const void *d, size_t n, char out[33]);
 int  hash_file_fp(const char *path, char out[33]);   // 长度+头尾各 64KB 的 md5：判断大文件换没换，比全量快三个数量级
 void hash_sha1(const void *d, size_t n, u8 out[20]);

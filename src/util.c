@@ -350,34 +350,12 @@ int dir_exists(const char *path) {
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
-u64 file_size(const char *path) {
-    WCHAR w[MAX_PATH * 2];
-    utf16(path, w, MAX_PATH * 2);
-    WIN32_FILE_ATTRIBUTE_DATA d;
-    if (!GetFileAttributesExW(w, GetFileExInfoStandard, &d)) return 0;
-    return ((u64)d.nFileSizeHigh << 32) | d.nFileSizeLow;
-}
-
 int dir_make(const char *path) {
     if (!path || !*path) return 1;
     WCHAR w[MAX_PATH * 2];
     utf16(path, w, MAX_PATH * 2);
     if (CreateDirectoryW(w, NULL)) return 1;
     return GetLastError() == ERROR_ALREADY_EXISTS;
-}
-
-int file_copy(const char *from, const char *to) {
-    WCHAR a[MAX_PATH * 2], b[MAX_PATH * 2];
-    utf16(from, a, MAX_PATH * 2);
-    utf16(to, b, MAX_PATH * 2);
-    return CopyFileW(a, b, FALSE) != 0;
-}
-
-int file_replace(const char *from, const char *to) {
-    WCHAR a[MAX_PATH * 2], b[MAX_PATH * 2];
-    utf16(from, a, MAX_PATH * 2);
-    utf16(to, b, MAX_PATH * 2);
-    return MoveFileExW(a, b, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 }
 
 void exe_dir(char *out, int cap) {
@@ -542,24 +520,6 @@ static void md5_final(Md5 *m, u8 out[16]) {
     for (int i = 0; i < 8; i++) lb[i] = (u8)(bits >> (8 * i));
     md5_update(m, lb, 8);
     for (int i = 0; i < 4; i++) wr32(out + i * 4, m->h[i]);
-}
-
-// zlib 多项式 CRC-32（PVF 的 tree_crc / 叶子 crc 都用它）
-u32 crc32_buf(const void *d, size_t n) {
-    static u32 tab[256];
-    static int init = 0;
-    if (!init) {
-        for (u32 i = 0; i < 256; i++) {
-            u32 c = i;
-            for (int k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-            tab[i] = c;
-        }
-        init = 1;
-    }
-    u32 c = 0xFFFFFFFFu;
-    const u8 *p = (const u8 *)d;
-    for (size_t i = 0; i < n; i++) c = tab[(c ^ p[i]) & 0xFF] ^ (c >> 8);
-    return c ^ 0xFFFFFFFFu;
 }
 
 void hash_md5(const void *d, size_t n, char out[33]) {

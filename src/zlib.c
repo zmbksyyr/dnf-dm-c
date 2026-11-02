@@ -252,20 +252,3 @@ int zlib_pack(const void *src, size_t n, Buf *out) {
     buf_putc(out, (u8)ad);
     return 1;
 }
-
-u32 crc32_calc(const void *d, size_t n, u32 prev) {
-    static u32 table[256];
-    static int built = 0;
-    if (!built) {
-        for (u32 i = 0; i < 256; i++) {
-            u32 c = i;
-            for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-            table[i] = c;
-        }
-        built = 1;
-    }
-    u32 c = prev ^ 0xFFFFFFFFu;
-    const u8 *p = (const u8 *)d;
-    for (size_t i = 0; i < n; i++) c = table[(c ^ p[i]) & 0xff] ^ (c >> 8);
-    return c ^ 0xFFFFFFFFu;
-}

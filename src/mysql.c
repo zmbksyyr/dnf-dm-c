@@ -79,12 +79,6 @@ i64 my_i64(const MyResult *r, int row, int col, i64 def) {
     return neg ? -v : v;
 }
 
-int my_col(const MyResult *r, const char *name) {
-    for (int i = 0; i < r->ncol; i++)
-        if (r->cols[i] && lstrcmpiA(r->cols[i], name) == 0) return i;
-    return -1;
-}
-
 // ---------------- 编解码 ----------------
 // 只有解码。客户端发出去的包（登录/查询）长度都是定长或长度外置的，
 // 从来不需要 lenenc 编码；原先那个 put_lenenc 全库无引用，已删除。

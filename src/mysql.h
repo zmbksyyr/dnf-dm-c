@@ -40,6 +40,4 @@ const char *my_text(const MyResult *r, int row, int col);   // NULL 表示越界
 int         my_len(const MyResult *r, int row, int col);
 u64         my_u64(const MyResult *r, int row, int col, u64 def);
 i64         my_i64(const MyResult *r, int row, int col, i64 def);
-int         my_col(const MyResult *r, const char *name);
-
 char *mysql_escape(const char *s);   // malloc，调用方 free

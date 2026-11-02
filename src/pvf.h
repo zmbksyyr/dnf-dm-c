@@ -72,7 +72,6 @@ typedef struct {
 int   pvf_open(Pvf *p, const char *path, PvfProg prog);   // 命中缓存秒开
 void  pvf_close(Pvf *p);
 void  pvf_decrypt(u8 *p, size_t n, u32 crc);              // 自反：解密与加密同一变换
-int   pvf_loaded(const Pvf *p);
 const Leaf *pvf_find(const Pvf *p, const char *path);
 int   pvf_read(const Pvf *p, const Leaf *lf, Buf *out);
 
@@ -122,11 +121,8 @@ typedef struct {
 int pvf_quest_materials(Pvf *p, QuestMat **out);   // 返回条数，*out 由调用方 free
 const char *pvf_job_name(const Pvf *p, int job);
 const char *pvf_seal_name(const Pvf *p, int id);
-u32         pvf_exp_for(const Pvf *p, int lev);
 int         pvf_is_equip(const Pvf *p, u32 id);
 int         pvf_item_count(const Pvf *p);
 u32         pvf_item_at(const Pvf *p, int i, const char **name);   // 按下标枚举物品名
 
 // 把一个 stk 内容转成人类可读文本
-void pvf_stk_text(const Pvf *p, const void *c, size_t n, Str *out);
-

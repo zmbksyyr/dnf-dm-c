@@ -210,24 +210,6 @@ int db_unban(Db *d, u32 mid, int type, Err err) {
     return ok;
 }
 
-int db_find_mid(Db *d, const char *name, u32 *mid, Err err) {
-    // 和读路径用同一个字符集，别再切 latin1：charac_name 是 varchar(20) utf8，
-    // latin1 会话把送进去的 UTF-8 逐字节当 latin1、再转存成 utf8，中文名恒不命中。
-    set_names(d, db_cs_name(d->charset));
-    char *e = mysql_escape(name);
-    Str s = {0};
-    MyResult r = {0};
-    str_catf(&s, "SELECT m_id FROM taiwan_cain.charac_info WHERE charac_name='%s' LIMIT 1", e);
-    free(e);
-    int ok = select1(d, &s, &r);
-    if (ok && r.nrow) *mid = (u32)my_u64(&r, 0, 0, 0);
-    else if (ok) { ok = 0; snprintf(err, ERRBUF, "未找到角色"); }
-    else snprintf(err, ERRBUF, "%s", d->err);
-    my_free(&r);
-    str_free(&s);
-    return ok;
-}
-
 // ---------------- 账号 ----------------
 // 服务端存的是无盐 md5（与官方 accounts.password 一致），改完立即生效
 int db_reset_pwd(Db *d, u32 mid, const char *pwd, Err err) {
@@ -274,21 +256,6 @@ int db_set_vip(Db *d, u32 mid, const char *vip, Err err) {
     str_free(&s);
     if (!ok) snprintf(err, ERRBUF, "%s", d->err);
     return ok;
-}
-
-int db_online_accounts(Db *d, Vec *out) {
-    Str s = {0};
-    str_cat(&s, "SELECT m_id FROM taiwan_login.login_account_3 WHERE login_status=1");
-    MyResult r = {0};
-    int ret = select1(d, &s, &r);
-    str_free(&s);
-    vec_clear(out);
-    for (int i = 0; i < r.nrow; i++) {
-        u32 *p = VEC_ADD(out, u32);
-        *p = (u32)my_u64(&r, i, 0, 0);
-    }
-    my_free(&r);
-    return ret;
 }
 
 // ---------------- 整库备份用：列出所有表 ----------------

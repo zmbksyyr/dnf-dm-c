@@ -136,8 +136,6 @@ typedef struct {
     u32  tno;         // 指定角色 charac_no / 指定账号 m_id
 } BubbleCfg;
 int  db_bubble_tick(Db *d, const BubbleCfg *cfg, u32 *paid, Err err);
-int  db_set_delete_flag(Db *d, const Charac *c, int deleted, Err err);
-
 // GM 一键
 int  db_set_sp(Db *d, const Charac *c, int sp, int sp2, int tp, int tp2, Err err);
 int  db_set_qp(Db *d, const Charac *c, int qp, Err err);
@@ -161,8 +159,6 @@ int  db_list_mails(Db *d, const Charac *c, Vec *out, Err err);            // Vec
 int  db_delete_mail(Db *d, u64 postal_id, Err err);
 int  db_delete_all_mails(Db *d, const Charac *c, Err err);
 int  db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *text, Err err);
-int  db_send_item_mail(Db *d, const Charac *c, const char *sender, const char *text,
-                       u32 item_id, u32 num, Err err);
 int  db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char *text,
                           const GrantItem *g, int avata_flag, int creature_flag, Err err);
 // 全服 / 在线批量发邮件：online_only=1 仅发给在线账号下的角色；sent 带回成功数。
@@ -204,10 +200,7 @@ int  db_list_bans(Db *d, Vec *out, Err err);                              // Vec
 int  db_ban(Db *d, u32 mid, int days, int type, int value, const char *reason, Err err);
 // type=1 账号封禁（value 不用），type=2 角色封禁（value=charac_no）
 int  db_unban(Db *d, u32 mid, int type, Err err);   // 按惩罚类型解封（type=0 全部清除）
-int  db_find_mid(Db *d, const char *name, u32 *mid, Err err);
-
 // 账号
-int  db_online_accounts(Db *d, Vec *out);                                 // Vec<u32> mid
 int  db_reset_pwd(Db *d, u32 mid, const char *pwd, Err err);               // 密码按 md5 存
 int  db_unlock_create(Db *d, u32 mid, Err err);                            // 解除建角次数限制
 int  db_get_vip(Db *d, u32 mid, char *out, int cap, Err err);              // 读 accounts.VIP
