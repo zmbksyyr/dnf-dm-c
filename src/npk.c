@@ -268,7 +268,9 @@ HBITMAP npk_icon(Npk *p, const char *img, int frame, int *w, int *h) {
     Buf unc = {0};
     const u8 *px = raw;
     if (comp == 6) {
-        if (!zlib_unpack(raw, len, &unc)) { buf_free(&b); return NULL; }
+        // 尺寸在解压前就已知：按 w*h*4 卡上限，压缩炸弹到不了分配那一步
+        size_t need = (size_t)wpx * (size_t)hpx * 4 + 64;
+        if (!zlib_unpack(raw, len, &unc, need)) { buf_free(&b); return NULL; }
         px = unc.p;
     } else if (comp != 5) {
         buf_free(&b);

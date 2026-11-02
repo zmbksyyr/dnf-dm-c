@@ -155,9 +155,10 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             int row = ui_row_sel(m_list);
             if (row < 0 || row >= g.mails.n) return 0;
             MailRow *r = VEC_AT(&g.mails, MailRow, row);
-            if (!app_confirm(fmt_new("删除邮件 %llu？", (unsigned long long)r->postal_id))) return 0;
+            u64 pid = r->postal_id;          // 弹框期间列表可能被换掉，先取标量
+            if (!app_confirm(fmt_new("删除邮件 %llu？", (unsigned long long)pid))) return 0;
             mc.kind = A_DEL;
-            mc.postal = r->postal_id;
+            mc.postal = pid;
             if (app_act("删除邮件", mail_work, &mc)) {
                 g.mails.n = 0;
                 g.lists_ready &= ~(u32)L_MAILS;
@@ -183,6 +184,9 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         case M_SEND: {
             int target = ui_combo_sel(m_target);
             if (target < 0) target = 0;
+            // 单发以当前角色为收件人：没选角色时 g.cur 是空的（重连后也不清），
+            // 落库会写进 charac_no=0 或上一个库的编号
+            if (target == 0 && !g.char_ok) { app_info("请先在左栏选择一个角色。"); return 0; }
             char idbuf[24];
             ui_get(m_aid, idbuf, sizeof(idbuf));
             str_trim(idbuf);
@@ -198,7 +202,14 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             mc.avata = (mc.atype == AK_AVATA);
             mc.creature = (mc.atype == AK_CREATURE);
             mc.iid = id;
-            mc.inum = ui_int(m_anum) > 0 ? ui_int(m_anum) : 1;
+            int inum = ui_int(m_anum) > 0 ? ui_int(m_anum) : 1;
+            // 附件数量受堆叠上限约束：超了服务端判「物品数量错误」，收件人取不出来
+            u32 lim = id ? app_item_stack_limit(id) : 0;
+            if (lim && (u32)inum > lim) {
+                app_info(fmt_new("数量超过该物品的堆叠上限 %u。需要更多请用发放页按上限拆封。", lim));
+                return 0;
+            }
+            mc.inum = inum;
             // 附件 ID 留空 = 纯文本邮件；当前角色才有「单发文本」这条路径，
             // 全服/在线两种情况 db_send_mail_bulk 自己会按 item_id=0 发纯文本
             mc.kind = (!id && target == 0) ? A_SENDT : A_SENDI;

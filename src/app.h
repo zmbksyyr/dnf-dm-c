@@ -74,6 +74,7 @@ typedef struct {
     CharData data;         // 同上，当前角色的容器/标量快照
     u32    data_ver;       // 快照换代（载入 / 重载 / 写后校验不符），页面据此重填
     u32    chars_ver;      // 左栏列表重排
+    u32    ban_chars_ver;  // 封停页角色清单换代（下拉要跟着重建）
     u32    act_ver;        // 每次写操作完成自增
     u32    lists_ready;    // 各列表页是否已取过数据（位掩码 L_*）
 

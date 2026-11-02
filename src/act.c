@@ -27,6 +27,7 @@ void act_apply_lists(void) {
         vec_free(&g.ban_chars);
         g.ban_chars = s_ban_chars_next;
         vec_init(&s_ban_chars_next, sizeof(Charac));
+        g.ban_chars_ver++;             // 页面据此重建角色下拉，别按旧名单取 mid
         g.lists_ready |= L_BANCHARS;
     }
     if (dirty & L_EVENTS) {

@@ -133,7 +133,9 @@ int db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *te
 
 int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char *text,
                          const GrantItem *g, int avata_flag, int creature_flag, Err err) {
-    if (!db_send_text_mail(d, c, sender, text, err)) return 0;
+    // 正文、附件行、postal 必须同生共死：附件先落库而 postal 失败会留下占格的孤儿行
+    if (!db_tx_begin(d, err)) return 0;
+    if (!db_send_text_mail(d, c, sender, text, err)) goto fail;
     // postal.send_charac_name 同样是 utf8 列，字符集必须跟上面那封正文一致
     set_names(d, db_cs_name(d->charset));
     char *es = mysql_escape(sender ? sender : "GM");
@@ -162,7 +164,7 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
                  "(charac_no,it_id,expire_date,obtain_from,reg_date,stat) "
                  "VALUES (%u,%u,'9999-12-31 23:59:59',1,'%s',2)",
                  c->no, g->id, ts0);
-        if (!run(d, &s)) { snprintf(err, ERRBUF, "建时装行：%s", d->err); str_free(&s); free(es); return 0; }
+        if (!run(d, &s)) { snprintf(err, ERRBUF, "建时装行：%s", d->err); str_free(&s); free(es); goto fail; }
         str_clear(&s);
         str_cat(&s, "SELECT LAST_INSERT_ID()");
         if (select1(d, &s, &r)) add_info = my_u64(&r, 0, 0, 0);
@@ -176,7 +178,7 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
                  "(charac_no,it_id,expire_date,reg_date,stat,item_lock_key,creature_type,stomach) "
                  "VALUES (%u,%u,'9999-12-31 23:59:59','%s',0,0,0,100)",
                  c->no, g->id, ts0);
-        if (!run(d, &s)) { snprintf(err, ERRBUF, "建宠物行：%s", d->err); str_free(&s); free(es); return 0; }
+        if (!run(d, &s)) { snprintf(err, ERRBUF, "建宠物行：%s", d->err); str_free(&s); free(es); goto fail; }
         str_clear(&s);
         str_cat(&s, "SELECT LAST_INSERT_ID()");
         if (select1(d, &s, &r)) add_info = my_u64(&r, 0, 0, 0);
@@ -198,8 +200,15 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
     free(es);
     int ok = run(d, &s);
     str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+    if (!ok) {
+        snprintf(err, ERRBUF, "%s", d->err);
+        goto fail;
+    }
+    return db_tx_commit(d, err);
+
+fail:
+    db_tx_rollback(d);
+    return 0;
 }
 
 // 全服 / 在线批量发邮件：逐角色发一封（文本 + 可选附件）。在线模式只发给

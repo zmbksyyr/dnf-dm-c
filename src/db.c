@@ -899,26 +899,39 @@ int db_save_blob(Db *d, const Charac *c, const char *table, const char *field,
         undo_note(table, field, key, my_text(&r, 0, 0), (size_t)my_len(&r, 0, 0));
     my_free(&r);
 
-    // 2) 用十六进制字面量写入，绕开一切字符集/转义
+    // 2) 用十六进制字面量写入，绕开一切字符集/转义。写和校验放在一个事务里：
+    //    列比数据短时 MySQL 会静默截断，校验不过必须整条撤回，不能留下半截 blob。
+    if (!db_tx_begin(d, err)) return 0;
     str_clear(&s);
     str_catf(&s, "UPDATE %s SET %s=0x", table, field);
     hex_str(raw, n, &s);
     str_catf(&s, " WHERE %s=%u", key_col, key);
     int ok = run(d, &s);
     str_free(&s);
-    if (!ok) { snprintf(err, ERRBUF, "%s", d->err); return 0; }
+    if (!ok) {
+        snprintf(err, ERRBUF, "%s", d->err);
+        db_tx_rollback(d);
+        return 0;
+    }
 
     // 3) 只查长度做校验：整块回读一遍纯属浪费
     str_catf(&s, "SELECT LENGTH(%s) FROM %s WHERE %s=%u", field, table, key_col, key);
-    if (!select1(d, &s, &r)) { snprintf(err, ERRBUF, "%s", d->err); str_free(&s); return 0; }
+    if (!select1(d, &s, &r)) {
+        snprintf(err, ERRBUF, "%s", d->err);
+        str_free(&s);
+        db_tx_rollback(d);
+        return 0;
+    }
     u64 got = my_u64(&r, 0, 0, 0);
     my_free(&r);
     str_free(&s);
     if (got != (u64)n) {
-        snprintf(err, ERRBUF, "回读校验失败（写入 %llu 字节，库里 %llu）", (unsigned long long)n,
-                 (unsigned long long)got);
+        snprintf(err, ERRBUF, "回读校验失败（写入 %llu 字节，库里 %llu），已回滚",
+                 (unsigned long long)n, (unsigned long long)got);
+        db_tx_rollback(d);
         return 0;
     }
+    if (!db_tx_commit(d, err)) return 0;
     db_undo_flush(0);
     return 1;
 }

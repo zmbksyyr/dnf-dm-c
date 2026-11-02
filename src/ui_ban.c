@@ -22,6 +22,7 @@ static const int   kBanDaysVal[] = {1, 3, 7, 30, 0};
 // 用平行数组存 charac_no / mid，CB_SETITEMDATA 存索引
 static u32 s_char_no[5000], s_char_mid[5000];
 static int s_char_n;
+static u32 s_char_ver;       // 平行数组是按哪一代 g.ban_chars 建的
 
 static int s_online_only;    // 0=列表是「全服」 1=只显示在线（决定重新加载时的范围）
 static int s_filling;        // 重填列表期间屏蔽 LVN_ITEMCHANGED
@@ -45,12 +46,13 @@ static void ban_fill_chars(void) {
         s_char_n++;
     }
     if (s_char_n > 0) SendMessageW(b_char, CB_SETCURSEL, 0, 0);
+    s_char_ver = g.ban_chars_ver;    // 记下这批平行数组对应哪一代
 }
 
 // 返回当前下拉选中角色的索引（-1 = 没选）
 static int ban_sel_idx(void) {
     int idx = (int)SendMessageW(b_char, CB_GETCURSEL, 0, 0);
-    return (idx >= 0 && idx < s_char_n) ? idx : -1;
+    return (idx >= 0 && idx < s_char_n && idx < g.ban_chars.n) ? idx : -1;
 }
 
 // 该角色身上生效的封停记录。账号封禁优先：它封的是整个账号，比只封这个角色影响大，
@@ -121,7 +123,7 @@ static void ban_reload(Page *p) {
         ui_text(b_info, "正在读取数据…");
         return;
     }
-    if (!s_char_n && g.ban_chars.n) ban_fill_chars();
+    if (s_char_ver != g.ban_chars_ver) ban_fill_chars();   // 名单换代就重建下拉
     ban_fill();
 }
 

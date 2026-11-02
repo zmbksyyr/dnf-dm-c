@@ -269,11 +269,13 @@ int db_set_vip(Db *d, u32 mid, const char *vip, Err err) {
 }
 
 // ---------------- 整库备份用：列出所有表 ----------------
+// 只要基表：视图没有 INSERT 目标，导出去会让还原在第一条就中断
 static int db_list_tables(Db *d, Vec *out, Err err) {
     Str s = {0};
     str_cat(&s,
             "SELECT CONCAT(table_schema,'.',table_name) FROM information_schema.tables "
-            "WHERE table_schema IN ('taiwan_cain','taiwan_cain_2nd','d_taiwan','taiwan_login',"
+            "WHERE table_type='BASE TABLE' AND table_schema IN "
+            "('taiwan_cain','taiwan_cain_2nd','d_taiwan','taiwan_login',"
             "'taiwan_billing','taiwan_game_event') ORDER BY table_schema,table_name");
     MyResult r = {0};
     if (!select1(d, &s, &r)) { snprintf(err, ERRBUF, "%s", d->err); str_free(&s); return 0; }
@@ -416,7 +418,23 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
             continue;
         }
 
-        // 3) 数据
+        // 3) 先清空再灌数据：还原到仍有数据的库时，直接 INSERT 会撞主键
+        {
+            Str del = {0};
+            str_catf(&del, "DELETE FROM `%s`.`%s`;\n", sc, tb);
+            int w = file_append(path, del.p, (size_t)del.n);
+            str_free(&del);
+            if (!w) {
+                snprintf(err, ERRBUF, "写入失败：%s", path);
+                my_free(&r); str_free(&q);
+                for (int i = 0; i < names.n; i++) str_free(VEC_AT(&names, Str, i));
+                for (int i = 0; i < types.n; i++) str_free(VEC_AT(&types, Str, i));
+                vec_free(&names); vec_free(&types); str_free(&out);
+                return 0;
+            }
+        }
+
+        // 4) 数据
         str_catf(&q, "SELECT * FROM `%s`.`%s`", sc, tb);
         if (!select1(d, &q, &r)) {
             my_free(&r); str_free(&q);
@@ -1230,7 +1248,9 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
             const char *bp = my_text(&rv, 0, 0);
             int bn = my_len(&rv, 0, 0);
             Buf plain = {0};
-            if (bp && bn > 4 && zlib_unpack((const u8 *)bp + 4, (size_t)(bn - 4), &plain)) {
+            if (bp && bn > 4 &&
+                zlib_unpack((const u8 *)bp + 4, (size_t)(bn - 4), &plain,
+                            (size_t)CV_SLOT * 4096)) {
                 int nslot = (int)(plain.n / CV_SLOT);
                 int t = -1;
                 for (int k = 1; k < nslot; k++) {          // 0 号槽是源角色，从 1 开始找空位
