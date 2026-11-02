@@ -44,6 +44,7 @@ G_NAME, G_UNLOCK, G_NO_WEIGHT, G_FATIGUE = 1801, 1817, 1815, 1819
 G_SCANBAD, G_CLONE = 1827, 1828
 G_RESTORE = 1824
 IDC_CANCEL = 119
+G_QEXP, G_QIMP = 1851, 1852
 
 M_TEXT, M_AID, M_SEND = 1310, 1308, 1311
 P_LIST, P_NAME, P_RENAME = 1401, 1402, 1403
@@ -1609,4 +1610,76 @@ def clone_rollback(ctx):
         try:
             ctx.cur.execute("DROP TRIGGER IF EXISTS taiwan_cain.trg_clone_block")
         except Exception:
+            pass
+
+@core.case("db.quest_tpl_roundtrip", needs=("gui", "db"), group="always",
+           desc="任务模版导出→导入校验和一致；导入中途失败则整体回滚")
+def quest_tpl_roundtrip(ctx):
+    """验：模版覆盖任务进度是原子的——成功时逐字节还原，失败时一行都不动。"""
+    cno = ctx.char_no()
+    if not ctx.ok("库里有角色", cno is not None):
+        return
+    tabs = ["taiwan_cain.new_charac_quest", "taiwan_cain.charac_quest_shop"]
+
+    def sums():
+        out = {}
+        for t in tabs:
+            ctx.cur.execute("CHECKSUM TABLE %s" % t)
+            out[t] = ctx.cur.fetchone()[1]
+        return out
+
+    ctx.page(PAGE_GM)
+    if not ctx.ok("角色可选中", _select_char(ctx)):
+        return
+    before = sums()
+    exp = os.path.join(core.BUILD, "config", "export")
+    os.makedirs(exp, exist_ok=True)
+    prior = set(glob.glob(os.path.join(exp, "任务模版-*.txt")))
+
+    # 1) 导出（确认框 → 直接写 config/export）
+    core.press(ctx.ctl(G_QEXP), 0.6)
+    b, t = _wait_box(ctx.main, 8.0)
+    if not ctx.ok("导出确认框出现", b is not None, (t or "")[:60]):
+        return
+    _close_box(ctx.main, b, 1)
+    if not ctx.ok("导出完成", _wait_status(ctx, "导出任务模版 完成", 60.0), _status(ctx)):
+        return
+    new = sorted(set(glob.glob(os.path.join(exp, "任务模版-*.txt"))) - prior, key=os.path.getmtime)
+    if not ctx.ok("生成了模版文件", bool(new)):
+        return
+    tpl = new[-1]
+
+    # 2) 原样导入：校验和必须不变
+    core.press(ctx.ctl(G_QIMP), 0.6)
+    if not ctx.ok("弹出文件选择框", _file_dialog_set(ctx, tpl)):
+        return
+    b, t = _wait_box(ctx.main, 8.0)
+    if b:
+        _close_box(ctx.main, b, 1)
+    ctx.ok("导入完成", _wait_status(ctx, "导入任务模版 完成", 90.0), _status(ctx))
+    ctx.ok("导入后两张表校验和不变", sums() == before)
+
+    # 3) 制造失败：触发器挡住 INSERT，导入必须整体回滚
+    ctx.cur.execute("DROP TRIGGER IF EXISTS taiwan_cain.trg_quest_block")
+    ctx.cur.execute("CREATE TRIGGER taiwan_cain.trg_quest_block BEFORE INSERT "
+                    "ON taiwan_cain.new_charac_quest FOR EACH ROW "
+                    "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='quest blocked'")
+    try:
+        core.press(ctx.ctl(G_QIMP), 0.6)
+        if not ctx.ok("再次弹出文件选择框", _file_dialog_set(ctx, tpl)):
+            return
+        b, t = _wait_box(ctx.main, 8.0)
+        if b:
+            _close_box(ctx.main, b, 1)
+        ctx.ok("导入报出失败", _wait_status(ctx, "导入任务模版 失败", 90.0), _status(ctx))
+        ctx.ok("失败后校验和仍未变（整体回滚）", sums() == before)
+        ctx.ok("进程仍然活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
+    finally:
+        try:
+            ctx.cur.execute("DROP TRIGGER IF EXISTS taiwan_cain.trg_quest_block")
+        except Exception:
+            pass
+        try:
+            os.remove(tpl)
+        except OSError:
             pass
