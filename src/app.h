@@ -226,6 +226,7 @@ void app_cancel_current(void);
 void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dcoin,
                       u32 item, int itemnum, u32 tno, int hours);
 void app_bubble_status(char *out, int cap);   // 一行人话，给 GM 页底部标签用
+void app_bubble_tick(void);                   // 每个 UI tick 调一次：到点结算
 void app_bubble_export(void);                // 把泡点结算记录导出为 txt
 
 // 最近计划 / 结算流水（最多 20 条，最新的在第 0 条）。

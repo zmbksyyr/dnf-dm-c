@@ -1519,3 +1519,32 @@ def cancel_restore(ctx):
             os.remove(path)
         except OSError:
             pass
+
+@core.case("db.scan_then_backup", needs=("gui", "db"), group="always",
+           desc="扫描被表锁挡住时点整库备份：动作进队列，扫描结束后自动执行完成")
+def scan_then_backup(ctx):
+    """验：长任务互斥靠队列而不是靠抢；排队的那一个不会丢。"""
+    ctx.page(PAGE_GM)
+    if not ctx.ok("角色可选中", _select_char(ctx)):
+        return
+    lock = _TableLock(["taiwan_cain_2nd.inventory"])
+    try:
+        lock.lock()
+        core.press(ctx.ctl(G_SCANBAD), 0.4)          # 全服扫描
+        b, t = _wait_box(ctx.main, 8.0)
+        if not ctx.ok("扫描确认框出现", b is not None, (t or "")[:60]):
+            return
+        _close_box(ctx.main, b, 1)
+        blocked, st = _wait_blocked(ctx, "taiwan_cain_2nd.inventory")
+        ctx.ok("扫描被表锁挡住", blocked, st)
+        core.press(ctx.ctl(1823), 0.4)               # 整库备份（应当排队）
+        b, t = _wait_box(ctx.main, 8.0)
+        ctx.ok("备份确认框出现", b is not None, (t or "")[:60])
+        if b:
+            _close_box(ctx.main, b, 1)
+        st = _status(ctx)
+        ctx.ok("备份没有插队（状态栏仍是扫描）", "扫描" in st and "备份" not in st, st)
+    finally:
+        lock.unlock()
+    ctx.ok("扫描结束后备份自动完成", _wait_status(ctx, "备份数据库 完成", 120.0), _status(ctx))
+    ctx.ok("进程仍然活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
