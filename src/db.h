@@ -184,6 +184,7 @@ int  db_delete_avatar(Db *d, u32 ui_id, Err err);
 // 任务
 int  db_list_quests(Db *d, const Charac *c, Vec *out, Err err);           // Vec<QuestRow>
 int  db_clear_quests(Db *d, const Charac *c, Err err);
+int  db_quest_init(Db *d, const Charac *c, Err err);                     // 任务数据初始化（回新建态）
 int  db_set_quest_slot(Db *d, const Charac *c, int slot, u32 id, u32 trigger, Err err);
 int  db_purge_quest_items(Db *d, const Charac *c, const u32 *ids, int n, int *removed, Err err);
 

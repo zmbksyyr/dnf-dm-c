@@ -1,5 +1,6 @@
 // db_mail.c：邮件 / 宠物 / 时装 / 任务表操作。从 db.c 拆出，行为不变。
 #include "db_priv.h"
+#include "zlib.h"
 #include "db.h"
 #include "util.h"
 #include "mysql.h"
@@ -485,6 +486,52 @@ int db_purge_quest_items(Db *d, const Charac *c, const u32 *ids, int n, int *rem
     buf_free(&out);
     if (ok && removed) *removed = hit;
     return ok;
+}
+
+// ---------------- 任务：批量完成 / 初始化 ----------------
+// clear_quest 是固定 30000 字节的 u32 编号表（7500 个位置，0 = 空位）：
+// 任务完成时把编号补进第一个空位。初始化 = 整表清零（新号的形态）。
+#define QUEST_CLEAR_BYTES 30000
+
+static int quest_clear_write(Db *d, const Charac *c, const u8 *raw, Err err) {
+    Buf z = {0}, out = {0};
+    if (!zlib_pack(raw, QUEST_CLEAR_BYTES, &z)) {
+        snprintf(err, ERRBUF, "压缩任务完成表失败");
+        return 0;
+    }
+    buf_put32(&out, QUEST_CLEAR_BYTES);
+    buf_put(&out, z.p, z.n);
+    buf_free(&z);
+    int ok = db_save_blob(d, c, "taiwan_cain.new_charac_quest", "clear_quest",
+                          (const char *)out.p, out.n, err);
+    buf_free(&out);
+    return ok;
+}
+
+static int quest_slots_zero(Db *d, const Charac *c, Err err) {
+    Str s = {0};
+    str_cat(&s, "UPDATE taiwan_cain.new_charac_quest SET ");
+    for (int i = 1; i <= 20; i++)
+        str_catf(&s, "%splay_%d=0,play_%d_trigger=0", i > 1 ? "," : "", i, i);
+    str_catf(&s, " WHERE charac_no=%u", c->no);
+    int ok = run(d, &s);
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    str_free(&s);
+    return ok;
+}
+
+// 任务初始化：槽位、完成表、通知表全部归零（回到刚建号的形态）
+int db_quest_init(Db *d, const Charac *c, Err err) {
+    u8 *zeros = (u8 *)xalloc(QUEST_CLEAR_BYTES);
+    memset(zeros, 0, QUEST_CLEAR_BYTES);
+    static const u8 notif[40] = {0};
+    int ok = db_tx_begin(d, err) && quest_clear_write(d, c, zeros, err) &&
+             db_save_blob(d, c, "taiwan_cain.new_charac_quest", "quest_notify",
+                          (const char *)notif, (int)sizeof(notif), err) &&
+             quest_slots_zero(d, c, err);
+    free(zeros);
+    if (!ok) { db_tx_rollback(d); return 0; }
+    return db_tx_commit(d, err);
 }
 
 // 放弃全部进行中的任务：把 20 个槽位清零而不是删行——

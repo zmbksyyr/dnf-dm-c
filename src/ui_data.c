@@ -555,8 +555,8 @@ void page_avatar_create(Page *p) {
 
 // ================================================================ 任务页
 enum { Q_LIST = PAGE_ID(PAGE_QUEST, 1), Q_REFRESH, Q_CLEAR, Q_INFO,
-       Q_DROP, Q_DONE, Q_SEND, Q_PURGE };
-enum { D_QUESTS = 30, D_QUESTCLR, D_QSLOT, D_QSEND, D_QPURGE };
+       Q_DROP, Q_DONE, Q_SEND, Q_PURGE, Q_RESET };
+enum { D_QUESTS = 30, D_QUESTCLR, D_QSLOT, D_QSEND, D_QPURGE, D_QINIT };
 
 static HWND q_list, q_info;
 static HWND q_sep;
@@ -607,6 +607,7 @@ static int quest_work(void *ctx, Err err) {
         return ok;
     }
     if (c->kind == D_QUESTCLR) return db_clear_quests(&g.db, &g.cur, err);
+    if (c->kind == D_QINIT) return db_quest_init(&g.db, &g.cur, err);
     if (c->kind == D_QSLOT) {
         if (!db_set_quest_slot(&g.db, &g.cur, c->q.slot, c->q.id, c->q.trigger, err)) return 0;
         if (c->q.purge && c->q.purge_n)
@@ -673,6 +674,16 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     if (id == Q_REFRESH) {
         quest_rerun();
         quest_reload(p);
+        return 0;
+    }
+    if (id == Q_RESET) {
+        if (!app_confirm("把任务数据初始化成刚建号的状态？\n\n"
+                         "槽位、完成表、通知表都会清零。写前有撤销快照，"
+                         "但还是建议先备份一次角色。"))
+            return 0;
+        dc.kind = D_QINIT;
+        quest_rerun();
+        app_act("任务初始化", quest_work, &dc);
         return 0;
     }
     if (id == Q_CLEAR) {
@@ -759,6 +770,7 @@ static void quest_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, Q_SEND, "补发材料"), ui_scale(70));
     ui_add(&r, ui_btn_at(p->wnd, Q_PURGE, "完美清除"), ui_scale(70));
     ui_add(&r, ui_btn_at(p->wnd, Q_CLEAR, "清空任务"), ui_scale(70));
+    ui_add(&r, ui_btn_at(p->wnd, Q_RESET, "任务初始化"), ui_scale(82));
     ui_add(&r, q_info, -1);
     int ly = pad + rowh + ui_scale(4);
     ui_place(q_sep, pad, ly, w - pad * 2, ui_scale(2));
@@ -768,7 +780,8 @@ static void quest_layout(Page *p, int w, int h) {
 static void quest_lock(Page *p) {
     (void)p;
     int on = g.char_ok;
-    int ids[] = {Q_REFRESH, Q_CLEAR, Q_LIST, Q_DROP, Q_DONE, Q_SEND, Q_PURGE};
+    int ids[] = {Q_REFRESH, Q_CLEAR, Q_LIST, Q_DROP, Q_DONE, Q_SEND, Q_PURGE,
+                 Q_RESET};
     for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
 }
 
@@ -785,6 +798,9 @@ static void quest_build(HWND parent) {
     ui_button(parent, "标记完成", Q_DONE);
     ui_button(parent, "补发材料", Q_SEND);
     ui_button(parent, "完美清除", Q_PURGE);
+    ui_button(parent, "任务初始化", Q_RESET);
+    ui_tip(parent, GetDlgItem(parent, Q_RESET),
+           "任务进度回到刚建号：槽位、完成表、通知表一起清零（写前有撤销快照）");
 }
 
 void page_quest_create(Page *p) {
