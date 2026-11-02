@@ -940,6 +940,14 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
     vec_init(&tabs, sizeof(CharTab));
     if (!char_tabs(d, &tabs, err)) { str_free(&out); vec_free(&tabs); return 0; }
     for (int ti = 0; ti < tabs.n; ti++) {
+        if (db_cancelled()) {
+            snprintf(err, ERRBUF, "已取消");
+            str_free(&out);
+            vec_free(&tabs);
+            remove(path);           // 半截备份不留给用户
+            return 0;
+        }
+        if (db_progress_cb) db_progress_cb(tabs.n ? ti * 100 / tabs.n : 100);
         const CharTab *ct = VEC_AT(&tabs, CharTab, ti);
         Str q = {0};
         MyResult r = {0};

@@ -973,6 +973,8 @@ typedef struct DlgBox {
 static DlgBox *g_dlg_top;   // 当前最内层还在跑的对话框
 static int g_dlg_reg;
 
+int ui_dlg_active(void) { return g_dlg_top != NULL; }
+
 void ui_dlg_end(int ok) {
     if (!g_dlg_top) return;
     g_dlg_top->ok = ok;

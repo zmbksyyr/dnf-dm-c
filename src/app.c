@@ -34,6 +34,9 @@ static volatile LONG s_job_pct = -1;       // 0..100；-1 表示这个任务不�
 static void progress_cb(int pct) { InterlockedExchange(&s_job_pct, pct); }
 
 void app_job_pct_reset(void) { InterlockedExchange(&s_job_pct, -1); }
+int  app_job_progress(void) { return (int)s_job_pct; }   // -1 = 这个任务不报进度
+int  app_act_running(void) { return job_running(&g.job_act); }
+const char *app_act_name(void) { return g.act_what; }
 
 void app_cancel_current(void) {
     if (!job_running(&g.job_act)) {
@@ -1336,10 +1339,10 @@ static int w_db_restore(void *ctx, Err err) {
     return app_restore_file(c->path, NULL, err);
 }
 
-void app_db_backup(const char *path) {
-    if (!g.db_ok) { app_info("请先连接数据库。"); return; }
+int app_db_backup(const char *path) {
+    if (!g.db_ok) { app_info("请先连接数据库。"); return 0; }
     snprintf(g_dbc.path, sizeof(g_dbc.path), "%s", path);
-    app_act("备份数据库", w_db_dump, &g_dbc);
+    return app_act("备份数据库", w_db_dump, &g_dbc);
 }
 
 static int w_db_dump_char(void *ctx, Err err) {
@@ -1351,17 +1354,17 @@ static int w_db_dump_char(void *ctx, Err err) {
     return 1;
 }
 
-void app_db_backup_char(void) {
-    if (!g.db_ok) { app_info("请先连接数据库。"); return; }
-    if (!g.char_ok) { app_info("请先选择角色。"); return; }
+int app_db_backup_char(void) {
+    if (!g.db_ok) { app_info("请先连接数据库。"); return 0; }
+    if (!g.char_ok) { app_info("请先选择角色。"); return 0; }
     db_backup_char_path(g_dbc.path, sizeof(g_dbc.path), &g.cur);
-    app_act("备份角色", w_db_dump_char, &g_dbc);
+    return app_act("备份角色", w_db_dump_char, &g_dbc);
 }
 
-void app_db_restore(const char *path) {
-    if (!g.db_ok) { app_info("请先连接数据库。"); return; }
+int app_db_restore(const char *path) {
+    if (!g.db_ok) { app_info("请先连接数据库。"); return 0; }
     snprintf(g_dbc.path, sizeof(g_dbc.path), "%s", path);
-    app_act("还原数据库", w_db_restore, &g_dbc);
+    return app_act("还原数据库", w_db_restore, &g_dbc);
 }
 
 // ---------------- 角色克隆 ----------------

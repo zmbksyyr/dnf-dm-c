@@ -147,6 +147,10 @@ void ui_page_redraw(HWND page);          // 整页（含所有子控件）标脏
 typedef LRESULT (*UiDlgProc)(HWND dlg, UINT msg, WPARAM wp, LPARAM lp, void *ctx);
 HWND ui_dlg_new(HWND owner, const char *title, int w, int h, UiDlgProc proc, void *ctx);
 int  ui_dlg_run(HWND dlg, HWND owner);   // 返回 1=确定 0=取消
+// 长任务进度窗（模态）：1 = 已结束，2 = 转后台。调用方一般在任务提交成功后调它
+int  ui_progress_modal(const char *title);
+int  ui_progress_active(void);            // 进度窗开着：页面刷新先避让
+int  ui_dlg_active(void);                 // 还有模态对话框在栈上
 void ui_dlg_end(int ok);
 
 // ---- 按类浏览 PVF 物品 ----

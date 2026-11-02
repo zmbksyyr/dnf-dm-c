@@ -188,6 +188,64 @@ def checked(h):
     return u.SendMessageW(h, BM_GETCHECK, 0, 0) == 1
 
 
+# ---------------- 长任务进度窗 ----------------
+PG_ID_CANCEL, PG_ID_BG = 2001, 2002
+
+
+def progress_dlg(pid):
+    """当前可见的进度窗（DnfDlg），没有返回 None。"""
+    found = []
+
+    def each(h, lp):
+        if u.IsWindowVisible(h) and cls_of(h) == "DnfDlg":
+            q = wt.DWORD(0)
+            u.GetWindowThreadProcessId(h, ctypes.byref(q))
+            if q.value == pid:
+                found.append(h)
+        return True
+    u.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(each), 0)
+    return found[0] if found else None
+
+
+def progress_wait(pid, timeout=8.0):
+    """等进度窗出现（长任务提交后会有）。"""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        d = progress_dlg(pid)
+        if d:
+            return d
+        time.sleep(0.1)
+    return None
+
+
+def progress_bg(pid, wait=0.4):
+    """点「后台运行」：关窗、任务继续。"""
+    d = progress_dlg(pid)
+    if not d:
+        return False
+    press(u.GetDlgItem(d, PG_ID_BG), wait)
+    return True
+
+
+def progress_cancel(pid, wait=0.2):
+    """点窗口里的「取消」：请求中止任务，窗口留到任务真正结束。"""
+    d = progress_dlg(pid)
+    if not d:
+        return False
+    press(u.GetDlgItem(d, PG_ID_CANCEL), wait)
+    return True
+
+
+def scan_bg(pid, timeout=8.0):
+    """扫描启动后把进度窗转后台：之后主窗口才点得动（多数并发用例都需要）。"""
+    d = progress_wait(pid, timeout)
+    if not d:
+        return False
+    progress_bg(pid)
+    return True
+
+
+
 def switch(main, idx, wait=1.1):
     tab = u.GetDlgItem(main, IDC_TAB)
     u.SendMessageW(tab, TCM_SETCURSEL, idx, 0)

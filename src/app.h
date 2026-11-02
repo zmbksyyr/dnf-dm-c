@@ -229,6 +229,7 @@ void app_money_text(u64 v, char *buf, int cap);
 int  app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz);
 int  app_act_idle(void);                 // 连接空闲且没有排队动作：能直接发
 void app_act_clear_queue(void);          // 丢掉还没开始的动作（会话边界）
+int  app_queue_pending(void);            // 队列里还有没开始的动作
 int  app_act_take_queued(char *what, int cap, ActFn *fn, void **ctx, int *ctxsz);
 int  app_act_run(const char *what, ActFn fn, void *ctx, int ctxsz);
 void app_job_pct_reset(void);            // 长任务进度清零
@@ -272,9 +273,13 @@ int  app_grant_add_new(u32 id, u32 num);
 int  app_grant_send(int by_mail);
 
 // 整库备份 / 还原（后台执行）
-void app_db_backup(const char *path);
-void app_db_backup_char(void);          // 只备份当前选中角色
-void app_db_restore(const char *path);
+int  app_db_backup(const char *path);        // 1 = 已提交（可能排队）
+int  app_db_backup_char(void);               // 只备份当前选中角色
+int  app_db_restore(const char *path);
+// 长任务状态（进度窗轮询这几个）
+int  app_job_progress(void);                 // 0..100；-1 = 该任务不报进度
+int  app_act_running(void);
+const char *app_act_name(void);
 // 还原前自动整库备份，再执行 SQL；GUI 与命令行共用这一条路径
 int  app_restore_file(const char *path, int *stmts, Err err);
 

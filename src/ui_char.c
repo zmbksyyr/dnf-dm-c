@@ -202,8 +202,9 @@ static u32 s_fill_gen = 0xFFFFFFFFu;
 
 static void gm_reload(Page *p) {
     (void)p;
-    // 首次点「全服清错误物品」后，扫描在后台跑；完成时这里自动弹出结果
-    if (s_scan_open && s_scan_busy && !s_scan_live) {
+    // 首次点「全服清错误物品」后，扫描在后台跑；完成时这里自动弹出结果。
+    // 进度窗开着的时候先不弹：在它里面再套一层模态，关窗顺序会乱。
+    if (!ui_progress_active() && s_scan_open && s_scan_busy && !s_scan_live) {
         s_scan_open = 0;
         s_scan_busy = 0;
         scan_show();
@@ -257,7 +258,7 @@ static void on_dump(void) {
     db_dump_path(path, sizeof(path));      // 命名和留存策略统一在 db 层：backup/db-<时间>.sql
     if (!app_confirm(fmt_new("把整库备份到\n%s？\n\n备份期间请勿关闭程序。", path))) return;
     app_status("正在备份整库…");
-    app_db_backup(path);
+    if (app_db_backup(path)) ui_progress_modal("备份数据库");
 }
 
 static void on_restore(void) {
@@ -289,7 +290,7 @@ static void on_restore(void) {
     // 还原前会自动整库备份（app_restore_file），这里只需要确认意图
     if (!app_confirm("确认执行导入？\n\n会先自动做一次整库备份，备份失败则中止。")) return;
     app_status("正在还原整库…");
-    app_db_restore(path);
+    if (app_db_restore(path)) ui_progress_modal("还原数据库");
 }
 
 static void on_char_dump(void) {
@@ -302,7 +303,7 @@ static void on_char_dump(void) {
                              g.cur.name, g.cur.no, path)))
         return;
     app_status("正在备份角色…");
-    app_db_backup_char();
+    if (app_db_backup_char()) ui_progress_modal("备份角色");
 }
 
 // ---------------- 任务模版 导入 / 导出 ----------------
@@ -387,7 +388,10 @@ static void scan_run(void) {
     if (!app_act_null("全服扫描", scan_work)) {     // 没提交出去：闸不能留着，否则这页再也扫不了
         InterlockedExchange(&s_scan_live, 0);
         s_scan_busy = 0;
+        return;
     }
+    ui_progress_modal("全服扫描");                // 模态挡住误操作，可取消/转后台
+    ui_pages_reload_all();                        // 进度窗关掉后补一次刷新：结果窗该弹就弹
 }
 
 static int scan_start(void) {
@@ -410,8 +414,10 @@ static void on_scanbad(void) {
     if (!app_confirm("扫描全服所有角色的容器、邮件、时装、宠物，找出错误物品？\n\n"
                      "角色较多时需要一点时间。"))
         return;
-    // 没真的提交出去就别置「扫完自动弹窗」，否则 gm_reload 会拿着一份旧结果弹窗
-    if (scan_start()) s_scan_open = 1;
+    // 先置「扫完自动弹窗」再启动：进度窗会在这里阻塞到扫描结束，若等 scan_start
+    // 返回后再置，页面刷新可能已经错过，结果窗就永远不弹了。没提交出去再清掉。
+    s_scan_open = 1;
+    if (!scan_start()) s_scan_open = 0;
 }
 
 static void scan_fill(void) {

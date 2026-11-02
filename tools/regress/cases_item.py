@@ -892,6 +892,7 @@ def _open_scan(ctx, timeout=60.0):
             _click_box(ctx, h, IDCANCEL)
         return None, t
     _click_box(ctx, h, IDOK)
+    core.scan_bg(ctx.proc.pid)              # 进度窗先转后台，测试才能继续驱动界面
     return _wait_scan_dlg(ctx, timeout), t
 
 
@@ -918,6 +919,7 @@ def _try_scan(ctx):
         _click_box(ctx, h, IDCANCEL)
         return False, t, None
     _click_box(ctx, h, IDOK)
+    core.scan_bg(ctx.proc.pid)              # 进度窗先转后台
     h2, t2 = _wait_box(ctx, 2.0)            # scan_start 拒绝时会紧接着再弹一个
     if h2:
         _click_box(ctx, h2, IDCANCEL)

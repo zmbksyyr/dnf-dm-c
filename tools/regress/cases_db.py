@@ -699,6 +699,7 @@ def disc_queue(ctx):
         ctx.ok("扫描入口弹出确认框", b is not None, (t or "")[:40])
         if b:
             _close_box(ctx.main, b, 1)
+        core.scan_bg(ctx.proc.pid)          # 进度窗转后台，下面才点得到按钮
         time.sleep(1.0)
 
         _press_cid(ctx, G_FATIGUE, 0.15)
@@ -765,6 +766,7 @@ def jobstop_cancel(ctx):
             _close_box(ctx.main, b, 1)
         blocked, st = _wait_blocked(ctx, "taiwan_cain_2nd.inventory")
         ctx.ok("扫描作业真的卡在库上", blocked, st)
+        core.scan_bg(ctx.proc.pid)          # 进度窗转后台，才能继续点「断开」
 
         mark = _log_mark()
         core.press(disc, 0.0)
@@ -900,6 +902,7 @@ def shutdown_skip(ctx):
                 _close_box(ctx.main, b, 1)
             blocked, st = _wait_blocked(ctx, "taiwan_cain_2nd.inventory")
             ctx.ok("扫描作业真的卡在库上（job_act 停不下来）", blocked, st)
+            core.scan_bg(ctx.proc.pid)      # 进度窗转后台，才能继续发 WM_CLOSE
 
             mark = _log_mark()
             t0 = time.time()
@@ -1500,14 +1503,18 @@ def cancel_restore(ctx):
             if not b:
                 break
             _close_box(ctx.main, b, 1)
-        # 等任务真跑起来（取消按钮可用），并确认状态栏有进度百分比
-        if not ctx.ok("取消按钮可用",
-                      core.wait_until(lambda: _enabled(u.GetDlgItem(ctx.main, IDC_CANCEL)), 20.0)):
+        # 长任务现在弹模态进度窗：断言它在、挡住主窗口、并且真的能取消
+        dlg = core.progress_wait(ctx.proc.pid, 20.0)
+        if not ctx.ok("出现长任务进度窗", dlg is not None):
             return
-        ctx.ok("状态栏显示进度百分比",
-               core.wait_until(lambda: "%" in _status(ctx), 10.0), _status(ctx))
-        core.press(u.GetDlgItem(ctx.main, IDC_CANCEL), 0.2)
+        ctx.ok("进度窗是模态的（主窗口被禁用）", not u.IsWindowEnabled(ctx.main))
+        ctx.ok("进度窗里有进度条",
+               any(core.cls_of(w) == "msctls_progress32" for w in core.kids(dlg)))
+        core.progress_cancel(ctx.proc.pid)
         ctx.ok("任务被取消", _wait_status(ctx, "已取消", 120.0), _status(ctx))
+        ctx.ok("取消后进度窗自动关闭",
+               core.wait_until(lambda: core.progress_dlg(ctx.proc.pid) is None, 20.0))
+        ctx.ok("主窗口恢复可用", core.wait_until(lambda: u.IsWindowEnabled(ctx.main), 10.0))
         ctx.check("取消后角色等级未变（整体回滚）",
                   ctx.q1("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%s", (cno,)), lev0)
         ctx.ok("进程仍然活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
@@ -1537,11 +1544,21 @@ def scan_then_backup(ctx):
         _close_box(ctx.main, b, 1)
         blocked, st = _wait_blocked(ctx, "taiwan_cain_2nd.inventory")
         ctx.ok("扫描被表锁挡住", blocked, st)
+        # 扫描现在会弹模态进度窗：先「后台运行」，否则后面什么都点不了
+        dlg = core.progress_wait(ctx.proc.pid)
+        if not ctx.ok("扫描出现进度窗", dlg is not None):
+            return
+        ctx.ok("进度窗挡住主窗口", not u.IsWindowEnabled(ctx.main))
+        ctx.ok("点「后台运行」关掉进度窗", core.progress_bg(ctx.proc.pid))
+        ctx.ok("主窗口恢复可用", core.wait_until(lambda: u.IsWindowEnabled(ctx.main), 8.0))
         core.press(ctx.ctl(1823), 0.4)               # 整库备份（应当排队）
         b, t = _wait_box(ctx.main, 8.0)
         ctx.ok("备份确认框出现", b is not None, (t or "")[:60])
         if b:
             _close_box(ctx.main, b, 1)
+        # 备份排在扫描后面，它的进度窗会显示「排队中」——同样转后台，避免测试被挡住
+        ctx.ok("备份出现进度窗（排队中）", core.progress_wait(ctx.proc.pid) is not None)
+        core.progress_bg(ctx.proc.pid)
         st = _status(ctx)
         ctx.ok("备份没有插队（状态栏仍是扫描）", "扫描" in st and "备份" not in st, st)
     finally:
@@ -1714,11 +1731,17 @@ def single_query_invariant(ctx):
         blocked, st = _wait_blocked(ctx, "taiwan_cain_2nd.inventory")
         if not ctx.ok("扫描卡在库上", blocked, st):
             return
+        # 扫描的进度窗先转后台，否则下面点不了任何控件
+        core.progress_wait(ctx.proc.pid)
+        core.progress_bg(ctx.proc.pid)
+        core.wait_until(lambda: u.IsWindowEnabled(ctx.main), 8.0)
         # 再点一个会写库的动作：它必须排队，而不是在同一条连接上另起一条查询
         core.press(ctx.ctl(1823), 0.4)
         b, t = _wait_box(ctx.main, 8.0)
         if b:
             _close_box(ctx.main, b, 1)
+        core.progress_wait(ctx.proc.pid)        # 排队中的备份也会弹窗
+        core.progress_bg(ctx.proc.pid)
         peak = 0
         seen = []
         for _ in range(40):                     # 4 秒

@@ -35,7 +35,6 @@ static int w_act(void *ctx, Err err) {
 
 static int act_start(const char *what, ActFn fn, void *ctx, int ctxsz) {
     snprintf(g.act_what, sizeof(g.act_what), "%s", what);
-    db_cancel_clear();                  // 新任务从「未被取消」开始
     app_job_pct_reset();
     g_act_ctx.fn = fn;
     if (ctx && ctxsz > 0 && ctxsz <= PEND_BUF) {
@@ -49,6 +48,9 @@ static int act_start(const char *what, ActFn fn, void *ctx, int ctxsz) {
 }
 
 int app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz) {
+    // 取消标志在「用户提交新任务」这一刻清，而不是等动作真正开始时清：
+    // 排在队列里的任务若被按了取消，轮到它跑时应当在第一个边界就停。
+    db_cancel_clear();
     // 加载 PVF 期间物品类型/附件种类都算不出来，这时提交写库会写错字段
     if (job_running(&g.job_pvf)) {
         app_status("PVF 正在加载，稍后再操作");
@@ -84,6 +86,8 @@ int app_act_idle(void) {
 
 // 会话边界：丢掉还没开始的排队动作
 void app_act_clear_queue(void) { g_pq_n = g_pq_head = 0; }
+
+int app_queue_pending(void) { return g_pq_n > 0; }
 
 // 取队首（app_tick 在连接空出来后调用），同时出队
 int app_act_take_queued(char *what, int what_cap, ActFn *fn, void **ctx, int *ctxsz) {
