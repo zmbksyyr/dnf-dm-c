@@ -710,7 +710,7 @@ static void chars_apply(void) {
 }
 
 
-void app_connect(void) {
+static void connect_begin(void) {
     if (job_running(&g.job_conn)) return;
     // 新会话不能继承旧会话的意图。连接失败那条路上 db_ok 会直接变 0，
     // 没有经过 app_disconnect，队列里可能还压着「上一个库」的动作；
@@ -727,6 +727,12 @@ void app_connect(void) {
     g.char_total = 0;
     app_status("正在连接数据库…");
     job_start(&g.job_conn, w_connect, NULL);
+}
+
+// 用户手动连接：先取消待进行的自动重连
+void app_connect(void) {
+    app_reconnect_cancel();
+    connect_begin();
 }
 
 // 「排队动作」和「待载入」两组状态：队列本体（g_pq）和载入上下文定义在下面的
@@ -759,6 +765,7 @@ static int stop_db_jobs(void) {
 void app_disconnect(void) {
     // 作业没停就关连接，等于一边 free 收发包缓冲一边 recv。
     // 等不到就拒绝这次断开，连接与队列都保留，用户可再点一次。
+    app_reconnect_cancel();             // 手动断开：别再自动连回来
     int stopped = stop_db_jobs();
     if (!stopped) {
         app_status("后台任务还在跑，稍后再断开（连接没有关）");
@@ -1814,6 +1821,14 @@ static int conn_lost(const char *e) {
                  strstr(e, "WSA 10054"));
 }
 
+// 断线后自动重连：手滑拔网线、服务端重启都不该让人重新点一遍。
+// 最多 3 次、间隔 3 秒；手动连接/断开时取消。
+#define RECONNECT_MAX 3
+static int s_recon_left;
+static u64 s_recon_at;
+
+void app_reconnect_cancel(void) { s_recon_left = 0; }
+
 void app_tick(void) {
     Err err;
     static u64 last_poll = 0;
@@ -1830,7 +1845,9 @@ void app_tick(void) {
             g.db_ok = 0;
             app_status("连接失败：%s", err);
             app_err("连接失败：%s", err);
+            if (s_recon_left > 0) s_recon_at = now_ms() + 3000;   // 自动重连还有次数就再来
         } else {
+            s_recon_left = 0;               // 连上了，不再重试
             chars_apply();                  // 连接作业填好的角色列表在这里换上
             g.db_ok = 1;
             app_status("数据库已连接 · 共 %u 个角色", g.char_total);
@@ -1895,13 +1912,15 @@ void app_tick(void) {
         if (err[0]) {
             g.act_ver++;                      // 让页面按库里的值重填（失败时控件别停在假值上）
             if (conn_lost(err)) {
-                // 连接没了：标记断开，后续操作直接提示「请先连接」，不再逐条报错
+                // 连接没了：标记断开，稍微等一下自动重连
                 g.db_ok = 0;
                 g.char_ok = 0;
                 g.write_mask = 0;
                 g.pend_mask = 0;
-                app_log("数据库连接已断开：%s", err);
-                app_status("数据库连接已断开，请点「连接」重连");
+                app_err("数据库连接已断开：%s", err);
+                app_status("数据库连接已断开，正在自动重连…");
+                s_recon_left = RECONNECT_MAX;
+                s_recon_at = now_ms() + 2000;
                 app_ui_refresh_buttons();
             } else {
                 app_status("%s 失败：%s", g.act_what, err);
@@ -1941,6 +1960,14 @@ void app_tick(void) {
     // 写失败的回滚请求：重读当前角色，把乐观更新改过的内存恢复成库里的值
     if (InterlockedExchange(&s_reload_later, 0)) {
         app_reload();
+    }
+
+    // 断线自动重连：还有次数、连接确实断着、也没有连接作业在跑，就再试一次
+    if (s_recon_left > 0 && !g.db_ok && !job_running(&g.job_conn) && now_ms() >= s_recon_at) {
+        s_recon_left--;
+        app_status("正在自动重连（剩 %d 次）…", s_recon_left);
+        app_log("自动重连：还剩 %d 次", s_recon_left);
+        connect_begin();
     }
 
     app_bubble_tick();       // 泡点结算（含「刚到时长」的收尾）

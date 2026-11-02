@@ -1421,10 +1421,8 @@ def conn_killed(ctx):
 
     ctx.ok("界面提示连接已断开", _wait_status(ctx, "连接已断开", 20.0), _status(ctx))
     ctx.ok("进程仍然活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
-    ctx.ok("「连接」按钮恢复可用",
-           core.wait_until(lambda: _enabled(u.GetDlgItem(ctx.main, IDC_CONN)), 10.0))
-    core.press(u.GetDlgItem(ctx.main, IDC_CONN), 3.0)
-    ctx.ok("重连成功", _wait_status(ctx, "数据库已连接", 30.0), _status(ctx))
+    # 不点「连接」：断线后的自动重连应当自己把连接接回来
+    ctx.ok("未点「连接」也自动重连成功", _wait_status(ctx, "数据库已连接", 25.0), _status(ctx))
 
 # ---------------------------------------------------------------- 整库往返
 SCHEMAS = ["taiwan_cain", "taiwan_cain_2nd", "d_taiwan", "taiwan_login",

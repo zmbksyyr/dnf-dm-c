@@ -161,6 +161,8 @@ void app_clear_config_and_exit(void);             // 标记清除配置并退出
 
 // 连接 / 角色 / 数据
 void app_connect(void);
+// 取消待进行的自动重连（用户手动连接/断开时调）
+void app_reconnect_cancel(void);
 void app_disconnect(void);
 void app_list_chars(const char *kw);
 void app_select_char(int idx);
