@@ -17,6 +17,18 @@ void pvf_decrypt(u8 *p, size_t n, u32 crc) {
     }
 }
 
+// 解密是「异或密钥 + 右旋 6 位」，逆变换是「左旋 6 位 + 异或密钥」。
+// 目前只有读取需要解密；写在这里是为了自检能验证互逆。
+void pvf_encrypt(u8 *p, size_t n, u32 crc) {
+    const u32 k = crc ^ XOR_KEY;
+    size_t words = n / 4;
+    for (size_t i = 0; i < words; i++) {
+        u32 v = rd32(p + i * 4);
+        v = (v << 6) | (v >> 26);
+        wr32(p + i * 4, v ^ k);
+    }
+}
+
 // ---------------- 字符串表 ----------------
 const char *stab_get(const StrTab *t, int i) {
     if (!t || i < 0 || i >= t->n || !t->blob) return "";
@@ -339,11 +351,25 @@ typedef struct {
 static NstrMap g_nstr[NSTR_CACHE];
 static int g_nstr_pos;
 
+// 缓存以编号为键；换一份 PVF 后编号的含义就变了，关闭时必须整体丢弃。
+static void nstr_reset(void) {
+    for (int i = 0; i < NSTR_CACHE; i++) {
+        free(g_nstr[i].blob);
+        free(g_nstr[i].pair);
+        g_nstr[i].blob = NULL;
+        g_nstr[i].pair = NULL;
+        g_nstr[i].n = 0;
+        g_nstr[i].used = 0;
+        g_nstr[i].id = 0;
+    }
+    g_nstr_pos = 0;
+}
+
 static int cmp_nstrpair(const void *a, const void *b) {
     return strcmp(((const NstrPair *)a)->k, ((const NstrPair *)b)->k);
 }
 
-static void nstr_build(Pvf *p, NstrMap *m, u32 id) {
+static void nstr_build(const Pvf *p, NstrMap *m, u32 id) {
     m->used = 1;
     m->id = id;
     free(m->blob);
@@ -388,7 +414,7 @@ static void nstr_build(Pvf *p, NstrMap *m, u32 id) {
     if (m->n > 1) qsort(m->pair, (size_t)m->n, sizeof(NstrPair), cmp_nstrpair);
 }
 
-static const char *nstr_value(Pvf *p, u32 id, const char *key, Str *out) {
+static const char *nstr_value(const Pvf *p, u32 id, const char *key, Str *out) {
     str_clear(out);
     NstrMap *m = NULL;
     for (int i = 0; i < NSTR_CACHE; i++)
@@ -742,7 +768,7 @@ static void build_dicts(Pvf *p, PvfProg prog) {
     {
         const Leaf *lf = pvf_find(p, "etc/avatar_roulette/avatarfixedhiddenoptionlist.etc");
         Buf c = {0};
-        if (lf && pvf_read(p, lf, &c)) {
+        if (lf && pvf_read(p, lf, &c) && c.n >= 7) {
             StabBuild sb;
             sb_init(&sb, &p->avatar_hidden);
             size_t n = (c.n - 2) / 5;
@@ -956,6 +982,8 @@ static int load_cache(Pvf *p) {
 }
 
 // ---------------- 对外 ----------------
+static void quest_cache_reset(void);
+
 static void reset_keep_id(Pvf *p) {
     char path[MAX_PATH], fp[33];
     snprintf(path, sizeof(path), "%s", p->path);
@@ -965,27 +993,38 @@ static void reset_keep_id(Pvf *p) {
     snprintf(p->fp, sizeof(p->fp), "%s", fp);
 }
 
-int pvf_open(Pvf *p, const char *path, PvfProg prog) {
-    Err err = {0};
+int pvf_open(Pvf *p, const char *path, PvfProg prog, Err err) {
     pvf_close(p);
     snprintf(p->path, sizeof(p->path), "%s", path);
     if (prog.pct) *prog.pct = 2;
     if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "比对文件指纹");
 
-    if (!file_exists(path)) return 0;
+    if (!file_exists(path)) { snprintf(err, ERRBUF, "PVF 文件不存在：%s", path); return 0; }
     // 指纹只取长度 + 头尾各 64KB：全量 md5 要半秒多，而判断「包换没换」用不着那么严
-    if (!hash_file_fp(path, p->fp)) return 0;
+    if (!hash_file_fp(path, p->fp)) { snprintf(err, ERRBUF, "读取 PVF 指纹失败"); return 0; }
 
     if (load_cache(p)) {
-        p->opened = 1;
-        if (prog.pct) *prog.pct = 100;
-        if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "缓存已就绪");
-        return 1;
+        // 旧缓存也可能是「截断的 PVF」算出来的：一条物品名都没有就别信
+        if (p->items.n > 0) {
+            p->opened = 1;
+            if (prog.pct) *prog.pct = 100;
+            if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "缓存已就绪");
+            return 1;
+        }
+        pvf_close(p);
+        snprintf(p->path, sizeof(p->path), "%s", path);
     }
     reset_keep_id(p);
 
     if (!parse_tree(p, err, prog)) return 0;
     build_dicts(p, prog);
+    // 文件树能解析、物品名却是空的：多半是文件被截断（物品表在树的后面）。
+    // 这种包继续用只会把物品写成编号，宁可拒绝，也不让人拿假数据去改库。
+    if (p->nleaf > 0 && p->items.n == 0) {
+        snprintf(err, ERRBUF, "PVF 里读不到任何物品名（文件可能被截断），已拒绝加载");
+        pvf_close(p);
+        return 0;
+    }
     if (prog.pct) *prog.pct = 96;
     if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "写入缓存");
     save_cache(p);
@@ -996,6 +1035,7 @@ int pvf_open(Pvf *p, const char *path, PvfProg prog) {
 
 void pvf_close(Pvf *p) {
     if (!p) return;
+    p->opened = 0;          // 先落旗，读者看到 false 就不会再去碰下面的索引
     if (p->base) { UnmapViewOfFile(p->base); p->base = NULL; }
     if (p->map) { CloseHandle(p->map); p->map = NULL; }
     if (p->file) { CloseHandle(p->file); p->file = NULL; }
@@ -1025,9 +1065,14 @@ void pvf_close(Pvf *p) {
     p->opened = 0;
     p->fp[0] = 0;
     p->path[0] = 0;
+    nstr_reset();
+    quest_cache_reset();
 }
 
-const char *pvf_item_name(const Pvf *p, u32 id) { return idtab_get(&p->items, id); }
+const char *pvf_item_name(const Pvf *p, u32 id) {
+    if (!p || !p->opened) return "";
+    return idtab_get(&p->items, id);
+}
 
 // 物品编号在物品表里的下标（-1 = 没有这件）
 static int key_index(const IdTab *t, u32 key) {
@@ -1075,9 +1120,13 @@ const char *pvf_kind_name(int kind) {
     }
 }
 
-const char *pvf_job_name(const Pvf *p, int job) { return idtab_get(&p->jobs, (u32)job); }
+const char *pvf_job_name(const Pvf *p, int job) {
+    if (!p || !p->opened) return "";
+    return idtab_get(&p->jobs, (u32)job);
+}
 
 const char *pvf_seal_name(const Pvf *p, int id) {
+    if (!p || !p->opened) return "";
     return (id >= 0 && id < p->seals.n) ? stab_get(&p->seals, id) : "";
 }
 
@@ -1086,10 +1135,10 @@ int pvf_is_equip(const Pvf *p, u32 id) {
     return k == PK_EQUIP || k == PK_AVATAR;
 }
 
-int pvf_item_count(const Pvf *p) { return p ? p->items.n : 0; }
+int pvf_item_count(const Pvf *p) { return (p && p->opened) ? p->items.n : 0; }
 
 u32 pvf_item_at(const Pvf *p, int i, const char **name) {
-    if (!p || i < 0 || i >= p->items.n) {
+    if (!p || !p->opened || i < 0 || i >= p->items.n) {
         if (name) *name = "";
         return 0;
     }
@@ -1138,10 +1187,10 @@ static void item_leafs(Pvf *p) {
     }
 }
 
-const char *pvf_item_path(const Pvf *p, u32 id, char *out, int cap) {
+const char *pvf_item_path(Pvf *p, u32 id, char *out, int cap) {
     out[0] = 0;
     if (!p || !p->opened) return out;
-    item_leafs((Pvf *)p);
+    item_leafs(p);
     int i = key_index(&p->items, id);
     if (i < 0 || p->ileaf[i] < 0) return out;
     snprintf(out, (size_t)cap, "%s", p->leafs[p->ileaf[i]].path);
@@ -1149,7 +1198,7 @@ const char *pvf_item_path(const Pvf *p, u32 id, char *out, int cap) {
 }
 
 // [icon] 段：一个字符串（img 路径）+ 一个数（帧号）。别的段不管。
-int pvf_item_icon(const Pvf *p, u32 id, char *img, int cap, int *frame) {
+int pvf_item_icon(Pvf *p, u32 id, char *img, int cap, int *frame) {
     img[0] = 0;
     if (frame) *frame = 0;
     if (!p || !p->opened) return 0;
@@ -1190,7 +1239,7 @@ int pvf_item_icon(const Pvf *p, u32 id, char *img, int cap, int *frame) {
 
 // 取一个段的「值」，拼成文本：数字带空格连排，字符串原样（引用串会顺着 n_string 解）。
 // [type] 这类「段名当枚举值」的写法（[seeking] 等）跳过。
-static void stk_seg_text(Pvf *p, const Buf *c, const char *want, Str *out) {
+static void stk_seg_text(const Pvf *p, const Buf *c, const char *want, Str *out) {
     str_clear(out);
     if (c->n < 7) return;
     size_t n = (c->n - 2) / 5;
@@ -1231,7 +1280,7 @@ static void stk_seg_text(Pvf *p, const Buf *c, const char *want, Str *out) {
     while (out->n && out->p[out->n - 1] == ' ') out->p[--out->n] = 0;
 }
 
-int pvf_item_detail(const Pvf *p, u32 id, Str *out) {
+int pvf_item_detail(Pvf *p, u32 id, Str *out) {
     str_clear(out);
     if (!p || !p->opened) return 0;
     const char *name = pvf_item_name(p, id);
@@ -1248,27 +1297,27 @@ int pvf_item_detail(const Pvf *p, u32 id, Str *out) {
 
     str_catf(out, "%s  ·  %s  ·  编号 %u\n", name, pvf_kind_name(kind), id);
     Str v = {0};
-    stk_seg_text((Pvf *)p, &c, "[minimum level]", &v);
+    stk_seg_text(p, &c, "[minimum level]", &v);
     if (v.n) str_catf(out, "等级 %s 以上", str_c(&v));
     int show_rarity = kind == PK_EQUIP || kind == PK_AVATAR;
     if (show_rarity) {
-        stk_seg_text((Pvf *)p, &c, "[rarity]", &v);
+        stk_seg_text(p, &c, "[rarity]", &v);
         if (v.n) {
             static const char *rar[] = {"普通", "高级", "稀有", "神器", "传说"};
             int r = atoi(str_c(&v));
             str_catf(out, " · %s", r >= 0 && r < 5 ? rar[r] : str_c(&v));
         }
     }
-    stk_seg_text((Pvf *)p, &c, "[price]", &v);
+    stk_seg_text(p, &c, "[price]", &v);
     if (v.n) str_catf(out, "%s价格 %s", out->n ? " · " : "", str_c(&v));
-    stk_seg_text((Pvf *)p, &c, "[weight]", &v);
+    stk_seg_text(p, &c, "[weight]", &v);
     if (v.n) str_catf(out, " · 重量 %s", str_c(&v));
     if (out->n) str_catc(out, '\n');
     if (kind == PK_EQUIP) {
-        stk_seg_text((Pvf *)p, &c, "[durability]", &v);
+        stk_seg_text(p, &c, "[durability]", &v);
         if (v.n) str_catf(out, "耐久 %s", str_c(&v));
     }
-    stk_seg_text((Pvf *)p, &c, "[explain]", &v);
+    stk_seg_text(p, &c, "[explain]", &v);
     if (v.n) str_catf(out, "%s说明：%s", out->n ? " · " : "", str_c(&v));
     // 末尾不再附 PVF 内部路径：那是给解析用的，对看卡片的人没用，还占一行
     str_free(&v);
@@ -1288,6 +1337,14 @@ static QPair    *g_qp;
 static int       g_qn;
 static const Pvf *g_qpvf;
 
+// Pvf 只有一个全局实例，指针相同不代表内容没换，所以关闭时显式作废。
+static void quest_cache_reset(void) {
+    free(g_qp);
+    g_qp = NULL;
+    g_qn = 0;
+    g_qpvf = NULL;
+}
+
 static void quest_index(Pvf *p) {
     if (g_qpvf == p && g_qn) return;
     free(g_qp);
@@ -1299,9 +1356,11 @@ static void quest_index(Pvf *p) {
     if (!lf) return;
     Buf b = {0};
     if (!pvf_read(p, lf, &b)) return;
+    if (b.n < 7) { buf_free(&b); return; }        // 空表：cnt 会下溢成天文数字
 
     size_t cnt = (b.n - 2) / 5;
     g_qp = calloc(cnt + 1, sizeof(QPair));
+    if (!g_qp) { buf_free(&b); return; }
     u32 pend = 0;
     int has = 0;
     for (size_t i = 0; i < cnt; i++) {

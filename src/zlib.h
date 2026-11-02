@@ -3,6 +3,7 @@
 #pragma once
 #include "util.h"
 
-int  zlib_unpack(const void *src, size_t n, Buf *out);   // 1 成功
+// max_out：解压输出上限（0 = 不设限）。超出即失败，防止压缩炸弹吃满内存。
+int  zlib_unpack(const void *src, size_t n, Buf *out, size_t max_out);
 int  zlib_pack(const void *src, size_t n, Buf *out);     // zlib 封装 + stored 块
 u32  adler32_calc(const void *d, size_t n);

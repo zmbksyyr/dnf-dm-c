@@ -27,11 +27,8 @@ typedef struct {
     char s[64];
     int  sub;          // 通用：avatar 标记等
     u64  u64v;         // 通用：大 id
-    // 任务页的动作参数必须跟上下文一起走。以前放在文件级 static qj / qsend 里、
-    // 由作业线程直接读：连接被占时 app_act 会把动作排进 g_pq（最多 4 个），
-    // 排队期间用户再点另一行任务，这两个全局就被后一次赋值覆盖 —— 两次都按
-    // 后者执行，A 没被放弃、B 被当成要清材料的那一条。app_act 按值拷贝整个
-    // DCtx，放进来就天然是「每次点击一份」。
+    // 动作参数随上下文走：app_act 按值整份拷贝，每次点击各一份。
+    // 放进文件级 static 会被后续点击覆盖，排队的两条动作都按后者执行。
     QJob q;
     GrantItem send[4];        // 补发材料的清单
     int  send_n;
@@ -80,6 +77,7 @@ static Vec  g_tabscan;          // Vec<TabOrphan>
 static Vec  g_tabdel;           // 本轮要删的行
 static int  g_tab_pending;      // 扫描完成等下一次刷新弹窗
 static int  g_tab_rescan;       // 删除完成后自动重扫
+static int  g_tab_failed;       // 上一轮扫描失败：不能把结果当成「0 条」
 
 static int tab_has(u32 id, void *ctx) {
     (void)ctx;
@@ -88,8 +86,11 @@ static int tab_has(u32 id, void *ctx) {
 
 static int tab_work(void *ctx, Err err) {
     DCtx *c = (DCtx *)ctx;
-    if (c->kind == D_TABSCAN)
-        return db_scan_tab_orphan(&g.db, &g_tabscan, g.pvf_ok ? tab_has : NULL, NULL, err);
+    if (c->kind == D_TABSCAN) {
+        int ok = db_scan_tab_orphan(&g.db, &g_tabscan, g.pvf_ok ? tab_has : NULL, NULL, err);
+        g_tab_failed = !ok;          // 失败要留痕：空结果不能当成「没有错误记录」
+        return ok;
+    }
     if (c->kind == D_TABDEL) {
         for (int i = 0; i < g_tabdel.n; i++) {
             TabOrphan *o = VEC_AT(&g_tabdel, TabOrphan, i);
@@ -105,14 +106,18 @@ static void tab_scan_start(void) {
     if (job_running(&g.job_act)) { app_info("上一个操作还在进行，等它完成"); return; }
     if (!g_tabscan.cap) vec_init(&g_tabscan, sizeof(TabOrphan));
     g_tabscan.n = 0;
+    g_tab_failed = 0;
     g_tab_pending = 1;
     dc.kind = D_TABSCAN;
     app_status("正在扫描宠物/时装表…");
     app_act("扫表内错误", tab_work, &dc);
 }
 
-static HWND t_list, t_info;
-static u32  t_ver;          // 与 g.act_ver 同类型：混用 int 时 -Wextra 报符号比较
+// 每个对话框一份：两个表内错误窗嵌套时不会互相踩句柄
+typedef struct {
+    HWND list, info;
+    u32  ver;               // 与 g.act_ver 同类型：混用 int 时 -Wextra 报符号比较
+} TabCtx;
 
 // 断开时由 app_drop_queued() 调。tab_scan_start 是「先置 g_tab_pending 再提交」，
 // 而 app_act 在连接忙时只是把动作排进队列 —— 队列随后被泄洪，tab_work 永远不会跑，
@@ -122,8 +127,8 @@ static void tab_drop(void) {
     g_tab_rescan = 0;
 }
 
-static void tab_fill(void) {
-    ui_rows_clear(t_list);
+static void tab_fill(TabCtx *t) {
+    ui_rows_clear(t->list);
     for (int i = 0; i < g_tabscan.n; i++) {
         TabOrphan *o = VEC_AT(&g_tabscan, TabOrphan, i);
         char cn[16], ii[24], it[16], nm[96];
@@ -133,13 +138,13 @@ static void tab_fill(void) {
         const char *cells[6] = {o->avatar ? "时装" : "宠物", cn,
                                 o->cname[0] ? o->cname : "?", it,
                                 app_item_name(o->it_id, nm, sizeof(nm)), o->why};
-        ui_row_add(t_list, cells, 6, (LPARAM)i);
+        ui_row_add(t->list, cells, 6, (LPARAM)i);
     }
-    ui_text(t_info, fmt_new("发现 %d 条错误记录%s", g_tabscan.n,
-                            g.pvf_ok ? "" : "（PVF 未加载，只查角色归属）"));
+    ui_text(t->info, fmt_new("发现 %d 条错误记录%s", g_tabscan.n,
+                             g.pvf_ok ? "" : "（PVF 未加载，只查角色归属）"));
 }
 
-static void tab_del_run(int all) {
+static void tab_del_run(TabCtx *t, int all) {
     if (!g_tabscan.n) { app_info("没有可删的记录。"); return; }
     if (job_running(&g.job_act)) { app_info("上一个操作还在进行，等它完成"); return; }
     if (!g_tabdel.cap) vec_init(&g_tabdel, sizeof(TabOrphan));
@@ -148,7 +153,7 @@ static void tab_del_run(int all) {
         for (int i = 0; i < g_tabscan.n; i++)
             *(TabOrphan *)VEC_ADD(&g_tabdel, TabOrphan) = *(TabOrphan *)VEC_AT(&g_tabscan, TabOrphan, i);
     } else {
-        int row = ui_row_sel(t_list);
+        int row = ui_row_sel(t->list);
         if (row < 0 || row >= g_tabscan.n) { app_info("先在列表里选中一行。"); return; }
         *(TabOrphan *)VEC_ADD(&g_tabdel, TabOrphan) =
             *(TabOrphan *)VEC_AT(&g_tabscan, TabOrphan, row);
@@ -157,26 +162,35 @@ static void tab_del_run(int all) {
         return;
     g_tab_rescan = 1;
     dc.kind = D_TABDEL;
-    app_act("删除错误记录", tab_work, &dc);
+    if (!app_act("删除错误记录", tab_work, &dc)) g_tab_rescan = 0;
 }
 
 static LRESULT tab_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
     (void)lp;
-    (void)ctx;
+    TabCtx *t = (TabCtx *)ctx;
     if (m == WM_TIMER) {
-        if (g.act_ver == t_ver) return 0;
-        t_ver = g.act_ver;
+        if (g.act_ver == t->ver) return 0;
+        t->ver = g.act_ver;
         if (g_tab_rescan) { g_tab_rescan = 0; tab_scan_start(); }   // 删完自动重扫
-        else tab_fill();
+        else if (g_tab_failed) {                                    // 失败不能显示成「0 条」
+            ui_rows_clear(t->list);
+            ui_text(t->info, "扫描失败，未得到结果（详见状态栏或日志）");
+        } else tab_fill(t);
         return 0;
     }
-    if (m == WM_DESTROY) { KillTimer(d, 1); t_list = t_info = NULL; return 0; }
+    if (m == WM_DESTROY) {          // 窗口没了，没跑完的意图也一起作废
+        KillTimer(d, 1);
+        g_tab_pending = 0;
+        g_tab_rescan = 0;
+        t->list = t->info = NULL;
+        return 0;
+    }
     if (m == WM_COMMAND) {
         switch (LOWORD(wp)) {
-        case 6301: tab_del_run(0); return 0;            // 删除所选
-        case 6302: tab_del_run(1); return 0;            // 全部删除
+        case 6301: tab_del_run(t, 0); return 0;         // 删除所选
+        case 6302: tab_del_run(t, 1); return 0;         // 全部删除
         case 6303:                                      // 重新扫描
-            t_ver = g.act_ver;
+            t->ver = g.act_ver;
             tab_scan_start();
             return 0;
         }
@@ -186,35 +200,41 @@ static LRESULT tab_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
 
 static void tab_show(void) {
     g_tab_pending = 0;
-    HWND d = ui_dlg_new(g_main, "宠物/时装表内错误记录", 640, 420, tab_proc, NULL);
+    TabCtx t;
+    memset(&t, 0, sizeof(t));
+    HWND d = ui_dlg_new(g_main, "宠物/时装表内错误记录", 640, 420, tab_proc, &t);
     if (!d) return;
+    // 客户区按实际大小排：写死 640×420 在 125%/150% 缩放时会把按钮压到列表上
+    RECT rc;
+    GetClientRect(d, &rc);
+    int cw = rc.right, chh = rc.bottom;
     int pad = ui_scale(10), rowh = ui_scale(24), g2 = ui_scale(6);
-    t_info = ui_label(d, "", 0);
-    ui_place(t_info, pad, pad, 640 - pad * 2, rowh);
+    t.info = ui_label(d, "", 0);
+    ui_place(t.info, pad, pad, cw - pad * 2, rowh);
 
-    t_list = ui_list(d, 6300);
-    ui_cols(t_list, (const char *const[]){"表", "角色编号", "角色", "实例ID", "物品", "原因"},
+    t.list = ui_list(d, 6300);
+    ui_cols(t.list, (const char *const[]){"表", "角色编号", "角色", "实例ID", "物品", "原因"},
             (const int[]){56, 80, 120, 110, 170, 60}, 6);
-    ui_idtip_bind(t_list, 4);          // 「物品」列放的是 it_id
+    ui_idtip_bind(t.list, 4);          // 「物品」列放的是 it_id
     // 列表让一行给下面的说明：悬停气泡会跟编号悬浮卡撞，写成常驻一句更省事
     int lt = pad + rowh + g2;
-    int lh = ui_scale(280) - rowh - g2;
-    ui_place(t_list, pad, lt, 640 - pad * 2, lh);
+    int lh = chh - pad * 2 - rowh * 3 - g2 * 4;
+    if (lh < ui_scale(120)) lh = ui_scale(120);
+    ui_place(t.list, pad, lt, cw - pad * 2, lh);
     ui_place(ui_label(d, "只列 it_id 非法或为 0 的记录；it_id=0 的空行算正常，不动", 0),
-            pad, lt + lh + g2, 640 - pad * 2, rowh);
+            pad, lt + lh + g2, cw - pad * 2, rowh);
 
-    int y = pad + rowh + g2 + ui_scale(280) + g2;
     URow r;
-    ui_row(&r, d, pad, y, rowh);
+    ui_row(&r, d, pad, lt + lh + g2 + rowh + g2, rowh);
     ui_add(&r, ui_btn_at(d, 6301, "删除所选"), ui_scale(84));
     ui_add(&r, ui_btn_at(d, 6302, "全部删除"), ui_scale(84));
     ui_add(&r, ui_btn_at(d, 6303, "重新扫描"), ui_scale(84));
 
-    ui_place(ui_button(d, "关闭", IDCANCEL), 640 - pad - ui_scale(90),
-             420 - pad - rowh, ui_scale(90), rowh);
+    ui_place(ui_button(d, "关闭", IDCANCEL), cw - pad - ui_scale(90),
+             chh - pad - rowh, ui_scale(90), rowh);
 
-    t_ver = g.act_ver;
-    tab_fill();
+    t.ver = g.act_ver;
+    tab_fill(&t);
     SetTimer(d, 1, 300, NULL);
     ui_dlg_run(d, g_main);
 }
@@ -477,9 +497,9 @@ static LRESULT ava_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             app_act("时装续期", ava_work, &dc);
             return 0;
         case A_DEL:
+            dc.ui_id = r->ui_id;          // 弹框前取走，之后不再读 r
             if (!app_confirm("删除这件时装？")) return 0;
             dc.kind = D_AVADEL;
-            dc.ui_id = r->ui_id;
             g.avatars.n = 0;
             app_act("删除时装", ava_work, &dc);
             return 0;
@@ -663,8 +683,11 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (id == Q_DROP || id == Q_DONE || id == Q_SEND || id == Q_PURGE) {
-        QuestRow *r = quest_sel();
-        if (!r) { app_info("请先选中一行任务。"); return 0; }
+        QuestRow *sel = quest_sel();
+        if (!sel) { app_info("请先选中一行任务。"); return 0; }
+        // 确认框的模态循环里列表可能被后台查询换掉：先拷一份再弹
+        QuestRow snap = *sel;
+        QuestRow *r = &snap;
 
         if (id == Q_DROP) {
             if (!app_confirm(fmt_new("放弃任务「%s」(%u)？", r->name[0] ? r->name : "?", r->id)))
@@ -814,15 +837,16 @@ static void log_load(void) {
     // 重写整段文本会把视口拽回第一行 —— 这版第一行恰恰是最新的，正是想看的，所以
     // 不用再做「跟到底」。只有正在往下翻历史的人要还原位置，别给他掀回开头。
     if (first > 0) SendMessageW(l_text, EM_LINESCROLL, 0, (LPARAM)first);
+    int nlines = ln.n;                 // vec_free 会把 n 清零，先记下来
     str_free(&s);
     vec_free(&ln);
     buf_free(&b);
     // 截断对用户是静默的：不说明他会以为自己看全了当天所有操作记录。
     const char *nm = strrchr(path, '\\');
     char info[256];
-    if (ln.n > LOG_MAX_LINES)
+    if (nlines > LOG_MAX_LINES)
         snprintf(info, sizeof(info), "%s · 共 %d 行（显示最近 %d 行）",
-                 nm ? nm + 1 : path, (int)ln.n, LOG_MAX_LINES);
+                 nm ? nm + 1 : path, nlines, LOG_MAX_LINES);
     else
         snprintf(info, sizeof(info), "%s · 共 %d 行", nm ? nm + 1 : path, (int)ln.n);
     ui_text(l_info, info);

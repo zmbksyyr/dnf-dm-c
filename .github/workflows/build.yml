@@ -55,16 +55,18 @@ jobs:
           $cc = @(
             'cc', '-target', 'x86_64-windows-gnu', '-std=c11', '-O2',
             '-DNDEBUG', '-DUNICODE', '-D_UNICODE',
-            # 警告即错误：全库当前零告警，任何新引入的告警都必须当场解决，
-            # 而不是攒着等人看见。开关与 tools/build.bat 一致。
-            '-Wall', '-Wextra', '-Wshadow', '-Wconversion', '-Werror',
+            # 告警即错误。开关与 tools/build.bat 一致。
+            '-Wall', '-Wextra', '-Wshadow', '-Wconversion', '-Wcast-qual', '-Wpedantic',
+            '-Wstrict-prototypes', '-Wmissing-prototypes', '-Wmissing-declarations',
+            '-Wundef', '-Wpointer-arith', '-Wwrite-strings', '-Wvla', '-Wdouble-promotion',
+            '-Wold-style-definition', '-Wredundant-decls', '-Werror',
             '-Isrc', '-static', '-s', '-Wl,--subsystem,windows'
           )
           $cc += (Get-ChildItem src/*.c | ForEach-Object { $_.FullName })
           $cc += @(
             'build/res.obj',
             '-lcomctl32', '-lcomdlg32', '-lshell32', '-luser32',
-            '-lgdi32', '-lole32', '-lws2_32', '-ladvapi32', '-lmsimg32',
+            '-lgdi32', '-lole32', '-lws2_32', '-ladvapi32', '-lmsimg32', '-ldbghelp',
             '-o', $env:EXE_NAME
           )
 
@@ -75,6 +77,14 @@ jobs:
           $h = (Get-FileHash $env:EXE_NAME -Algorithm SHA256).Hash
           "产物 $($f.Name)  $($f.Length) 字节  sha256=$h"
           "SIZE=$($f.Length)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ---- 自检（不依赖数据库与窗口）----
+      - name: 自检
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath ".\$env:EXE_NAME" -ArgumentList '--selftest' -Wait -PassThru
+          if (Test-Path .\config\selftest.txt) { Get-Content .\config\selftest.txt }
+          if ($p.ExitCode -ne 0) { throw "自检失败（exit=$($p.ExitCode)）" }
 
       # ---- 打包 ----
       - name: 打包

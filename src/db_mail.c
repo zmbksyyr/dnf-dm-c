@@ -133,7 +133,9 @@ int db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *te
 
 int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char *text,
                          const GrantItem *g, int avata_flag, int creature_flag, Err err) {
-    if (!db_send_text_mail(d, c, sender, text, err)) return 0;
+    // 正文、附件行、postal 必须同生共死：附件先落库而 postal 失败会留下占格的孤儿行
+    if (!db_tx_begin(d, err)) return 0;
+    if (!db_send_text_mail(d, c, sender, text, err)) goto fail;
     // postal.send_charac_name 同样是 utf8 列，字符集必须跟上面那封正文一致
     set_names(d, db_cs_name(d->charset));
     char *es = mysql_escape(sender ? sender : "GM");
@@ -162,7 +164,7 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
                  "(charac_no,it_id,expire_date,obtain_from,reg_date,stat) "
                  "VALUES (%u,%u,'9999-12-31 23:59:59',1,'%s',2)",
                  c->no, g->id, ts0);
-        if (!run(d, &s)) { snprintf(err, ERRBUF, "建时装行：%s", d->err); str_free(&s); free(es); return 0; }
+        if (!run(d, &s)) { snprintf(err, ERRBUF, "建时装行：%s", d->err); str_free(&s); free(es); goto fail; }
         str_clear(&s);
         str_cat(&s, "SELECT LAST_INSERT_ID()");
         if (select1(d, &s, &r)) add_info = my_u64(&r, 0, 0, 0);
@@ -176,7 +178,7 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
                  "(charac_no,it_id,expire_date,reg_date,stat,item_lock_key,creature_type,stomach) "
                  "VALUES (%u,%u,'9999-12-31 23:59:59','%s',0,0,0,100)",
                  c->no, g->id, ts0);
-        if (!run(d, &s)) { snprintf(err, ERRBUF, "建宠物行：%s", d->err); str_free(&s); free(es); return 0; }
+        if (!run(d, &s)) { snprintf(err, ERRBUF, "建宠物行：%s", d->err); str_free(&s); free(es); goto fail; }
         str_clear(&s);
         str_cat(&s, "SELECT LAST_INSERT_ID()");
         if (select1(d, &s, &r)) add_info = my_u64(&r, 0, 0, 0);
@@ -198,8 +200,15 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
     free(es);
     int ok = run(d, &s);
     str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+    if (!ok) {
+        snprintf(err, ERRBUF, "%s", d->err);
+        goto fail;
+    }
+    return db_tx_commit(d, err);
+
+fail:
+    db_tx_rollback(d);
+    return 0;
 }
 
 // 全服 / 在线批量发邮件：逐角色发一封（文本 + 可选附件）。在线模式只发给
@@ -244,6 +253,15 @@ int db_send_mail_bulk(Db *d, int online_only, const char *sender, const char *te
 // 全服软删所有邮件（delete_flag=1），用于「清服」类维护。
 int db_delete_all_mails_global(Db *d, Err err) {
     Str s = {0};
+    MyResult r = {0};
+    // 附件是真实行，软删邮件不会带走它们，先逐个清掉
+    str_cat(&s, "SELECT postal_id FROM taiwan_cain_2nd.postal WHERE delete_flag=0 "
+                "AND (avata_flag=1 OR creature_flag=1)");
+    if (select1(d, &s, &r)) {
+        for (int i = 0; i < r.nrow; i++) mail_drop_attach(d, my_u64(&r, i, 0, 0));
+        my_free(&r);
+    }
+    str_clear(&s);
     str_cat(&s, "UPDATE taiwan_cain_2nd.postal SET delete_flag=1");
     int ok = run(d, &s);
     str_free(&s);
@@ -275,18 +293,40 @@ int db_list_pets(Db *d, const Charac *c, Vec *out, Err err) {
 }
 
 int db_set_pet_name(Db *d, u32 ui_id, const char *name, Err err) {
-    // creature_items.name 是 utf8 列，且只有 varchar(12)：latin1 会话下 4 个汉字就
-    // 吃满 12 个字符、5 个汉字直接被截断，还顺带双重编码。用配置的字符集，
-    // 12 个字符就是 12 个字符，截断只按真实长度发生。
+    // name 是 varchar(12) 的 utf8(mb3) 列：4 字节字符进不去，超长会被静默截断。
+    // 与 db_set_name 一样先挡 4 字节，再靠回读确认落库内容。
+    if (name)
+        for (const unsigned char *p = (const unsigned char *)name; *p; p++)
+            if (*p >= 0xF0) {
+                snprintf(err, ERRBUF, "名字里不能有 emoji 等 4 字节字符");
+                return 0;
+            }
     set_names(d, db_cs_name(d->charset));
+    if (!db_tx_begin(d, err)) return 0;
     char *e = mysql_escape(name);
     Str s = {0};
     str_catf(&s, "UPDATE taiwan_cain_2nd.creature_items SET name='%s' WHERE ui_id=%u", e, ui_id);
     free(e);
     int ok = run(d, &s);
     str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+    if (!ok) {
+        snprintf(err, ERRBUF, "%s", d->err);
+        db_tx_rollback(d);
+        return 0;
+    }
+    char got[64] = "";
+    Str q = {0};
+    MyResult r = {0};
+    str_catf(&q, "SELECT name FROM taiwan_cain_2nd.creature_items WHERE ui_id=%u", ui_id);
+    if (select1(d, &q, &r) && r.nrow) cp_text(got, sizeof(got), &r, 0, 0);
+    my_free(&r);
+    str_free(&q);
+    if (strcmp(got, name) != 0) {
+        snprintf(err, ERRBUF, "名字没有按原样落库（库里是「%s」），可能超长，已回滚", got);
+        db_tx_rollback(d);
+        return 0;
+    }
+    return db_tx_commit(d, err);
 }
 
 int db_set_pet_full(Db *d, u32 ui_id, Err err) {

@@ -2,18 +2,49 @@
 #include "app.h"
 #include "act.h"       // act_apply_lists（列表暂存搬入）
 #include "ui.h"        // ui_data_apply_lists（宠物/时装/任务列表暂存搬入）
-#include <stdio.h>     // app_bubble_export 用 FILE/fopen
-#include <time.h>      // 泡点生效时长的绝对截止时刻
+#include <time.h>      // 配置里的绝对截止时刻
 
 App g;
 
-// 载入暂存区。断开连接、退出、载入完成这三处都要动它，所以实例放在全局区，
-// 别藏在「角色」小节里——那边看到它的人容易以为它只跟选角色有关。
-typedef struct {
-    Charac   c;
-    CharData d;        // 载入到这里，成功那一刻整块换给 g.data
-} LoadCtx;
-static LoadCtx g_load_ctx;
+// ---------------- 贴图包自测 ----------------
+// 给 --npk-test 用：把索引里前若干条目的前几帧真解一遍。图标解码是唯一直接吃
+// 外部二进制（zlib + IMG 帧表）的路径，模糊测试要的是这条路径，不是目录扫描。
+int app_npk_decode_all(const char *dir, int max_ents) {
+    Npk p;
+    memset(&p, 0, sizeof(p));
+    int pct = 0;
+    char stage[64];
+    if (!npk_build(&p, dir, &pct, stage, sizeof(stage))) return -1;
+    int decoded = 0;
+    for (int i = 0; i < p.nents && i < max_ents; i++) {
+        for (int fr = 0; fr < 3; fr++) {
+            int w = 0, h = 0;
+            HBITMAP b = npk_icon(&p, p.ents[i].key, fr, &w, &h);
+            if (b) { DeleteObject(b); decoded++; }
+        }
+    }
+    npk_free(&p);
+    npk_cache_clear();
+    return decoded;
+}
+
+// ---------------- 长任务进度 / 取消 ----------------
+static volatile LONG s_job_pct = -1;       // 0..100；-1 表示这个任务不报进度
+
+static void progress_cb(int pct) { InterlockedExchange(&s_job_pct, pct); }
+
+void app_job_pct_reset(void) { InterlockedExchange(&s_job_pct, -1); }
+
+void app_cancel_current(void) {
+    if (!job_running(&g.job_act)) {
+        app_status("当前没有可取消的任务");
+        return;
+    }
+    db_cancel_request();
+    app_status("正在取消…");
+    app_log("用户请求取消当前任务：%s", g.act_what);
+}
+
 
 // ---------------- 配置 ----------------
 static int ini_int(const WCHAR *sec, const WCHAR *key, int def, const WCHAR *path) {
@@ -41,21 +72,17 @@ static void cfg_load(Config *c, const char *path) {
     c->port = ini_int(L"db", L"port", 3306, w);
     ini_str(L"db", L"user", c->user, sizeof(c->user), w);
     if (!c->user[0]) snprintf(c->user, sizeof(c->user), "game");
-    // 口令明文读、明文存（settings.ini 里就是原文），这是**定好的取舍**，不是漏做：
-    // 本机连库用，掩码之后看不见、改不动、连不上时也核对不了；本地加密也挡不住
-    // 能碰到这台机器的人。界面上对应一个可编辑下拉（main.c 的 kPwdList 有预置项），
-    // tools/v_pwd.py 把「必须是明文、必须可手填」钉成用例。
+    // 口令明文读、明文存：本机连库用，掩码之后看不见、改不动、连不上时也核对不了。
+    // 界面上是可编辑下拉，预置项见 main.c 的 kPwdList。
     ini_str(L"db", L"pwd", c->pwd, sizeof(c->pwd), w);
     if (!c->pwd[0]) snprintf(c->pwd, sizeof(c->pwd), "uu5!^%%jg");
-    // 45 = utf8mb4。以前默认 33（utf8，也就是 utf8mb3），那种连接存不下 4 字节字符：
-    // 名字或邮件正文里带个 emoji / 扩展汉字，写进去就永久丢了，而且不打招呼。
-    // utf8mb4 是它的超集，读写 utf8(mb3) 的表完全没问题，所以默认值换成 45。
-    // 已经在用的 settings.ini 里仍是 33 的，在设置里存一次就会跟着更新。
+    // 45 = utf8mb4：33（utf8mb3）存不下 4 字节字符，emoji 会被静默替换。
+    // 已在用的 settings.ini 仍是 33 时，在设置里存一次就会更新。
     c->charset = ini_int(L"db", L"charset", 45, w);
 
     ini_str(L"pvf", L"path", c->pvf, sizeof(c->pvf), w);
     ini_str(L"pvf", L"img", c->img_dir, sizeof(c->img_dir), w);
-    // 等级上限默认 85：多数端在这个版本封顶 85，之前写死 100 会把等级写到超出范围
+    // 等级上限按端配置，服务端封顶多少这里就填多少
     c->lev_max = ini_int(L"gm", L"lev_max", 85, w);
     if (c->lev_max < 1 || c->lev_max > 255) c->lev_max = 85;
     c->font = ini_int(L"ui", L"font", 9, w);
@@ -78,17 +105,17 @@ static void cfg_load(Config *c, const char *path) {
     c->bubble_tno = (u32)ini_int(L"bubble", L"tno", 0, w);
     c->bubble_hours = ini_int(L"bubble", L"hours", 0, w);
     c->bubble_until = (u64)(u32)ini_int(L"bubble", L"until", 0, w);
-    if (c->bubble_hours != 1 && c->bubble_hours != 3 && c->bubble_hours != 5 &&
-        c->bubble_hours != 7)
-        c->bubble_hours = 0;
+    if (c->bubble_hours < 0 || c->bubble_hours > 8760) c->bubble_hours = 0;
     // 截止时刻已经过去 = 这次活动结束了，别把它当成「还要再跑」
     if (c->bubble_until && c->bubble_until <= (u64)time(NULL)) {
         c->bubble_until = 0;
         c->bubble_on = 0;
     }
-    // 旧版只有单一 val（=D币），迁移到 dcoin
-    if (c->bubble_coin==0 && c->bubble_dpoint==0 && c->bubble_dcoin==0)
-        c->bubble_dcoin = ini_int(L"bubble", L"val", 1, w);
+    // 旧版只有单一 val（=D币）。键不存在时保持原值，不能凭空造出一条奖励。
+    if (c->bubble_coin == 0 && c->bubble_dpoint == 0 && c->bubble_dcoin == 0) {
+        int val = ini_int(L"bubble", L"val", -1, w);
+        if (val >= 0) c->bubble_dcoin = val;
+    }
 
     if (c->font < 8 || c->font > 14) c->font = 9;
     if (c->poll_sec < 2) c->poll_sec = 3;
@@ -152,19 +179,50 @@ void app_log_flush(void) {
     LeaveCriticalSection(&s_log_cs);
 }
 
-void app_log(const char *fmt, ...) {
-    char msg[1024], line[1200], ts[32];
-    va_list ap;
-    va_start(ap, fmt);
+// 日志分三级：普通流水、警告、错误。级别只是行前缀，看日志时能一眼筛出来。
+// 另外每条连接分一个 4 位会话号：断开重连后日志还接着写同一个文件，
+// 没有这个标记就分不清「这次」和「上次」的行。
+static volatile LONG s_log_sid;
+
+void app_log_session(void) {
+    u32 v = (u32)(now_ms() & 0xFFFFu) | 1u;   // 0 留给「还没连过」
+    InterlockedExchange(&s_log_sid, (LONG)v);
+}
+
+static void log_v(const char *tag, const char *fmt, va_list ap) {
+    char msg[1024], line[1200], ts[32], sid[16] = "";
     fmtv(msg, sizeof(msg), fmt, ap);
-    va_end(ap);
     now_str(ts, sizeof(ts), "%H:%M:%S");
-    snprintf(line, sizeof(line), "[%s] %s\r\n", ts, msg);
+    LONG s = s_log_sid;
+    if (s) snprintf(sid, sizeof(sid), "[#%04X]", (unsigned)s & 0xFFFFu);
+    if (tag) snprintf(line, sizeof(line), "[%s]%s %s %s\r\n", ts, sid, tag, msg);
+    else snprintf(line, sizeof(line), "[%s]%s %s\r\n", ts, sid, msg);
     if (s_log_cs_ok) EnterCriticalSection(&s_log_cs);
     str_cat(&s_log, line);
     int full = s_log.n >= 8192;
     if (s_log_cs_ok) LeaveCriticalSection(&s_log_cs);
     if (full) app_log_flush();
+}
+
+void app_log(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    log_v(NULL, fmt, ap);
+    va_end(ap);
+}
+
+void app_warn(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    log_v("警告", fmt, ap);
+    va_end(ap);
+}
+
+void app_err(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    log_v("错误", fmt, ap);
+    va_end(ap);
 }
 
 // 状态栏那一行带上时刻：连着点几下、或者「正在写入…」卡住了，看一眼就知道
@@ -210,85 +268,7 @@ void app_info(const char *text) {
 }
 
 // ---------------- 任务 ----------------
-static DWORD WINAPI job_thread(LPVOID param) {
-    Job *j = (Job *)param;
-    Err err = {0};
-    int ok = j->fn(j->ctx, err);
-    if (ok) {
-        j->err[0] = 0;
-        InterlockedExchange(&j->state, 2);
-    } else {
-        snprintf(j->err, ERRBUF, "%s", err[0] ? err : "未知错误");
-        InterlockedExchange(&j->state, 3);
-    }
-    return 0;
-}
-
-int job_running(const Job *j) { return j->state == 1; }
-
-int job_start(Job *j, int (*fn)(void *ctx, Err err), void *ctx) {
-    if (j->state == 1) return 0;                 // 还在跑：不能重入
-    if (j->state == 2 || j->state == 3) {
-        // 上一轮跑完了但没人 poll。不先收掉的话，下面 CloseHandle 会连同那份
-        // 结果一起扔掉——错误信息就这么静默消失。按现有调用方不该走到这里，
-        // 真走到这里说明有人漏了 poll，至少别让结论也跟着丢
-        Err drop;
-        job_poll(j, drop);
-    }
-    if (j->th) { CloseHandle(j->th); j->th = NULL; }
-    j->fn = fn;
-    j->ctx = ctx;
-    j->progress = 0;
-    j->stage[0] = 0;
-    j->err[0] = 0;
-    InterlockedExchange(&j->state, 1);
-    j->th = CreateThread(NULL, 0, job_thread, j, 0, NULL);
-    if (!j->th) {
-        InterlockedExchange(&j->state, 3);
-        snprintf(j->err, ERRBUF, "创建线程失败");
-        return 0;
-    }
-    return 1;
-}
-
-int job_poll(Job *j, Err err) {
-    LONG st = j->state;
-    if (st != 2 && st != 3) return 0;
-    if (j->th) {
-        WaitForSingleObject(j->th, INFINITE);
-        CloseHandle(j->th);
-        j->th = NULL;
-    }
-    snprintf(err, ERRBUF, "%s", j->err);       // err 是数组参数，不可能为 NULL
-    InterlockedExchange(&j->state, 0);
-    return 1;
-}
-
-// 共用同一条 MySQL 连接的作业：协议是严格串行的，任一在跑，别的必须等。
-// 只互斥 app_act 是不够的——轮询/载入撞上写库会在同一连接上交错收发，包就串了
-static int db_busy(void) {
-    return job_running(&g.job_conn) || job_running(&g.job_load) ||
-           job_running(&g.job_act) || job_running(&g.job_poll) ||
-           job_running(&g.job_bubble);
-}
-
-int job_stop(Job *j) {
-    if (j->th) {
-        if (WaitForSingleObject(j->th, 30000) != WAIT_OBJECT_0) {
-            // 超时：线程还在跑，不能关句柄（线程退出时句柄才可关）。
-            // 标记 abandoned 并记日志，泄漏一个句柄但状态机不会假空闲。
-            // 必须把「没等到」这件事告诉调用方：它接着要释放的正是这个线程
-            // 正在读的收发包缓冲（db_close → free(m->buf)），不看返回值就等于
-            // 一边 free 一边 recv。
-            app_log("任务线程 30 秒未退出，放弃等待（句柄保留）");
-            return 0;                     // 保留 j->th 和 state，等下次 job_poll 收
-        }
-        CloseHandle(j->th);
-        j->th = NULL;
-    }
-    InterlockedExchange(&j->state, 0);
-    return 1;
-}
+// 作业原语见 app_job.c；这里保留与连接相关的「忙」判定与停机顺序。
 
 // ---------------- 页面 ----------------
 Blob *app_page_blob(int page) {
@@ -328,13 +308,14 @@ const char *app_page_field(int page) {
 // ---------------- 即时落库 ----------------
 // 页面改完立刻写库（不再有「保存改动」按钮，也不攒草稿）：
 // 内存先改，200ms 内的多次编辑合并成一次写，写完再刷新界面。
-void app_pending_page(int page) {
-    if (page < 0 || page > 5 || !g.char_ok) return;
+int app_pending_page(int page) {
+    if (page < 0 || page > 5 || !g.char_ok) return 0;
     Blob *b = app_page_blob(page);
-    if (!b || !b->ok) return;
-    if (g.cur.online) { app_status("角色在线，改动未写入——请先退出游戏"); return; }
+    if (!b || !b->ok) return 0;
+    if (g.cur.online) { app_status("角色在线，改动未写入——请先退出游戏"); return 0; }
     g.pend_mask |= 1u << page;
     g.pend_ms = now_ms();
+    return 1;
 }
 
 void app_item_set(int page, int slot, const Item *it) {
@@ -405,7 +386,7 @@ static int w_write(void *argv, Err err) {
 
 void app_flush_pending(void) {
     if (!g.pend_mask || !g.db_ok || !g.char_ok) return;
-    if (db_busy()) return;                       // 连接被别的作业占着：等它让出来
+    if (app_db_busy()) return;                       // 连接被别的作业占着：等它让出来
     if (now_ms() - g.pend_ms < 200) return;      // 合并连续编辑
     u32 m = g.pend_mask;
     g.pend_mask = 0;
@@ -428,7 +409,7 @@ void app_flush_pending(void) {
         }
     }
     // app_act 返回 1 有两种含义：「已启动」和「已排队」（app_act_n 在连接忙或队列
-    // 非空时走入队分支）。本函数入口只查了 db_busy()，没查 g_pq_n，所以不能假定
+    // 非空时走入队分支）。本函数入口只查了 app_db_busy()，没查 g_pq_n，所以不能假定
     // 「一定走 act_start、不会排队」。
     // 真正的保险是上下文按值拷贝：act_start 把 g_warg 连着 WriteCtx* 一起 memcpy
     // 进 g_act_ctx.buf，排队那条路则 memcpy 进 g_pq[i].buf —— 所有权随入队交出，
@@ -553,6 +534,12 @@ void app_money_text(u64 v, char *buf, int cap) {
 }
 
 // ---------------- 连接 ----------------
+// 角色列表：作业线程只写暂存，UI 线程在 job_poll 之后整体交换。
+// 直接写 g.chars 会让正在遍历列表的 UI 线程读到 realloc 后的旧指针。
+static Vec s_chars_next;               // 暂存：作业线程写，UI 线程接管
+static volatile LONG s_chars_dirty;    // 暂存里有一份等着换
+static u32 s_chars_total_next;
+
 static int w_connect(void *ctx, Err err) {
     (void)ctx;
     if (!db_open(&g.db, g.cfg.host, g.cfg.port, g.cfg.user, g.cfg.pwd, g.cfg.charset, err)) return 0;
@@ -566,9 +553,12 @@ static int w_connect(void *ctx, Err err) {
     err[0] = 0;
     g.self_bad = db_selfcheck(&g.db, g.self, (int)sizeof(g.self), err);
     err[0] = 0;
-    if (!db_list_chars(&g.db, &g.chars, 200, "", err)) return 0;
-    g.char_total = db_count_chars(&g.db, "");
-    g.chars_ver++;
+    if (!db_list_chars(&g.db, &s_chars_next, 200, "", err)) {
+        db_close(&g.db);          // 连接已建成：失败也要关，否则重试会漏 socket
+        return 0;
+    }
+    s_chars_total_next = db_count_chars(&g.db, "");
+    InterlockedExchange(&s_chars_dirty, 1);
     return 1;
 }
 
@@ -579,9 +569,9 @@ static KwCtx g_kw_ctx;
 
 static int w_chars(void *ctx, Err err) {
     KwCtx *k = (KwCtx *)ctx;
-    if (!db_list_chars(&g.db, &g.chars, 200, k->kw, err)) return 0;
-    g.char_total = db_count_chars(&g.db, k->kw);
-    g.chars_ver++;
+    if (!db_list_chars(&g.db, &s_chars_next, 200, k->kw, err)) return 0;
+    s_chars_total_next = db_count_chars(&g.db, k->kw);
+    InterlockedExchange(&s_chars_dirty, 1);
     return 1;
 }
 
@@ -595,13 +585,11 @@ void app_list_chars(const char *kw) {
 // 它是「左栏」的唯一数据源 —— 列表、在线人数、角色卡都只看 g.chars，
 // 所以这里只更新 g.chars 让列表重排，绝不碰 data_ver：g.cur/g.data 是当前角色的
 // 快照，玩家自己在游戏里升级、GM 页正开着的表单都不该被这几秒一次的轮询冲掉。
-static Vec s_poll;
-
 static int chars_differs(const Vec *a, const Vec *b) {
     if (a->n != b->n) return 1;
     for (int i = 0; i < a->n; i++) {
-        const Charac *x = (const Charac *)vec_at((Vec *)a, i);
-        const Charac *y = (const Charac *)vec_at((Vec *)b, i);
+        const Charac *x = (const Charac *)vec_at(a, i);
+        const Charac *y = (const Charac *)vec_at(b, i);
         if (x->no != y->no || x->mid != y->mid || x->lev != y->lev || x->job != y->job ||
             x->grow != y->grow || x->online != y->online || strcmp(x->name, y->name) != 0 ||
             strcmp(x->account, y->account) != 0)
@@ -612,13 +600,21 @@ static int chars_differs(const Vec *a, const Vec *b) {
 
 static int w_poll(void *ctx, Err err) {
     (void)ctx;
-    if (!s_poll.cap) vec_init(&s_poll, sizeof(Charac));
-    if (!db_poll_chars(&g.db, &s_poll, 500, err)) return 1;   // 轮询失败不打扰界面
-    if (!chars_differs(&s_poll, &g.chars)) return 1;
-    Vec t = g.chars;
-    g.chars = s_poll;
-    s_poll = t;                    // 交换缓冲，省一次整体拷贝
-    if (g.chars.n < 500) g.char_total = (u32)g.chars.n;
+    if (!db_poll_chars(&g.db, &s_chars_next, 500, err)) return 1;   // 轮询失败不打扰界面
+    if (s_chars_next.n < 500) s_chars_total_next = (u32)s_chars_next.n;
+    InterlockedExchange(&s_chars_dirty, 1);
+    return 1;
+}
+
+// UI 线程：把暂存换成正式列表。只在对应作业 poll 完之后调用。
+static void chars_apply(void) {
+    if (!InterlockedExchange(&s_chars_dirty, 0)) return;
+    // 内容没变就不换：换一次列表要重建、选中会丢，轮询每几秒一次扛不住
+    if (g.chars.n && s_chars_next.n && !chars_differs(&s_chars_next, &g.chars)) return;
+    vec_free(&g.chars);
+    g.chars = s_chars_next;
+    vec_init(&s_chars_next, sizeof(Charac));          // 缓冲区交出去，暂存重新为空
+    g.char_total = s_chars_total_next;
     // 列表可能插了新角色/少了角色，选中索引跟着角色编号重新定位
     g.sel = -1;
     for (int i = 0; i < g.chars.n; i++) {
@@ -632,60 +628,56 @@ static int w_poll(void *ctx, Err err) {
         }
     }
     g.chars_ver++;
-    return 1;
 }
 
-void app_connect(void) {
+
+static void connect_begin(void) {
     if (job_running(&g.job_conn)) return;
     // 新会话不能继承旧会话的意图。连接失败那条路上 db_ok 会直接变 0，
     // 没有经过 app_disconnect，队列里可能还压着「上一个库」的动作；
     // 不清的话，重连成功的第一时间它们就按旧快照打进新库。
     // 作业还在跑就先不动：那时候页面状态归那个作业所有，等断开那次统一收。
-    if (!db_busy()) app_drop_queued();
+    if (!app_db_busy()) app_drop_queued();
     g.lists_ready = 0;
     g.db_ok = 0;
     g.char_ok = 0;
     g.sel = -1;
     vec_clear(&g.chars);
+    vec_clear(&s_chars_next);          // 上一个会话的暂存结果作废
+    InterlockedExchange(&s_chars_dirty, 0);
+    g.char_total = 0;
     app_status("正在连接数据库…");
     job_start(&g.job_conn, w_connect, NULL);
 }
 
-// 「排队动作」和「待载入」两组状态：队列本体（g_pq）和载入上下文定义在下面的
-// 「角色」「通用异步动作」两段里，但断开时要连这两个计数一起清，所以先声明在这里
-// （搬上来的话，得把 PEND_BUF / PEND_N 和 g_pq 一起挪）。
-static int s_load_want;                  // 想载入但连接正忙：等空闲了再发
-// 载入前要不要先把 name/job/grow/lev 从库里读回来（UI 线程置 1，载入作业取走）。
-// 跨线程所以用 Interlocked：和 s_reload_later 同一套写法。
-static volatile LONG s_load_recheck;
-static int g_pq_head, g_pq_n;            // 环形：head 出队，n 排队数
+// 用户手动连接：先取消待进行的自动重连
+void app_connect(void) {
+    app_reconnect_cancel();
+    connect_begin();
+}
 
-// 「断开」和「退出」在关连接之前都要先等这批作业停下来：它们共用同一条 MySQL
-// 连接（db_busy 那一份），紧接着的 db_close / db_free_data 释放的正是它们手里的
-// 收发包缓冲和容器 blob —— job_stop 的注释就是为这件事写的。
-// 抽成一份，是为了两边永远同步：以前断开只停 4 个、漏了 job_conn（连接作业正在
-// db_open/select 时点断开，db_close 就撞上它的收发包缓冲），以后新增作业也不会
-// 再漏第二次。
-// 只列用这条连接的 5 个：pvf / npk / grab 只读游戏进程内存，不必等它们
-// （退出那一段仍然全停，但那是「进程要走了」，不是连接安全的需要）。
+// 写队列在 app_act.c、载入状态在 app_load.c；这里只剩连接与停机顺序。
+// 写队列本体在 app_act.c：这里只剩「能不能发」与出队入口
+
+// 「断开」与「退出」共用的停机顺序：先停用这条连接的作业，再关连接。
+// 只列这 5 个；pvf / npk / grab 不碰 MySQL 连接，退出时才需要等。
+// 整批共用 30 秒截止，而不是每个作业各等 30 秒。
+static u64 s_stop_deadline;
+
 static int stop_db_jobs(void) {
-    int stopped = job_stop(&g.job_conn);
-    stopped &= job_stop(&g.job_load);
-    stopped &= job_stop(&g.job_act);
-    stopped &= job_stop(&g.job_poll);
-    stopped &= job_stop(&g.job_bubble);
+    s_stop_deadline = now_ms() + 30000;
+    int stopped = job_stop_by(&g.job_conn, s_stop_deadline);
+    stopped &= job_stop_by(&g.job_load, s_stop_deadline);
+    stopped &= job_stop_by(&g.job_act, s_stop_deadline);
+    stopped &= job_stop_by(&g.job_poll, s_stop_deadline);
+    stopped &= job_stop_by(&g.job_bubble, s_stop_deadline);
     return stopped;
 }
 
 void app_disconnect(void) {
-    // 先等占用这条连接的作业退出，再关连接。
-    // db_close 会 free 收发包缓冲并关掉 socket，而 w_write / w_load / w_poll 此刻
-    // 可能正在这条连接上 recv/memmove；紧接着的 db_free_data 释放的又正是它们手中
-    // 那份容器。写 6 个容器要几百毫秒，这几百毫秒里「断开」一直可点 ——
-    // 退出路径（main.c:929 WM_CLOSE）早就是这个顺序，断开这条漏了同一步。
-    //
-    // 等不到就不能往下走：全服扫描、整库备份/还原在真实库上轻易超过 30 秒，
-    // job_stop 超时后线程仍在跑，接着 db_close 就是一边 free 一边 recv。
+    // 作业没停就关连接，等于一边 free 收发包缓冲一边 recv。
+    // 等不到就拒绝这次断开，连接与队列都保留，用户可再点一次。
+    app_reconnect_cancel();             // 手动断开：别再自动连回来
     int stopped = stop_db_jobs();
     if (!stopped) {
         app_status("后台任务还在跑，稍后再断开（连接没有关）");
@@ -707,9 +699,11 @@ void app_disconnect(void) {
     g.sel = -1;
     g.pend_mask = g.write_mask = 0;
     vec_clear(&g.chars);
+    vec_clear(&s_chars_next);
+    InterlockedExchange(&s_chars_dirty, 0);
     vec_clear(&g.cre_ids);          // 换库连就得换清单，留着旧的等于认错宠物
     db_free_data(&g.data);
-    db_free_data(&g_load_ctx.d);      // 载入到一半断开时，暂存区里还有东西
+    app_load_drop();                   // 载入到一半断开：暂存区与挂起的意图一起作废
     app_status("已断开数据库");
 }
 
@@ -722,8 +716,7 @@ static PvfCtx g_pvf_ctx;
 static int w_pvf(void *ctx, Err err) {
     PvfCtx *c = (PvfCtx *)ctx;
     PvfProg prog = {&g.pvf_pct, g.pvf_stage, (int)sizeof(g.pvf_stage)};
-    (void)err;
-    return pvf_open(&g.pvf, c->path, prog);
+    return pvf_open(&g.pvf, c->path, prog, err);
 }
 
 // ---------------- 贴图包（编号悬浮卡的图标来源） ----------------
@@ -735,6 +728,11 @@ static int w_npk(void *ctx, Err err) {
 
 void app_load_npk(const char *dir) {
     if (!dir || !*dir) return;
+    // 扫描线程正在写 g.npk：这时 free / 重开会让它按旧容量继续写
+    if (job_running(&g.job_npk)) {
+        app_status("贴图包正在扫描，扫完再换目录");
+        return;
+    }
     snprintf(g.cfg.img_dir, sizeof(g.cfg.img_dir), "%s", dir);
     cfg_save(&g.cfg, g.cfg_path);
     // 收尾都在 UI 线程做：npk_build 只管往 g.npk 里填，不负责释放上一轮的数据；
@@ -795,6 +793,8 @@ HBITMAP app_item_icon(u32 id, int *w, int *h) {
 
 void app_load_pvf(const char *path) {
     if (job_running(&g.job_pvf)) return;
+    // 解析会在作业线程里 pvf_close + 重建同一对象：在此之前先让读者停下
+    g.pvf_ok = 0;
     snprintf(g_pvf_ctx.path, sizeof(g_pvf_ctx.path), "%s", path);
     snprintf(g.cfg.pvf, sizeof(g.cfg.pvf), "%s", path);
     g.pvf_pct = 0;
@@ -846,76 +846,7 @@ void app_grab_auto(int on) {
     }
 }
 
-// ---------------- 角色 ----------------
-
-// 载入写进 g_load_ctx.d 而不是直接写 g.data：
-// db_load_data 第一件事就是 db_free_data(out)，也就是先 free 掉 6 个 blob 再重填。
-// 直接对着 g.data 做，UI 线程在那一瞬间正在画物品列表，读到的就是刚被释放的指针
-// （现在之所以没崩，只是因为 blob_unpack 把 ok=1 放在最后一句，属于撞对了顺序）。
-// 用一块暂存区就没有这个问题——g.data 在交换之前一直是完整可用的旧快照。
-static int w_load(void *ctx, Err err) {
-    LoadCtx *c = (LoadCtx *)ctx;
-    // 回滚/重载要用库里的真值当快照：db_load_data 的 SELECT 里没有 charac_name
-    // （lev/job/grow 也没有），光靠它重读一遍，名字永远回不来 —— 改名被拒时界面
-    // 就一直停在那个没写进库的重名上。回读失败就维持传进来的那份：一条小查询
-    // 不该把整个载入打挂。查询放在这里做是因为连接归载入作业独占，UI 线程不查库。
-    if (InterlockedExchange(&s_load_recheck, 0)) {     // 取走即清零
-        Err e = {0};
-        if (!db_read_charac(&g.db, c->c.no, &c->c, e))
-            app_log("重载：回读角色失败，按内存快照载入：%s", e);
-    }
-    db_free_data(&c->d);                 // 上一轮失败留下的半成品
-    return db_load_data(&g.db, &c->c, &c->d, err);
-}
-
-static void load_kick(void) {
-    if (!s_load_want || db_busy()) return;
-    s_load_want = 0;
-    job_start(&g.job_load, w_load, &g_load_ctx);
-}
-
-void app_select_char(int idx) {
-    if (idx < 0 || idx >= g.chars.n) return;
-    // 切换前把合并窗里的背包改动落盘。直接清零等于丢数据，而"先切再写"更糟：
-    // blob 数据会被新角色的载入换掉，写进去的就是别人的背包。
-    if (g.pend_mask) {
-        g.pend_ms = 0;                       // 不等 200ms 合并窗
-        for (int i = 0; i < 12 && g.pend_mask; i++) {
-            app_tick();                      // 里面会尝试 flush
-            Sleep(50);
-        }
-        if (g.pend_mask) {
-            app_status("正在写库，稍后再切换角色");
-            return;
-        }
-    }
-    Charac *c = VEC_AT(&g.chars, Charac, idx);
-    // 这里不碰 g.cur：快照换人放在载入成功那一刻，一次完成。
-    // 提前把 g.cur 改掉，正在跑的写作业就会拿旧数据去写新角色。
-    g.sel = idx;
-    g.lists_ready = 0;
-    g.char_ok = 0;                  // 数据到位前先锁住页面
-    g_load_ctx.c = *c;
-    app_status("正在载入 %s 的数据…", c->name);
-    s_load_want = 1;
-    load_kick();
-}
-
-void app_reload(void) {
-    if (!g.char_ok) return;
-    // 写失败后的回滚要回到库里的真值，而不是内存里这份：改名/改等级是「先改快照、
-    // 再写库」（gm_apply 的乐观更新），失败时 g.cur 里躺的正是那个没写进库的值，
-    // 照它重读等于把假值再确认一次。所以让载入作业先回读 charac_info 再载入
-    // （s_load_recheck，见 w_load）—— 顺带把 lev/job/grow 一起纠正。
-    g_load_ctx.c = g.cur;
-    InterlockedExchange(&s_load_recheck, 1);
-    s_load_want = 1;
-    load_kick();
-}
-
-// 任务线程不能直接开作业（job_start 要跟 UI 线程抢同一份状态机），只留个请求
-static volatile LONG s_reload_later;
-void app_reload_later(void) { InterlockedExchange(&s_reload_later, 1); }
+// 角色载入 / 重载 / 选角见 app_load.c
 
 // ---------------- 写后校验 ----------------
 // 写库之后把真值读回来，跟内存里的快照比一次（两条小查询，只在真写库后跑一次）：
@@ -977,11 +908,11 @@ int app_sync_char(void) {
     Charac c = g.cur;                      // no/mid/account 原样保留
     CharData d = g.data;
     if (!db_read_charac(&g.db, g.cur.no, &c, err)) {
-        app_log("写后校验失败（角色）：%s", err);
+        app_err("写后校验失败（角色）：%s", err);
         return 0;
     }
     if (!db_read_state(&g.db, &c, &d, err)) {
-        app_log("写后校验失败（状态）：%s", err);
+        app_err("写后校验失败（状态）：%s", err);
         return 0;
     }
     c.online = g.cur.online;               // 在线状态归轮询管，别被这次快照覆盖回去
@@ -1007,7 +938,7 @@ void app_sync_apply(void) {
     g.data = s_sync_d;
     if (form_changed) {
         g.data_ver++;                      // 快照换代 → 表单重填一次
-        app_log("写后校验：库里的值跟写入的不一致，已按库里的值刷新");
+        app_warn("写后校验：库里的值跟写入的不一致，已按库里的值刷新");
     }
     app_row_sync();
 }
@@ -1018,93 +949,17 @@ void app_save_draft(void) {
     app_flush_pending();
 }
 
-// ---------------- 通用异步动作 ----------------
-// 上下文一律拷贝一份再交给线程。调用方多半传的是共享的静态结构（gm 页的 kc、
-// 写容器时的 g_warg），当场不改、任务线程稍后才读，中间被下一次点击改写，
-// 就会出现"点 A 执行 B"这种查不出来的错。
-// 容器写入的快照（WriteCtx）走堆 + 指针，不放进这里的固定缓冲：
-// 它带 6 个动态 Buf，按值拷贝会让两个副本各认一份所有权。
-#define PEND_BUF 768
-#define PEND_N   4
-typedef struct {
-    ActFn fn;
-    void *ctx;
-    unsigned char buf[PEND_BUF];
-} ActCtx;
-static ActCtx g_act_ctx;
-
-static int w_act(void *ctx, Err err) {
-    ActCtx *a = (ActCtx *)ctx;
-    return a->fn(a->ctx, err);
-}
-
-// 一次只能有一个写操作在跑（共用一条 MySQL 连接）；忙时排队，完成后按顺序自动执行。
-// 单槽会被后来的动作直接覆盖：活动页连点「启用」再点「停用」，第一个就静默消失了，
-// 状态栏还把两个都写成"…"，用户以为都提交了。
-static struct {
-    char   what[64];
-    ActFn  fn;
-    int    sz;
-    unsigned char buf[PEND_BUF];
-} g_pq[PEND_N];
-
-static int act_start(const char *what, ActFn fn, void *ctx, int ctxsz) {
-    snprintf(g.act_what, sizeof(g.act_what), "%s", what);
-    g_act_ctx.fn = fn;
-    if (ctx && ctxsz > 0 && ctxsz <= PEND_BUF) {
-        memcpy(g_act_ctx.buf, ctx, (size_t)ctxsz);
-        g_act_ctx.ctx = g_act_ctx.buf;
-    } else {
-        g_act_ctx.ctx = ctx;             // 无上下文：fn 自己不读
-    }
-    app_status("%s…", what);
-    return job_start(&g.job_act, w_act, &g_act_ctx);
-}
-
-int app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz) {
-    if (!g.db_ok) {
-        app_status("请先连接数据库");
-        return 0;
-    }
-    if (!db_busy() && !g_pq_n) return act_start(what, fn, ctx, ctxsz);
-    if (ctxsz < 0 || ctxsz > PEND_BUF) return 0;
-    if (g_pq_n >= PEND_N) {
-        app_status("已有 %d 个操作在排队，这个没提交", g_pq_n);
-        return 0;
-    }
-    int i = (g_pq_head + g_pq_n) % PEND_N;
-    snprintf(g_pq[i].what, sizeof(g_pq[i].what), "%s", what);
-    g_pq[i].fn = fn;
-    // 上下文和上下文大小必须一起为空：app_act 的 ctxsz 是 sizeof(*(ctx))，
-    // 传 NULL 时算出来是 sizeof(void)==1（GCC 扩展），照抄进队列就是
-    // memcpy(..., NULL, 1) —— 全服扫描/清除这两个无上下文的动作一旦排队就崩。
-    g_pq[i].sz = ctx ? ctxsz : 0;
-    if (ctx && ctxsz > 0) memcpy(g_pq[i].buf, ctx, (size_t)ctxsz);
-    g_pq_n++;
-    return 1;
-}
-
-// 现在能不能直接发一个写动作：连接空闲，且队列是空的。
-// 页面自己攒队列时用它判断，免得自己的动作排到队尾等太久
-int app_act_idle(void) {
-    return !db_busy() && !g_pq_n;
-}
+// 通用异步动作与写队列见 app_act.c；这里只保留会话边界与丢弃钩子。
 
 // ---------------- 会话边界：丢弃还没开始的动作 ----------------
-// 「断开」= 丢掉所有还没开始的动作。这个语义以前只落在 app 层的 g_pq 上，
-// 页面层各自还攒着自己的队列和闸：GM 页的写队列 s_gmq、扫描页的 s_scan_live、
-// 表内扫描的 g_tab_pending。它们各自找地方复位，于是同一个漏法发作了四次
-// （R1-006 / R3-003 / R3-004 / R3-007）。现在统一从这一个入口走。
+// 断开的语义是「丢掉所有还没开始的动作」。页面层的写队列、扫描闸、待弹窗标记
+// 也要一起复位，否则它们会在重连后对着新连接执行旧意图。
 //
-// 用「注册钩子」而不是在 app_disconnect 里逐个调 page_xxx_drop()：后者要求
-// 每新增一个带页面队列的页都回来改 app.c，漏一次就是下一次 R3-00x；钩子在
-// 页面自己的 create 里注册，app.c 不认识页面名。
+// 用注册钩子而不是在 app_disconnect 里逐个调 page_xxx_drop()：页面在自己的
+// create 里注册，新增页面不用回头改 app.c。
 //
-// 安全性来自调用时机：只有确认共用那条连接的作业都停了（stop_db_jobs 返回 1）
-// 才会走到这里。也就是说钩子复位的一定是「死状态」，不会去清一个还在往 s_scan 里
-// 追加的作业手里的闸 —— 那是 R1-006 用 s_scan_live 挡住的那类 use-after-free。
-// 注意这里说的只是「db 侧作业」：pvf / npk / grab 那三个不碰这条连接，也不持有
-// 页面队列，等不等它们都不影响钩子清的是什么。
+// 调用时机保证安全：只有共用连接的作业都停了才会走到这里，钩子复位的是死状态，
+// 不会去清一个还在往暂存区追加的作业。
 #define DROP_HOOKS 8
 static void (*s_drop_hook[DROP_HOOKS])(void);
 static int s_drop_hooks;
@@ -1117,8 +972,8 @@ void app_on_drop(void (*fn)(void)) {
 }
 
 void app_drop_queued(void) {
-    g_pq_n = g_pq_head = 0;
-    s_load_want = 0;
+    app_act_clear_queue();
+    app_load_drop();
     for (int i = 0; i < s_drop_hooks; i++) s_drop_hook[i]();
 }
 
@@ -1173,7 +1028,7 @@ int app_grant_add_new(u32 id, u32 num) {
 // g.grant 是竞态（realloc 后指针悬空 / 删项后越界）。发前拷一份，job 只读快照。
 // 快照放独立静态数组（不在 GrantCtx 里）：GrantCtx 要塞进 app_act 的 768B 队列缓冲，
 // 带不下 256 项物品。一次只发一批，所以一份快照就够。
-#define GRANT_SNAP_MAX 256
+#define GRANT_SNAP_MAX APP_GRANT_MAX
 static NamedId s_grant_snap[GRANT_SNAP_MAX];
 static int     s_grant_snap_n;
 // 走邮件时一种物品最多拆成几封。一封一个附件，拆得太狠（比如发 9999 个上限为 1
@@ -1184,11 +1039,9 @@ typedef struct {
 } GrantCtx;
 static GrantCtx g_grant_ctx;
 
-// 背包是分段的，不是一整条。服务端逐槽校验，物品只要落错区段，InventoryVerify
-// 就判整个背包非法并断开连接 —— 而且一次只报第一个（ERROR_ITEM_LOG），删掉它只会
-// 让报错顺延到下一件，看起来就像"删了没用"。
+// 背包是分段的，不是一整条。服务端逐槽校验，物品落错区段就判整个背包非法并断开
+// 连接，而且一次只报第一件（ERROR_ITEM_LOG），删掉它只会让报错顺延到下一件。
 //
-// 分区标尺取自 2026.3.14 源码 GUI.py 的 positionDict（新旧两版一致）：
 //     槽 0        保留位，任何物品都不该落这里
 //     槽 1..8     快捷栏，通用，放什么都行
 //     槽 9..56    装备     (type=0x01)
@@ -1196,11 +1049,6 @@ static GrantCtx g_grant_ctx;
 //     槽 105..152 材料     (type=0x03)
 //     槽 153..200 任务材料 (type=0x04)
 //     槽 201..248 副职业   (type=0x0a)
-//
-// 早先这里只分「普通栏 / 材料栏」两档，一刀切在 153，有两个错：
-//   1) 材料(type=3)真区间是 105..152，被塞进了任务材料区 153..200
-//   2) 非材料类从槽 0 起找，而槽 0 是保留位 —— 服务端日志里那条
-//      ERROR_ITEM_LOG ... slot(0) 就是这么来的
 #define INV_EQUIP_LO    9
 #define INV_EQUIP_HI   57
 #define INV_STACK_LO   57
@@ -1222,6 +1070,23 @@ static void inv_zone(u8 t, int *lo, int *hi, const char **name) {
     case IT_EXPERT:   *lo = INV_EXPERT_LO; *hi = INV_EXPERT_HI; *name = "副职业栏"; break;
     default:          *lo = 1;             *hi = INV_EXPERT_HI; *name = "背包";   break;
     }
+}
+
+// 这个容器/槽位能不能放这个类型的物品。背包按区段（快捷栏通用），
+// 穿戴与宠物各有允许的类型；仓库/珠宝/账号金库不分区。
+int app_item_slot_ok(int page, int slot, u8 type) {
+    if (type == IT_EMPTY) return 1;
+    if (page == 0) {
+        if (slot >= 1 && slot < INV_EQUIP_LO) return 1;      // 快捷栏：放什么都行
+        int lo, hi;
+        const char *name;
+        inv_zone(type, &lo, &hi, &name);
+        return slot >= lo && slot < hi;
+    }
+    if (page == 1) return type == IT_EQUIP || type == IT_CREATURE_EQUIP;
+    if (page == 2)
+        return type == IT_CREATURE || type == IT_CREATURE_EQUIP || type == IT_CREATURE_STACK;
+    return 1;
 }
 
 static int w_grant(void *ctx, Err err) {
@@ -1435,13 +1300,40 @@ static int w_db_dump(void *ctx, Err err) {
     return 1;
 }
 
+// 还原：不管从 GUI 还是命令行进来，都先自动整库备份。
+// 还原是唯一「先删后插」的破坏性动作，备份失败就不还原。
+int app_restore_file(const char *path, int *stmts, Err err) {
+    Err verr;
+    if (!db_sql_file_complete(path, NULL, verr)) {   // 坏文件不值得先做一次整库备份
+        snprintf(err, ERRBUF, "%s", verr);
+        return 0;
+    }
+    char dir[MAX_PATH], safe[MAX_PATH], ts[32];
+    art_dir("backup", dir, sizeof(dir));
+    art_stamp(ts, sizeof(ts));
+    snprintf(safe, sizeof(safe), "%s\\pre-restore-%s.sql", dir, ts);
+    int nt = 0;
+    u64 nr = 0;
+    Err derr;
+    if (!db_dump_sql(&g.db, safe, &nt, &nr, derr)) {
+        snprintf(err, ERRBUF, "还原前自动备份失败，已中止：%s", derr);
+        return 0;
+    }
+    app_log("还原前自动备份：%s（%d 表 / %llu 行）", safe, nt, (unsigned long long)nr);
+    art_prune(dir, "pre-restore-", 5);
+
+    int n = 0;
+    if (!db_restore_sql(&g.db, path, &n, err)) return 0;
+    app_log("还原数据库 · 执行 %d 条语句 ← %s", n, path);
+    app_log("还原前快照：%s", safe);
+    g.lists_ready = 0;
+    if (stmts) *stmts = n;
+    return 1;
+}
+
 static int w_db_restore(void *ctx, Err err) {
     DbJobCtx *c = (DbJobCtx *)ctx;
-    int n = 0;
-    if (!db_restore_sql(&g.db, c->path, &n, err)) return 0;
-    app_log("还原数据库 · 执行 %d 条语句 ← %s", n, c->path);
-    g.lists_ready = 0;
-    return 1;
+    return app_restore_file(c->path, NULL, err);
 }
 
 void app_db_backup(const char *path) {
@@ -1630,7 +1522,8 @@ void app_init(void) {
     vec_init(&g.event_info, sizeof(EventInfo));
     vec_init(&g.cre_ids, sizeof(u32));
     act_init();                              // 列表暂存 Vec（act.c 内部）
-    vec_init(&s_poll, sizeof(Charac));
+    db_progress_cb = progress_cb;            // db 层长任务把进度回传到这里
+    vec_init(&s_chars_next, sizeof(Charac)); // 角色列表暂存（作业线程写）
 
     cfg_load(&g.cfg, g.cfg_path);
     app_status("就绪 · 请先连接数据库");
@@ -1655,9 +1548,9 @@ void app_shutdown(void) {
     // 手里那 6 个 blob，db_close 收的是它的收发包缓冲，这时候「不释放」比「释放了
     // 崩」正确：进程马上就结束，泄漏的那点内存交给 OS 回收，是可接受的代价。
     int stopped = stop_db_jobs();
-    stopped &= job_stop(&g.job_pvf);
-    stopped &= job_stop(&g.job_grab);
-    stopped &= job_stop(&g.job_npk);
+    stopped &= job_stop_by(&g.job_pvf, s_stop_deadline);
+    stopped &= job_stop_by(&g.job_grab, s_stop_deadline);
+    stopped &= job_stop_by(&g.job_npk, s_stop_deadline);
     if (!stopped)
         app_log("退出：有任务线程 30 秒未退出，跳过资源释放（连接与容器交给系统回收）");
     if (stopped) {
@@ -1665,7 +1558,7 @@ void app_shutdown(void) {
         pvf_close(&g.pvf);
         npk_free(&g.npk);
         db_free_data(&g.data);
-        db_free_data(&g_load_ctx.d);
+        app_load_drop();
         act_free();                              // 列表暂存 Vec
         if (g.db_ok) db_close(&g.db);
     }
@@ -1679,183 +1572,20 @@ void app_shutdown(void) {
 }
 
 // ---------------- 泡点 ----------------
-// 每 bubble_sec 秒按目标人群 + 多奖励给账号/角色加点。账在账号维度（D点/D币）或
-// 角色维度（点券/物品），所以一个账号挂多个角色也只发一份。只算本工具开着的时间：
-// 关掉就停、重开从零计时，不补算——补算要给每个账号记上次结算时刻，等于把服务端的账本搬到 GM 台上。
-static u64 s_bubble_next;      // 下次结算时刻（0 = 还没开始计时）
-static u32 s_bubble_paid;      // 上次命中的对象数
-static u32 s_bubble_runs;      // 已结算次数
-
-// 最近计划 / 结算流水：界面上那张表就吃这 20 条。
-// 一条「计划」是点一次应用（等级：等待发放），之后每次结算追加一条结果。
-// 只留内存不落盘：这是给现场看的"刚才发了几次、每次几个"，重启就是新的一轮；
-// 要长期留档走「导出记录」。
-#define BUB_PLAN_MAX 20
-static BubblePlan s_plan[BUB_PLAN_MAX];
-static int s_plan_n;
-static int s_plan_ver;
-static int s_bub_live;         // 上一 tick 是否在结算中，用来抓「刚刚到期」这个边沿
-
-static const char *bub_target_name(int t) {
-    return t == 0 ? "仅在线" : t == 1 ? "全服" : t == 2 ? "指定角色" : "指定账号";
+// 服务端把连接掐断（不是查询失败）时，整条连接已经没用了：标记断开，
+// 让用户看到「请重连」而不是对着每条操作各报一次错。
+static int conn_lost(const char *e) {
+    return e && (strstr(e, "连接被重置") || strstr(e, "服务器关闭了连接") ||
+                 strstr(e, "WSA 10054"));
 }
 
-static void bub_plan_add(const char *tg, const char *what, const char *st) {
-    SYSTEMTIME tm;
-    GetLocalTime(&tm);
-    if (s_plan_n < BUB_PLAN_MAX) s_plan_n++;
-    if (s_plan_n > 1)
-        memmove(&s_plan[1], &s_plan[0], sizeof(BubblePlan) * (size_t)(s_plan_n - 1));
-    BubblePlan *p = &s_plan[0];
-    snprintf(p->t, sizeof(p->t), "%02d:%02d:%02d", tm.wHour, tm.wMinute, tm.wSecond);
-    snprintf(p->tg, sizeof(p->tg), "%s", tg && tg[0] ? tg : "—");
-    snprintf(p->what, sizeof(p->what), "%s", what ? what : "");
-    snprintf(p->st, sizeof(p->st), "%s", st ? st : "");
-    s_plan_ver++;
-}
+// 断线后自动重连：手滑拔网线、服务端重启都不该让人重新点一遍。
+// 最多 3 次、间隔 3 秒；手动连接/断开时取消。
+#define RECONNECT_MAX 3
+static int s_recon_left;
+static u64 s_recon_at;
 
-int app_bubble_plan_count(void) { return s_plan_n; }
-const BubblePlan *app_bubble_plan_at(int i) {
-    if (i < 0 || i >= s_plan_n) return NULL;
-    return &s_plan[i];
-}
-int app_bubble_plan_ver(void) { return s_plan_ver; }
-
-static int w_bubble(void *ctx, Err err) {
-    (void)ctx;
-    u32 n = 0;
-    BubbleCfg bc = {
-        g.cfg.bubble_target, g.cfg.bubble_coin, g.cfg.bubble_dpoint, g.cfg.bubble_dcoin,
-        g.cfg.bubble_item, g.cfg.bubble_itemnum, g.cfg.bubble_tno
-    };
-    if (!db_bubble_tick(&g.db, &bc, &n, err)) return 0;
-    s_bubble_paid = n;
-    s_bubble_runs++;
-    return 1;
-}
-
-void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dcoin,
-                      u32 item, int itemnum, u32 tno, int hours) {
-    if (sec < 5) sec = 5;             // 下限 5 秒：再快就是拿一条连接刷库
-    if (sec > 86400) sec = 86400;
-    if (coin < 0) coin = 0;
-    if (dpoint < 0) dpoint = 0;
-    if (dcoin < 0) dcoin = 0;
-    if (itemnum < 0) itemnum = 0;
-    if (target < 0 || target > 3) target = 0;
-    // 时长不再限定 1/3/5/7 这四档：下拉可编辑，用户想填 12 小时就填 12。
-    // 0 = 持续；上限一年，再大没有意义（而且 until 会溢出到很离谱的年份）
-    if (hours < 0) hours = 0;
-    if (hours > 8760) hours = 8760;
-    g.cfg.bubble_on = on ? 1 : 0;
-    g.cfg.bubble_sec = sec;
-    g.cfg.bubble_target = target;
-    g.cfg.bubble_coin = coin;
-    g.cfg.bubble_dpoint = dpoint;
-    g.cfg.bubble_dcoin = dcoin;
-    g.cfg.bubble_item = item;
-    g.cfg.bubble_itemnum = itemnum;
-    g.cfg.bubble_tno = tno;
-    g.cfg.bubble_hours = hours;
-    // 时长从「应用」这一刻起算，存绝对截止时刻。存「还剩几小时」的话，每次重开
-    // 工具都得重新数，等于把 3 小时续成无数遍。
-    g.cfg.bubble_until = (on && hours) ? (u64)time(NULL) + (u64)hours * 3600 : 0;
-    s_bubble_next = 0;                // 从改的这一刻重新计时，别沿用旧时刻
-    cfg_save(&g.cfg, g.cfg_path);
-    const char *tg = target == 0 ? "仅在线" : target == 1 ? "全服" :
-                     target == 2 ? "指定角色" : "指定账号";
-    char rw[128] = "";
-    if (coin)   snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "点券+%d ", coin);
-    if (dpoint) snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "D点+%d ", dpoint);
-    if (dcoin)  snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "D币+%d ", dcoin);
-    if (item)   snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "物品%d×%d ", item,
-                         itemnum > 0 ? itemnum : 1);
-    if (!rw[0]) snprintf(rw, sizeof(rw), "（无奖励）");
-    const char *dur = hours == 0 ? "持续" : fmt_new("%d 小时", hours);
-    app_status("泡点：%s · 每 %d 秒 · %s · %s · 时长 %s",
-               on ? "已启用" : "已停用", sec, tg, rw, dur);
-    app_log("泡点：%s · 每 %d 秒 · 目标%s · %s · 时长 %s",
-            on ? "已启用" : "已停用", sec, tg, rw, dur);
-
-    // 列表里留一条计划：开启是「等待发放」，关掉是「已停止」。
-    // 结算结果由 app_tick 逐条追加到这个计划后面。
-    char desc[120];
-    if (on) {
-        if (hours) snprintf(desc, sizeof(desc), "每 %d 秒 · %s · %d 小时", sec, rw, hours);
-        else       snprintf(desc, sizeof(desc), "每 %d 秒 · %s · 持续", sec, rw);
-        bub_plan_add(tg, desc, "等待发放");
-    } else {
-        bub_plan_add(tg, "手动停用", "已停止");
-    }
-}
-
-// 当前是否还在生效时长内（until==0 表示持续，不自动停）
-static int bubble_in_window(void) {
-    if (!g.cfg.bubble_until) return 1;
-    return (u64)time(NULL) < g.cfg.bubble_until;
-}
-
-void app_bubble_status(char *out, int cap) {
-    if (!g.cfg.bubble_on) {
-        fmt(out, cap, "未启用");
-        return;
-    }
-    // 生效时长：持续 或 「剩余 x 小时 y 分」
-    char tw[48] = "";
-    if (!g.cfg.bubble_until) {
-        snprintf(tw, sizeof(tw), " · 持续");
-    } else {
-        u64 now = (u64)time(NULL);
-        if (g.cfg.bubble_until <= now) {
-            snprintf(tw, sizeof(tw), " · 已到时长");
-        } else {
-            u64 r = g.cfg.bubble_until - now;
-            snprintf(tw, sizeof(tw), " · 剩余 %llu 小时 %llu 分",
-                     (unsigned long long)(r / 3600), (unsigned long long)(r % 3600 / 60));
-        }
-    }
-    if (!bubble_in_window()) {
-        fmt(out, cap, "已启用 · 已到生效时长，停止结算%s", tw);
-        return;
-    }
-    if (!g.db_ok) {
-        fmt(out, cap, "已启用 · 等数据库连接后开始计时%s", tw);
-        return;
-    }
-    u64 now = now_ms();
-    int left = s_bubble_next > now ? (int)((s_bubble_next - now) / 1000) : 0;
-    const char *tg = g.cfg.bubble_target==0?"仅在线":g.cfg.bubble_target==1?"全服":
-                     g.cfg.bubble_target==2?"指定角色":"指定账号";
-    if (!s_bubble_runs)
-        fmt(out, cap, "已启用 · %s · %d 秒后首次结算%s", tg, left, tw);
-    else if (s_bubble_paid)
-        fmt(out, cap, "已启用 · %s · 上次 %u 个对象已加奖励 · %d 秒后下次%s",
-                 tg, s_bubble_paid, left, tw);
-    else
-        fmt(out, cap, "已启用 · %s · 上次没有符合条件的对象 · %d 秒后下次%s", tg, left, tw);
-}
-
-// ---------------- 周期轮询 ----------------
-void app_bubble_export(void) {
-    char dir[MAX_PATH], outp[MAX_PATH], logp[MAX_PATH];
-    app_log_path(logp, sizeof(logp));
-    art_dir("export", dir, sizeof(dir));
-    path_join(outp, sizeof(outp), dir, "泡点记录.txt");
-    FILE *fin = fopen(logp, "rb");
-    if (!fin) { app_info("没有可导出的泡点记录（日志文件不存在）"); return; }
-    FILE *fout = fopen(outp, "wb");
-    if (!fout) { fclose(fin); app_info("导出失败：无法写入 泡点记录.txt"); return; }
-    char line[2048];
-    int n = 0;
-    while (fgets(line, sizeof(line), fin)) {
-        if (strstr(line, "泡点结算") || strstr(line, "泡点：")) {
-            fputs(line, fout);
-            n++;
-        }
-    }
-    fclose(fin); fclose(fout);
-    app_info(fmt_new("已导出 %d 条泡点记录到：\n%s", n, outp));
-}
+void app_reconnect_cancel(void) { s_recon_left = 0; }
 
 void app_tick(void) {
     Err err;
@@ -1867,8 +1597,12 @@ void app_tick(void) {
             snprintf(g.db_err, sizeof(g.db_err), "%s", err);
             g.db_ok = 0;
             app_status("连接失败：%s", err);
-            app_log("连接失败：%s", err);
+            app_err("连接失败：%s", err);
+            if (s_recon_left > 0) s_recon_at = now_ms() + 3000;   // 自动重连还有次数就再来
         } else {
+            s_recon_left = 0;               // 连上了，不再重试
+            app_log_session();              // 新会话：日志带上新的会话号
+            chars_apply();                  // 连接作业填好的角色列表在这里换上
             g.db_ok = 1;
             app_status("数据库已连接 · 共 %u 个角色", g.char_total);
             app_log("数据库已连接 · 共 %u 个角色", g.char_total);
@@ -1884,38 +1618,14 @@ void app_tick(void) {
         }
     }
 
-    if (job_poll(&g.job_load, err)) {
-        if (err[0]) {
-            g.char_ok = 0;
-            db_free_data(&g_load_ctx.d);      // 半成品不留在暂存区里
-            app_status("载入角色失败：%s", err);
-        } else {
-            // 快照在这里整体换代：job_poll 已经等到载入线程结束，此刻没有并发读者，
-            // 交换 Blob 指针（浅拷贝）是安全的，而且旧快照直到这一刻都还能正常显示。
-            db_free_data(&g.data);
-            g.data = g_load_ctx.d;
-            memset(&g_load_ctx.d, 0, sizeof(g_load_ctx.d));   // 暂存区交出去，别再动它
-            // 载入期间 g.cur 一直是旧角色，所以这期间完成的旧角色写操作
-            // 也不会把数据糊到新角色头上。
-            g.cur = g_load_ctx.c;
-            if (g.sel >= 0 && g.sel < g.chars.n) {       // 在线状态以轮询为准
-                Charac *lc = VEC_AT(&g.chars, Charac, g.sel);
-                if (lc->no == g.cur.no) g.cur.online = lc->online;
-            }
-            g.char_ok = 1;
-            g.data_ver++;
-            int used = 0;
-            for (int i = 0; i < g.data.inv.n; i++)
-                if (!item_empty(&g.data.inv.items[i])) used++;
-            app_status("已载入 %s · 物品栏 %d 件", g.cur.name, used);
-        }
-    }
+    app_load_pending();               // 载入期间点过的角色，这一帧补上
+    app_load_poll();                  // 载入结果：快照换代 / 失败清暂存
 
     if (job_poll(&g.job_pvf, err)) {
         if (err[0]) {
             g.pvf_ok = 0;
             app_status("PVF 加载失败：%s", err);
-            app_log("PVF 加载失败：%s", err);
+            app_err("PVF 加载失败：%s", err);
         } else {
             g.pvf_ok = 1;
             app_status("PVF 已加载 · %d 个文件 · %d 条物品名", g.pvf.nleaf, g.pvf.items.n);
@@ -1927,15 +1637,29 @@ void app_tick(void) {
         app_sync_apply();                    // 写后校验的结果搬到 g.*（job 线程只暂存）
         act_apply_lists();                   // 列表暂存搬到 g.bans/g.events/g.event_info
         ui_data_apply_lists();               // 宠物/时装/任务列表暂存搬到 g.pets/…
+        chars_apply();                       // 「刷新角色」的结果
         int was_write = g.write_mask != 0;
         if (err[0]) {
-            app_status("%s 失败：%s", g.act_what, err);
-            app_log("%s 失败：%s", g.act_what, err);
             g.act_ver++;                      // 让页面按库里的值重填（失败时控件别停在假值上）
-            if (was_write) {                  // 写库失败：以库里的值为准，别让界面停在假数据
+            if (conn_lost(err)) {
+                // 连接没了：标记断开，稍微等一下自动重连
+                g.db_ok = 0;
+                g.char_ok = 0;
                 g.write_mask = 0;
                 g.pend_mask = 0;
-                app_reload();
+                app_err("数据库连接已断开：%s", err);
+                app_status("数据库连接已断开，正在自动重连…");
+                s_recon_left = RECONNECT_MAX;
+                s_recon_at = now_ms() + 2000;
+                app_ui_refresh_buttons();
+            } else {
+                app_status("%s 失败：%s", g.act_what, err);
+                app_err("%s 失败：%s", g.act_what, err);
+                if (was_write) {              // 写库失败：以库里的值为准，别让界面停在假数据
+                    g.write_mask = 0;
+                    g.pend_mask = 0;
+                    app_reload();
+                }
             }
         } else {
             app_status("%s 完成", g.act_what);
@@ -1947,64 +1671,46 @@ void app_tick(void) {
         }
     }
 
+    // 长任务：进度写进状态栏，同时让「取消」按钮跟着任务起落
+    {
+        static int last_ar = -1;
+        int ar = job_running(&g.job_act);
+        if (ar != last_ar) {
+            last_ar = ar;
+            app_ui_refresh_buttons();
+        }
+        int pct = (int)s_job_pct;
+        if (ar && pct >= 0) app_status("%s… %d%%", g.act_what, pct);
+    }
+
     if (job_poll(&g.job_poll, err)) {
-        /* 角色列表/在线状态已刷新，界面下一帧自会取用 */
+        chars_apply();                       // 轮询结果：左栏列表/在线状态
     }
 
     // 写失败的回滚请求：重读当前角色，把乐观更新改过的内存恢复成库里的值
-    if (InterlockedExchange(&s_reload_later, 0)) {
-        app_reload();
+    if (app_load_take_reload()) app_reload();
+
+    // 断线自动重连：还有次数、连接确实断着、也没有连接作业在跑，就再试一次
+    if (s_recon_left > 0 && !g.db_ok && !job_running(&g.job_conn) && now_ms() >= s_recon_at) {
+        s_recon_left--;
+        app_status("正在自动重连（剩 %d 次）…", s_recon_left);
+        app_log("自动重连：还剩 %d 次", s_recon_left);
+        connect_begin();
     }
 
-    // 泡点：到点才发，而且必须连接空闲、队列里也没人的操作 —— 不跟人抢那条连接。
-    // 没连库或没启用就把计时清零，下次连上从整段间隔重新开始。
-    // 超出生效时长（bubble_until）时停止结算，时长内重新计时。
-    int live = g.db_ok && g.cfg.bubble_on && bubble_in_window();
-    // 刚到时长这一瞬间记一条。之后 bubble_in_window 一直是 false，不会重复记；
-    // 中间若重新点应用（until 被续上）会重新变 true，下次到期再记一条。
-    if (s_bub_live && !live && g.cfg.bubble_on && !bubble_in_window())
-        bub_plan_add(bub_target_name(g.cfg.bubble_target), "已到生效时长，停止结算", "已到时长");
-    s_bub_live = live;
-
-    if (!live) {
-        s_bubble_next = 0;
-    } else if (!db_busy() && !g_pq_n) {
-        u64 now = now_ms();
-        u64 step = (u64)g.cfg.bubble_sec * 1000;
-        if (!s_bubble_next) {
-            s_bubble_next = now + step;
-        } else if (now >= s_bubble_next) {
-            s_bubble_next = now + step;
-            job_start(&g.job_bubble, w_bubble, NULL);
-        }
-    }
-    if (job_poll(&g.job_bubble, err)) {
-        const char *tg = bub_target_name(g.cfg.bubble_target);
-        char d[88];
-        if (err[0]) {
-            app_log("泡点结算失败：%s", err);
-            snprintf(d, sizeof(d), "%s", err);
-            bub_plan_add(tg, d, "发放失败");
-        } else if (s_bubble_paid) {
-            app_log("泡点结算：%s · %u 个对象已加奖励", tg, s_bubble_paid);
-            snprintf(d, sizeof(d), "%u 个对象已加奖励", s_bubble_paid);
-            bub_plan_add(tg, d, "完成发放");
-        } else {
-            // 一个都没命中也要记：否则界面上看不出「到底跑了没有」
-            bub_plan_add(tg, "没有符合条件的对象", "无人可发");
-        }
-    }
+    app_bubble_tick();       // 泡点结算（含「刚到时长」的收尾）
 
     // 连接空出来了：先把排队的动作发完，再补载入。
     // 顺序不能反 —— 载入会换掉 g.data，若排队的写还在等，它拿到的就是新角色的数据。
-    if (!db_busy()) {
-        if (g_pq_n) {
-            int i = g_pq_head;
-            g_pq_head = (g_pq_head + 1) % PEND_N;
-            g_pq_n--;
-            act_start(g_pq[i].what, g_pq[i].fn, g_pq[i].buf, g_pq[i].sz);
-        } else if (s_load_want) {
-            load_kick();
+    if (!app_db_busy()) {
+        char what[64];
+        ActFn fn = NULL;
+        void *ctx = NULL;
+        int sz = 0;
+        if (app_act_take_queued(what, sizeof(what), &fn, &ctx, &sz)) {
+            app_act_run(what, fn, ctx, sz);
+        } else {
+            app_load_kick_if_wanted();
         }
     }
 
@@ -2047,7 +1753,7 @@ void app_tick(void) {
     }
     // 轮询：单条查询同时取角色列表/在线/当前角色，每 poll_sec 一次；
     // 连接被别的作业占着就跳过这一轮，不抢（抢会把包串了）
-    if (g.db_ok && !db_busy() && now_ms() - last_poll > (u64)g.cfg.poll_sec * 1000) {
+    if (g.db_ok && !app_db_busy() && now_ms() - last_poll > (u64)g.cfg.poll_sec * 1000) {
         last_poll = now_ms();
         job_start(&g.job_poll, w_poll, NULL);
     }

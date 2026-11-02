@@ -74,6 +74,7 @@ typedef struct {
     CharData data;         // 同上，当前角色的容器/标量快照
     u32    data_ver;       // 快照换代（载入 / 重载 / 写后校验不符），页面据此重填
     u32    chars_ver;      // 左栏列表重排
+    u32    ban_chars_ver;  // 封停页角色清单换代（下拉要跟着重建）
     u32    act_ver;        // 每次写操作完成自增
     u32    lists_ready;    // 各列表页是否已取过数据（位掩码 L_*）
 
@@ -126,9 +127,16 @@ enum { L_MAILS = 1, L_PETS = 2, L_AVAS = 4, L_QUESTS = 8, L_BANS = 16, L_EVENTS 
 extern App g;
 
 void app_init(void);
+// 贴图包自测（--npk-test）：建索引并真解前 max_ents 条的前 3 帧，返回解出的图标数
+int  app_npk_decode_all(const char *dir, int max_ents);
+// 内部自检（--selftest）：不依赖窗口与数据库，返回非 0 表示有失败项
+int  selftest_run(void);
 void app_tick(void);
 void app_shutdown(void);
 void app_log(const char *fmt, ...);
+void app_warn(const char *fmt, ...);       // 行首加「警告」
+void app_err(const char *fmt, ...);        // 行首加「错误」
+void app_log_session(void);                // 每次连接换一个日志会话号
 void app_log_block(const char *s);        // 多行文本按行写日志
 void app_status(const char *fmt, ...);
 int  app_confirm(const char *text);
@@ -139,10 +147,14 @@ int  job_start(Job *j, int (*fn)(void *ctx, Err err), void *ctx);
 int  job_poll(Job *j, Err err);      // 返回 1 表示本轮刚结束（成功或失败）
 int  job_stop(Job *j);               // 1 = 线程真的停了；0 = 30 秒没等到，还在跑
 int  job_running(const Job *j);
+int  job_stop_by(Job *j, u64 deadline);  // 共用截止时刻的停机（整批一起等）
+int  app_db_busy(void);                  // 有作业占着那条 MySQL 连接
 
 // 会话边界（断开 / 重连）：丢掉所有还没开始的动作，并让页面复位自己的队列与闸。
 // 页面在自己的 create 里调 app_on_drop() 注册，新增页面不用回头改 app.c。
 void app_on_drop(void (*fn)(void));
+// 连接被服务端掐断时，按钮的可用状态要跟着变（main.c 实现）
+void app_ui_refresh_buttons(void);
 void app_drop_queued(void);
 
 // 日志：先攒在内存里，1s 或 8KB 落一次盘（按天分文件）
@@ -154,10 +166,18 @@ void app_clear_config_and_exit(void);             // 标记清除配置并退出
 
 // 连接 / 角色 / 数据
 void app_connect(void);
+// 取消待进行的自动重连（用户手动连接/断开时调）
+void app_reconnect_cancel(void);
 void app_disconnect(void);
 void app_list_chars(const char *kw);
 void app_select_char(int idx);
 void app_reload(void);
+// 载入状态由 app_load.c 维护，app_tick 只调这几个入口
+void app_load_pending(void);             // 补上载入期间点过的角色
+void app_load_poll(void);                // 载入作业的结果（快照换代 / 失败清暂存）
+void app_load_kick_if_wanted(void);      // 连接空闲后补发挂起的载入
+void app_load_drop(void);                // 断开/换库：作废挂起意图与暂存区
+int  app_load_take_reload(void);         // 取走「写失败后要重载」的请求
 void app_reload_later(void);       // 任务线程里用：让下一次 app_tick 重读当前角色
 int  app_sync_char(void);          // 写后校验（job 线程）：结果暂存，返回 1=与缓存一致
 void app_sync_apply(void);         // UI 线程：把暂存的校验结果搬到 g.*（job_poll 后调）
@@ -177,7 +197,10 @@ const char *app_page_field(int page);
 
 // 即时落库：改完立刻生效到内存，并在 200ms 后合并写库（不弹确认、不留草稿）
 void app_item_set(int page, int slot, const Item *it);
-void app_pending_page(int page);                 // 整页写回（清空整页等）
+// 这个容器的这一格能不能放该类型：背包按区段，穿戴/宠物各有允许类型
+int  app_item_slot_ok(int page, int slot, u8 type);
+int  app_pending_page(int page);                 // 整页写回（清空整页等）；0 = 被拒
+                                                 // （在线/未载入）：调用方要把快照重读回来
 int  app_page_busy(int page);                    // 该页有未完成/进行中的写入
 void app_flush_pending(void);                    // 立刻把攒着的写操作发出去（关窗/切角色前）
 void app_save_draft(void);                       // 同上，旧名字，别处还在调
@@ -205,7 +228,15 @@ void app_money_text(u64 v, char *buf, int cap);
 // 异步写操作：忙时排队（复制 ctx），空闲后自动执行
 int  app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz);
 int  app_act_idle(void);                 // 连接空闲且没有排队动作：能直接发
+void app_act_clear_queue(void);          // 丢掉还没开始的动作（会话边界）
+int  app_act_take_queued(char *what, int cap, ActFn *fn, void **ctx, int *ctxsz);
+int  app_act_run(const char *what, ActFn fn, void *ctx, int ctxsz);
+void app_job_pct_reset(void);            // 长任务进度清零
+// 取消正在跑的长任务（备份/还原/全服扫描）；没有可取消的任务时只提示
+void app_cancel_current(void);
 #define app_act(what, fn, ctx) app_act_n((what), (fn), (void *)(ctx), (int)sizeof(*(ctx)))
+// 无上下文的动作：不要用 app_act(..., NULL)，那会对 void 取 sizeof
+#define app_act_null(what, fn) app_act_n((what), (fn), NULL, 0)
 
 // 泡点：开关 / 间隔秒 / 目标人群 / 多奖励（赠送点券·D点·D币·物品）/ 生效时长。
 // 改完立即写回 settings.ini，计时从改的那一刻重来。
@@ -214,6 +245,7 @@ int  app_act_idle(void);                 // 连接空闲且没有排队动作：
 void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dcoin,
                       u32 item, int itemnum, u32 tno, int hours);
 void app_bubble_status(char *out, int cap);   // 一行人话，给 GM 页底部标签用
+void app_bubble_tick(void);                   // 每个 UI tick 调一次：到点结算
 void app_bubble_export(void);                // 把泡点结算记录导出为 txt
 
 // 最近计划 / 结算流水（最多 20 条，最新的在第 0 条）。
@@ -230,6 +262,9 @@ const BubblePlan *app_bubble_plan_at(int i);   // i=0 是最新一条
 int  app_bubble_plan_ver(void);                // 每次增减都 +1，页面据此决定要不要重填
 
 // 发放
+// 一次发送的队列上限：界面上所有「加入队列」的批量入口也用它，免得攒出
+// 发不出去的队列
+#define APP_GRANT_MAX 256
 void app_grant_add(u32 id, u32 num);           // num = 这次要几个，0 当 1
 // 批量入队：不刷状态栏。队列里已有的把数量取大（不重复加行）。
 // 返回 1 = 新增，2 = 沿用旧行、数量补大，0 = 原样没动。
@@ -240,6 +275,8 @@ int  app_grant_send(int by_mail);
 void app_db_backup(const char *path);
 void app_db_backup_char(void);          // 只备份当前选中角色
 void app_db_restore(const char *path);
+// 还原前自动整库备份，再执行 SQL；GUI 与命令行共用这一条路径
+int  app_restore_file(const char *path, int *stmts, Err err);
 
 // 角色克隆（后台执行，单个事务，失败整体回滚）
 void app_clone_char(void);

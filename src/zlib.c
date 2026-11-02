@@ -18,6 +18,7 @@ typedef struct {
     u32 bitbuf;
     int bitcnt;
     Buf *out;
+    size_t max_out;     // 输出上限：压缩炸弹不能把进程内存吃满
     int err;
 } Inf;
 
@@ -34,6 +35,7 @@ static int bits(Inf *s, int need) {
 }
 
 static void put(Inf *s, u8 c) {
+    if (s->out->n >= s->max_out) { s->err = -2; return; }
     if (s->out->n + 1 > s->out->cap) buf_reserve(s->out, s->out->n + 1);
     s->out->p[s->out->n++] = c;
 }
@@ -115,6 +117,7 @@ static int stored(Inf *s) {
     s->incnt += 4;
     if (len != (~nlen & 0xffff)) return -1;
     if (s->incnt + (size_t)len > s->inlen) return -1;
+    if (s->out->n + (size_t)len > s->max_out) return -1;    // stored 块一次拷完，也要卡上限
     buf_put(s->out, s->in + s->incnt, (size_t)len);
     s->incnt += (size_t)len;
     return 0;
@@ -183,7 +186,7 @@ static int dynamic(Inf *s) {
     return codes(s, &lencode, &distcode);
 }
 
-int zlib_unpack(const void *src, size_t n, Buf *out) {
+int zlib_unpack(const void *src, size_t n, Buf *out, size_t max_out) {
     const u8 *p = (const u8 *)src;
     if (n < 6) return 0;
     int cmf = p[0], flg = p[1];
@@ -201,6 +204,7 @@ int zlib_unpack(const void *src, size_t n, Buf *out) {
     s.in = p + off;
     s.inlen = n - off - 4;                                 // 去掉 adler32
     s.out = out;
+    s.max_out = max_out ? max_out : (size_t)-1;
     out->n = 0;
 
     int last;
@@ -211,6 +215,14 @@ int zlib_unpack(const void *src, size_t n, Buf *out) {
         int r = type == 0 ? stored(&s) : type == 1 ? fixed(&s) : type == 2 ? dynamic(&s) : -1;
         if (r) return 0;
     } while (!last);
+
+    // 尾部 adler32 是坏数据的最后一道闸：stored 块没有编码冗余，改一个字节
+    // 照样能解出等长内容，只有校验和能发现问题。
+    u32 want = rd32be(p + n - 4);
+    if (adler32_calc(out->p, out->n) != want) {
+        out->n = 0;
+        return 0;
+    }
     return 1;
 }
 

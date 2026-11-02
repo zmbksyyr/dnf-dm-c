@@ -34,7 +34,7 @@ static void npk_list_files(Npk *p, const char *dir) {
         char path[MAX_PATH];
         utf8(fd.cFileName, path, MAX_PATH);
         char *full = (char *)xalloc(strlen(dir) + strlen(path) + 2);
-        sprintf(full, "%s\\%s", dir, path);
+        snprintf(full, strlen(dir) + strlen(path) + 2, "%s\\%s", dir, path);
         p->files = (char **)xrealloc(p->files, sizeof(char *) * (size_t)(p->nfiles + 1));
         p->files[p->nfiles++] = full;
     } while (FindNextFileW(h, &fd));
@@ -197,7 +197,7 @@ static const u8 *img_frame(const u8 *img, size_t n, int want, u32 *plen, u32 *pt
     for (int hop = 0; hop < 8; hop++) {
         if (cur < 0 || cur >= (int)cnt) return NULL;
         size_t o = 0;
-        u32 skip = 0;
+        size_t skip = 0;
         for (int i = 0; i < (int)cnt; i++) {
             // cnt 由文件给出，索引区未必真装得下这么多条目 —— 每一项都要先
             // 确认读得完整，否则畸形包会把我们带出缓冲区
@@ -211,7 +211,9 @@ static const u8 *img_frame(const u8 *img, size_t n, int want, u32 *plen, u32 *pt
             if (o + 36 > (size_t)idx_size) return NULL;
             u32 l = rd32(idx + o + 16);
             if (i == cur) {
-                if (skip + l > n - (size_t)(data - img)) return NULL;
+                // 减法判界：skip+l 用 32 位相加会回绕，绕过检查
+                size_t avail = n - (size_t)(data - img);
+                if (skip > avail || (size_t)l > avail - skip) return NULL;
                 u32 w = rd32(idx + o + 8), h = rd32(idx + o + 12);
                 if (w == 0 || w > 4096 || h == 0 || h > 4096) return NULL;
                 *plen = l; *ptype = t; *pcomp = rd32(idx + o + 4); *pw = w; *ph = h;
@@ -266,7 +268,9 @@ HBITMAP npk_icon(Npk *p, const char *img, int frame, int *w, int *h) {
     Buf unc = {0};
     const u8 *px = raw;
     if (comp == 6) {
-        if (!zlib_unpack(raw, len, &unc)) { buf_free(&b); return NULL; }
+        // 尺寸在解压前就已知：按 w*h*4 卡上限，压缩炸弹到不了分配那一步
+        size_t need = (size_t)wpx * (size_t)hpx * 4 + 64;
+        if (!zlib_unpack(raw, len, &unc, need)) { buf_free(&b); return NULL; }
         px = unc.p;
     } else if (comp != 5) {
         buf_free(&b);

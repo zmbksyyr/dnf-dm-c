@@ -2,6 +2,14 @@
 #include "db_priv.h"
 #include "db.h"
 
+// ---------------- 长任务取消 / 进度 ----------------
+static volatile LONG s_cancel;
+DbProgress db_progress_cb;
+
+void db_cancel_request(void) { InterlockedExchange(&s_cancel, 1); }
+void db_cancel_clear(void) { InterlockedExchange(&s_cancel, 0); }
+int db_cancelled(void) { return s_cancel != 0; }
+
 // ---------------- 基础设施 ----------------
 // 影响行数顺手带出来：写操作靠它区分「改了」和「一条都没碰到」。
 // MyResult 里本来就有 affected，原来 run() 直接扔了。
@@ -802,9 +810,8 @@ int db_read_state(Db *d, const Charac *c, CharData *out, Err err) {
 }
 
 // ---------------- 写前快照（会话内一份，可还原） ----------------
-// 以前每写一个容器就落一个 .bin，一次会话能堆出几百个文件。
-// 现在只记「本会话第一次写之前」的原值，攒够时间或退出时写成一份 undo-<时间>.sql，
-// 直接用「还原备份」就能整体回滚。
+// 只记「本会话第一次写之前」的原值，攒够时间或退出时写成一份 undo-<时间>.sql，
+// 用「还原备份」即可整体回滚。
 typedef struct {
     char table[48];
     char field[24];
@@ -899,26 +906,39 @@ int db_save_blob(Db *d, const Charac *c, const char *table, const char *field,
         undo_note(table, field, key, my_text(&r, 0, 0), (size_t)my_len(&r, 0, 0));
     my_free(&r);
 
-    // 2) 用十六进制字面量写入，绕开一切字符集/转义
+    // 2) 用十六进制字面量写入，绕开一切字符集/转义。写和校验放在一个事务里：
+    //    列比数据短时 MySQL 会静默截断，校验不过必须整条撤回，不能留下半截 blob。
+    if (!db_tx_begin(d, err)) return 0;
     str_clear(&s);
     str_catf(&s, "UPDATE %s SET %s=0x", table, field);
     hex_str(raw, n, &s);
     str_catf(&s, " WHERE %s=%u", key_col, key);
     int ok = run(d, &s);
     str_free(&s);
-    if (!ok) { snprintf(err, ERRBUF, "%s", d->err); return 0; }
+    if (!ok) {
+        snprintf(err, ERRBUF, "%s", d->err);
+        db_tx_rollback(d);
+        return 0;
+    }
 
     // 3) 只查长度做校验：整块回读一遍纯属浪费
     str_catf(&s, "SELECT LENGTH(%s) FROM %s WHERE %s=%u", field, table, key_col, key);
-    if (!select1(d, &s, &r)) { snprintf(err, ERRBUF, "%s", d->err); str_free(&s); return 0; }
+    if (!select1(d, &s, &r)) {
+        snprintf(err, ERRBUF, "%s", d->err);
+        str_free(&s);
+        db_tx_rollback(d);
+        return 0;
+    }
     u64 got = my_u64(&r, 0, 0, 0);
     my_free(&r);
     str_free(&s);
     if (got != (u64)n) {
-        snprintf(err, ERRBUF, "回读校验失败（写入 %llu 字节，库里 %llu）", (unsigned long long)n,
-                 (unsigned long long)got);
+        snprintf(err, ERRBUF, "回读校验失败（写入 %llu 字节，库里 %llu），已回滚",
+                 (unsigned long long)n, (unsigned long long)got);
+        db_tx_rollback(d);
         return 0;
     }
+    if (!db_tx_commit(d, err)) return 0;
     db_undo_flush(0);
     return 1;
 }
@@ -1117,6 +1137,8 @@ int db_bubble_tick(Db *d, const BubbleCfg *cfg, u32 *paid, Err err) {
         str_catf(&mids, "SELECT %u AS m_id", cfg->tno);
     }
 
+    // 四段奖励同生共死：只发出一半（比如点券已加、D币失败）比整体不发更糟
+    if (!db_tx_begin(d, err)) { str_free(&chs); str_free(&mids); return 0; }
     int ok = 1;
     u64 aff = 0, paid_rows = 0;
     // 赠送点券（角色级，inventory.coin）
@@ -1163,8 +1185,13 @@ int db_bubble_tick(Db *d, const BubbleCfg *cfg, u32 *paid, Err err) {
         }
     }
     str_free(&chs); str_free(&mids);
+    if (!ok) {
+        db_tx_rollback(d);
+        return 0;
+    }
+    if (!db_tx_commit(d, err)) return 0;
     if (paid) *paid = (u32)paid_rows;
-    return ok;
+    return 1;
 }
 
 // ---------------- GM 一键 ----------------

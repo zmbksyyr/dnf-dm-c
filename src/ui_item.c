@@ -7,6 +7,7 @@
 // ================================================================ 物品编辑弹窗
 typedef struct {
     Item it;
+    int  page, slot;        // 编辑的是哪个容器的哪一格：类型要按区段校验
     HWND id, num, enh, forge, dur, seal_cnt, seal_chk, type, name;
     HWND inc_type, inc_val, orb, ow;
     HWND sid[4], slv[4], snm[4];
@@ -105,6 +106,11 @@ static LRESULT edit_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
                 item_set_seal_lv(&it, i, (u16)ui_int(e->slv[i]));
             }
             if (item_empty(&it)) memset(&it, 0, sizeof(it));
+            // 类型与所在区段不符时不要落库：服务端会把整个容器判非法
+            if (!app_item_slot_ok(e->page, e->slot, item_type(&it))) {
+                app_info("这一格放不下该类型的物品：背包按区段存放，穿戴/宠物各有允许的类型。");
+                return 0;
+            }
             e->it = it;
             ui_dlg_end(1);
             return 0;
@@ -121,10 +127,12 @@ static LRESULT edit_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
     return -1;
 }
 
-static int item_edit(HWND owner, const Item *in, Item *out) {
+static int item_edit(HWND owner, int page, int slot, const Item *in, Item *out) {
     EditCtx e;
     memset(&e, 0, sizeof(e));
     e.it = *in;
+    e.page = page;
+    e.slot = slot;
 
     HWND d = ui_dlg_new(owner, "编辑物品", 470, 430, edit_proc, &e);
     if (!d) return 0;
@@ -353,6 +361,11 @@ static void item_bad_clear(void) {
     Item z;
     memset(&z, 0, sizeof(z));
     u32 pages = 0;
+    // 先确认能写，再动内存快照：否则界面显示已清空、库里一字未改
+    if (!item_writable() || g.cur.online) {
+        vec_free(&rows);
+        return;
+    }
     for (int i = 0; i < rows.n; i++) {
         BadRow *r = VEC_AT(&rows, BadRow, i);
         Blob *b = app_page_blob(r->sub);
@@ -362,8 +375,13 @@ static void item_bad_clear(void) {
     int n = rows.n;
     vec_free(&rows);
     // 一次扫描可能跨多个容器：逐页排入写队列，200ms 后的合并写会一起落盘
+    int refused = 0;
     for (int sub = 0; sub < 6; sub++)
-        if (pages & (1u << sub)) app_pending_page(sub);
+        if ((pages & (1u << sub)) && !app_pending_page(sub)) refused = 1;
+    if (refused) {
+        app_reload();               // 快照已改脏，从库里重读覆盖
+        return;
+    }
     item_reload(NULL);
     app_status("已清空 %d 处错误物品 · 正在写库", n);
 }
@@ -429,21 +447,23 @@ static void item_reload(Page *p) {
 
 static void item_edit_sel(void) {
     int sub = ui_combo_sel(s_sub);
-    Blob *b = app_page_blob(sub < 0 ? 0 : sub);
+    if (sub < 0) sub = 0;
+    Blob *b = app_page_blob(sub);
     int row = ui_row_sel(s_list);
     if (!b || !b->ok || row < 0) return;
     int slot = (int)ui_row_data(s_list, row);
     if (slot < 0 || slot >= b->n) return;
     if (!item_writable()) return;        // 放在 item_edit 弹框之前
     Item out;
-    if (!item_edit(g_main, &b->items[slot], &out)) return;
+    if (!item_edit(g_main, sub, slot, &b->items[slot], &out)) return;
     app_item_set(sub, slot, &out);        // 确定即写库，不再走「保存改动」
     item_reload(NULL);
 }
 
 static void item_clear_sel(void) {
     int sub = ui_combo_sel(s_sub);
-    Blob *b = app_page_blob(sub < 0 ? 0 : sub);
+    if (sub < 0) sub = 0;
+    Blob *b = app_page_blob(sub);
     int row = ui_row_sel(s_list);
     if (!b || !b->ok || row < 0) return;
     int slot = (int)ui_row_data(s_list, row);
@@ -458,7 +478,8 @@ static void item_clear_sel(void) {
 
 static void item_clear_all(void) {
     int sub = ui_combo_sel(s_sub);
-    Blob *b = app_page_blob(sub < 0 ? 0 : sub);
+    if (sub < 0) sub = 0;               // 没选中子页时按背包处理，别拿 -1 去索引名字表
+    Blob *b = app_page_blob(sub);
     if (!b || !b->ok) return;
     if (!item_writable()) return;
     if (!app_confirm(fmt_new("把「%s」全部 %d 格清空？立即写库。", kSubName[sub], b->n)))
@@ -466,7 +487,10 @@ static void item_clear_all(void) {
     Item z;
     memset(&z, 0, sizeof(z));
     for (int i = 0; i < b->n; i++) b->items[i] = z;
-    app_pending_page(sub);
+    if (!app_pending_page(sub)) {
+        app_reload();               // 写不进去：快照已被改脏，从库里重读
+        return;
+    }
     item_reload(NULL);
 }
 

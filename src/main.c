@@ -4,14 +4,55 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <dbghelp.h>
 
 HWND g_main;
+
+// 未捕获异常写一份转储：崩了至少知道崩在哪，不至于只有一个「程序已停止工作」
+static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep) {
+    char dir[MAX_PATH], file[MAX_PATH], ts[32], name[64];
+    app_config_dir(dir, sizeof(dir));
+    path_join(dir, sizeof(dir), dir, "crash");
+    dir_make(dir);
+    now_str(ts, sizeof(ts), "%Y%m%d-%H%M%S");
+    snprintf(name, sizeof(name), "crash-%s.dmp", ts);
+    path_join(file, sizeof(file), dir, name);
+
+    HANDLE h = CreateFileA(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mi;
+        mi.ThreadId = GetCurrentThreadId();
+        mi.ExceptionPointers = ep;
+        mi.ClientPointers = FALSE;
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), h,
+                          MiniDumpNormal, &mi, NULL, NULL);
+        CloseHandle(h);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+// 启动时看一眼上次有没有留下转储
+static void crash_check(void) {
+    char dir[MAX_PATH], pat[MAX_PATH];
+    app_config_dir(dir, sizeof(dir));
+    path_join(dir, sizeof(dir), dir, "crash");
+    path_join(pat, sizeof(pat), dir, "*.dmp");
+    WCHAR wpat[MAX_PATH];
+    utf16(pat, wpat, MAX_PATH);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(wpat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    FindClose(h);
+    app_log("上次运行异常退出，转储在 %s", dir);
+    app_status("上次异常退出 · 转储见 config\\crash");
+}
 
 static HINSTANCE g_hinst;
 
 static HWND g_tab, g_status;
 static HWND g_lhost, g_host, g_lport, g_port, g_luser, g_user, g_lpwd, g_pwd;
-static HWND g_conn, g_disc;
+static HWND g_conn, g_disc, g_cancel;
 static HWND g_lkw, g_kw, g_kwgo, g_kwclr, g_chlist, g_chinfo, g_online;
 static HWND g_lpvf, g_pvf, g_pvfbtn;
 static HWND g_limg, g_img, g_imgbtn;      // ImagePacks2 目录（悬浮卡图标来源）
@@ -21,12 +62,10 @@ static HWND g_limg, g_img, g_imgbtn;      // ImagePacks2 目录（悬浮卡图�
 // 框是可编辑的下拉，不在预设里直接敲也行，敲过的照样存进 settings.ini。
 static const char *const kHostList[] = {"127.0.0.1", "192.168.200.131"};
 
-// 密码预置：常见私服端默认的两套口令。下拉框是「可编辑」的（CBS_DROPDOWN），
-// 不在预置里就直接敲，不会被限制成只能选。
-// 注意：这里是**明文**，界面不掩码、settings.ini 不加密，这是有意为之，不是漏做。
-// 理由：它是本机连库用的口令，藏成圆点之后看不见、改不动、连不上时也核对不了；
-// 而真要防「有人看到这台机器」，掩码和本地加密都挡不住（进程内存、ini 文件都在同一台机）。
-// 见 tools/v_pwd.py —— 那条用例把这个约定钉住了，免得以后有人"顺手"改成密码框。
+// 密码预置：常见私服端默认的两套口令。下拉框可编辑（CBS_DROPDOWN），
+// 不在预置里直接敲，不限制成只能选。
+// 明文是有意为之：本机连库用的口令，藏成圆点后看不见、改不动、连不上时也核对不了。
+// 「ui.pwd」用例把这个约定钉住了，免得有人顺手改成密码框。
 static const char *const kPwdList[] = {"uu5!^%jg", "123456"};
 
 // 把配置里的地址放回下拉框：命中预设就选中，不命中就当成手填的文本。
@@ -163,6 +202,7 @@ static void card_build(HWND parent) {
 }
 
 // 左栏：两张卡片，和右侧同款（细线 + 粗体标题），底部与右侧组框齐平
+static int s_kw;        // 角色卡标签列宽：按当前 DPI 量一次，换 DPI 时清零重算
 static void left_layout(int x, int y0, int w, int h) {
     int rowh = ui_scale(21), crh = ui_scale(20);
     int padx = ui_scale(12);
@@ -194,9 +234,7 @@ static void left_layout(int x, int y0, int w, int h) {
     }
 
     ui_place(g_grp_card, x, g2y, w, g2h);
-    // 标签列宽按最长的那条量，不写死像素：写死 56 时「装备 / 仓库」的「库」、
-    // 72 时「SP / TP」后面那个值又换成被裁，换字号/DPI 还得再调一次。
-    static int s_kw;
+    // 标签列宽按最长的那条量，不写死像素：字号/DPI 变了要跟着变
     if (s_kw <= 0) {
         for (int i = 0; i < CARD_N; i++) {
             int tw = ui_text_w(kCardKey[i]);
@@ -242,12 +280,15 @@ static void status_refresh(void) {
 static void buttons_refresh(void) {
     ui_enable(g_conn, !g.db_ok && !job_running(&g.job_conn));
     ui_enable(g_disc, g.db_ok);
+    ui_enable(g_cancel, job_running(&g.job_act));   // 有长任务才可点
     ui_enable(g_lkw, g.db_ok);
     ui_enable(g_kw, g.db_ok);
     ui_enable(g_kwgo, g.db_ok);
     ui_enable(g_kwclr, g.db_ok);
     ui_enable(g_chlist, g.db_ok && g.chars.n > 0);
 }
+
+void app_ui_refresh_buttons(void) { buttons_refresh(); }
 
 static void do_layout(void);
 
@@ -282,9 +323,8 @@ static int db_restore_main(void) {
     }
     Err err;
     int n = 0;
-    int ok = db_restore_sql(&g.db, path, &n, err);
-    if (ok) app_log("还原数据库 · 执行 %d 条语句 ← %s", n, path);
-    else app_log("还原失败（第 %d 条起）：%s", n + 1, err);
+    int ok = app_restore_file(path, &n, err);
+    if (!ok) app_err("还原失败：%s", err);
     app_shutdown();
     return ok ? 0 : 1;
 }
@@ -311,7 +351,7 @@ static int db_dump_main(void) {
     u64 nr = 0;
     int ok = db_dump_sql(&g.db, path, &nt, &nr, err);
     if (ok) app_log("备份数据库 · %d 张表 / %llu 行 → %s", nt, (unsigned long long)nr, path);
-    else app_log("备份失败：%s", err);
+    else app_err("备份失败：%s", err);
     app_shutdown();
     return ok ? 0 : 1;
 }
@@ -327,7 +367,7 @@ static int db_test_main(void) {
     Vec v = {0};
     vec_init(&v, sizeof(Charac));
     int ok = db_poll_chars(&g.db, &v, 500, err);
-    if (!ok) app_log("db-test 轮询失败：%s", err);
+    if (!ok) app_err("db-test 轮询失败：%s", err);
     int online = 0;
     for (int i = 0; i < v.n; i++)
         if (VEC_AT(&v, Charac, i)->online) online++;
@@ -337,7 +377,7 @@ static int db_test_main(void) {
         Charac c = *(Charac *)vec_at(&v, 0);
         CharData d = {0};
         int ok2 = db_load_data(&g.db, &c, &d, err);
-        if (!ok2) app_log("db-test 载入失败：%s", err);
+        if (!ok2) app_err("db-test 载入失败：%s", err);
         else
             app_log("db-test 载入 %s(%u)：金币 %llu · 复活币 %llu · 点券 %llu+%llu · 背包 %d 格 · "
                     "仓库 %d 格 · SP %d · PVP %d/%d/%d",
@@ -356,7 +396,7 @@ static int db_test_main(void) {
                     (unsigned long long)s2.cera_point, s2.cargo_cap, s2.sp, s2.sp2, s2.tp, s2.tp2,
                     s2.qp, s2.pvp_grade, s2.pvp_win, s2.pvp_point);
         else
-            app_log("db-test 状态回读失败：%s", err);
+            app_err("db-test 状态回读失败：%s", err);
         ok = ok && ok2;
     }
     vec_free(&v);
@@ -619,6 +659,7 @@ static void do_layout(void) {
     ui_add(&r, g_pwd, ui_scale(84));
     ui_add(&r, g_conn, ui_scale(60));
     ui_add(&r, g_disc, ui_scale(60));
+    ui_add(&r, g_cancel, ui_scale(60));
 
     // 右上角不再有「保存/放弃」：各页改完即写库，状态见状态栏右段
 
@@ -769,6 +810,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                    "预置 uu5!^%jg 与 123456 可直接选，也可以自己填");
             g_conn = ui_button(h, "连接", IDC_CONN);
             g_disc = ui_button(h, "断开", IDC_DISC);
+            g_cancel = ui_button(h, "取消", IDC_CANCEL);
+            ui_tip(h, g_cancel, "取消正在跑的备份 / 还原 / 全服扫描（还原会整体回滚）");
 
             g_lkw = ui_label(h, "搜索", 0);
             g_kw = ui_edit(h, "", IDC_KW, 0);
@@ -822,8 +865,19 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         case WM_DPICHANGED: {
             int dpi = HIWORD(wp);
             ui_set_dpi(dpi);
+            s_kw = 0;              // 标签列宽按新缩放重量
+            // 窗口尺寸也按新 DPI 重算：s_win_w/s_win_h 同时给 WM_GETMINMAXINFO 用，
+            // 留着旧值会把窗口钳在旧像素尺寸上
+            int cw = ui_scale(1240), ch = ui_scale(800);
+            int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+            if (cw > sw * 96 / 100) cw = sw * 96 / 100;
+            if (ch > sh * 92 / 100) ch = sh * 92 / 100;
+            RECT rc = {0, 0, cw, ch};
+            AdjustWindowRectEx(&rc, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), FALSE, 0);
+            s_win_w = rc.right - rc.left;
+            s_win_h = rc.bottom - rc.top;
             RECT *r = (RECT *)lp;
-            SetWindowPos(h, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top,
+            SetWindowPos(h, NULL, r->left, r->top, s_win_w, s_win_h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
             do_layout();
             return 0;
@@ -875,6 +929,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int id = LOWORD(wp), code = HIWORD(wp);
             if (id == IDC_CONN) { on_connect(); return 0; }
             if (id == IDC_DISC) { app_disconnect(); buttons_refresh(); return 0; }
+            if (id == IDC_CANCEL) { app_cancel_current(); return 0; }
             if (id == IDC_PVFS) { on_pick_pvf(); return 0; }
             if (id == IDC_IMGS) { on_pick_img(); return 0; }
             if (id == IDC_IMGB && code == EN_KILLFOCUS) {   // 手敲路径，失焦生效
@@ -954,6 +1009,23 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     (void)prev;
     (void)cmd;
     g_hinst = inst;
+    SetUnhandledExceptionFilter(crash_filter);   // 崩了先把现场写下来
+    // 自测模式：跑一遍纯函数自检后退出，不建窗口、不连库
+    if (wcsstr(GetCommandLineW(), L"--selftest")) return selftest_run();
+    // 贴图包自测：--npk-test=<目录>，把索引里前若干条真解一遍（模糊测试用）
+    if (wcsstr(GetCommandLineW(), L"--npk-test=")) {
+        const WCHAR *at = wcsstr(GetCommandLineW(), L"--npk-test=");
+        char dir[MAX_PATH];
+        utf8(at + 11, dir, sizeof(dir));
+        str_trim(dir);
+        app_init();
+        int n = app_npk_decode_all(dir, 300);
+        app_log("npk-test：%s 解出 %d 个图标", dir, n);
+        app_log_flush();                 // 立刻退出，缓冲区里的日志要主动落盘
+        return n < 0 ? 2 : 0;
+    }
+    // 自测用：置这个环境变量启动即崩一次，验证转储链路本身能跑通
+    if (getenv("DNF_GM_CRASH_TEST")) RaiseException(0xE0000001, 0, 0, NULL);
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
@@ -968,6 +1040,20 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     if (wcsstr(GetCommandLineW(), L"--grab-probe")) return grab_probe_main();
     if (wcsstr(GetCommandLineW(), L"--db-dump")) return db_dump_main();
     if (wcsstr(GetCommandLineW(), L"--db-restore")) return db_restore_main();
+
+    // 单实例提醒：两个窗口同时改同一个号，写库会互相覆盖（且没人能看出是哪边写的）。
+    // 命令行模式（--db-dump/--db-restore 等）不受限，脚本要能边开界面边跑。
+    HANDLE once = CreateMutexW(NULL, TRUE, L"Local\\DNF_GM_SingleInstance");
+    if (once && GetLastError() == ERROR_ALREADY_EXISTS) {
+        int yes = MessageBoxW(NULL,
+                              L"已经有一个 DNF GM 工具在运行。\n\n"
+                              L"两个窗口同时写库可能互相覆盖，确定还要再开一个吗？",
+                              L"DNF GM 工具", MB_YESNO | MB_ICONWARNING) == IDYES;
+        if (!yes) {
+            CloseHandle(once);
+            return 0;
+        }
+    }
 
     WNDCLASSEXW wc;
     memset(&wc, 0, sizeof(wc));
@@ -1013,6 +1099,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     buttons_refresh();
     chars_fill();
     status_refresh();
+    crash_check();                     // 上次异常退出的话给一句提示
     SetTimer(g_main, 1, 100, NULL);
 
     MSG msg;

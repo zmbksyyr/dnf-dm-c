@@ -963,17 +963,20 @@ void ui_pages_lock(void) {
 }
 
 // ---------------- 模态弹窗 ----------------
-typedef struct {
+typedef struct DlgBox {
     UiDlgProc proc;
     void *ctx;
+    struct DlgBox *prev;    // 对话框可以嵌套：状态按「层」走，不用全局单例
+    int running, ok;
 } DlgBox;
 
-static int g_dlg_running, g_dlg_ok;
+static DlgBox *g_dlg_top;   // 当前最内层还在跑的对话框
 static int g_dlg_reg;
 
 void ui_dlg_end(int ok) {
-    g_dlg_ok = ok;
-    g_dlg_running = 0;
+    if (!g_dlg_top) return;
+    g_dlg_top->ok = ok;
+    g_dlg_top->running = 0;
 }
 
 static LRESULT CALLBACK dlg_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
@@ -1043,30 +1046,34 @@ HWND ui_dlg_new(HWND owner, const char *title, int cw, int ch, UiDlgProc proc, v
 
 int ui_dlg_run(HWND dlg, HWND owner) {
     if (!dlg) return 0;
-    EnableWindow(owner ? owner : g_main, FALSE);
+    DlgBox *d = (DlgBox *)GetWindowLongPtrW(dlg, GWLP_USERDATA);
+    if (!d) return 0;
+    HWND parent = owner ? owner : g_main;
+    EnableWindow(parent, FALSE);
     ShowWindow(dlg, SW_SHOW);
     UpdateWindow(dlg);
-    g_dlg_running = 1;
-    g_dlg_ok = 0;
+    // 压栈：内层结束时只恢复外层，不会把外层的循环一起停掉
+    d->running = 1;
+    d->ok = 0;
+    d->prev = g_dlg_top;
+    g_dlg_top = d;
     MSG m;
-    while (g_dlg_running) {
+    while (d->running) {
         if (GetMessageW(&m, NULL, 0, 0) <= 0) break;
         if (!IsDialogMessageW(dlg, &m)) {
             TranslateMessage(&m);
             DispatchMessageW(&m);
         }
     }
-    EnableWindow(owner ? owner : g_main, TRUE);
-    if (owner ? owner : g_main) SetActiveWindow(owner ? owner : g_main);
-    DlgBox *d = (DlgBox *)GetWindowLongPtrW(dlg, GWLP_USERDATA);
-    // 必须先 DestroyWindow 再 free(d)：DestroyWindow 是同步的，WM_DESTROY / WM_NCDESTROY
-    // 就在这一句里派发给 dlg_proc，而 dlg_proc 要靠 GWLP_USERDATA 找到 DlgBox 才能把
-    // 消息转给页面 proc。原来的顺序是「清 USERDATA → free(d) → DestroyWindow」，
-    // 页面 proc 一次 WM_DESTROY 都收不到，所有「关窗时清理」的代码全是死代码。
-    // USERDATA 随窗口一起消失，不用再单独清零。
+    g_dlg_top = d->prev;
+    EnableWindow(parent, TRUE);
+    if (parent) SetActiveWindow(parent);
+    int ok = d->ok;
+    // 顺序不能反：DestroyWindow 同步派发 WM_DESTROY，dlg_proc 要靠 USERDATA 找到
+    // DlgBox 才能转给页面 proc。先 free 会让页面收不到销毁通知。
     DestroyWindow(dlg);
     free(d);
-    return g_dlg_ok;
+    return ok;
 }
 
 

@@ -1,6 +1,5 @@
 // ui_mail：邮件列表、删除、发送邮件。
-// 发送只有一个入口：附件 ID 留空 = 纯文本邮件，填了 = 附件邮件。原先是两个按钮，
-// 但两条路径的其它字段完全一样，拆成两个只是让人每次先判断"我这次算哪种"。
+// 发送只有一个入口：附件 ID 留空 = 纯文本邮件，填了 = 附件邮件。
 // 目标可设为「当前角色 / 全服 / 在线玩家」；另有「删除全服邮件」这类清服维护。
 #include "ui.h"
 #include "act.h"
@@ -86,7 +85,7 @@ static int mail_work(void *ctx, Err err) {
             int ok = db_send_mail_bulk(&g.db, c->target == 2, "GM", c->text, c->iid,
                                        (u32)(c->inum > 0 ? c->inum : 1), c->avata, c->creature, &sent, err);
             if (ok) app_log("批量发信：成功发往 %u 个角色", sent);
-            else app_log("批量发信中断：已发送 %u 个后失败", sent);
+            else app_err("批量发信中断：已发送 %u 个后失败", sent);
             return ok;
         }
         case A_DELALLS: return db_delete_all_mails_global(&g.db, err);
@@ -114,24 +113,30 @@ static void mail_refresh_list(void) {
     ui_text(m_info, g.char_ok ? fmt_new("%s · 共 %d 封邮件", g.cur.name, g.mails.n) : "请先选择角色");
 }
 
+static int s_load_try;      // 本轮已提交过读取：失败后不再自动重试
+static u32 s_load_cno;      // 上一次读取是为哪个角色发的
+
 static void mail_reload(Page *p) {
     (void)p;
     // PVF 可能是进页面之后才加载完的，每次刷新都重问一次类型
     mail_type_sync();
     if (!g.char_ok) { ui_text(m_info, "请先选择角色"); return; }
     if (!(g.lists_ready & L_MAILS)) {
-        if (!job_running(&g.job_act)) {
-            // 与封停/活动页的列表动作同形：查询写 act.c 的 s_mails_next 暂存，
-            // 成功后由 char_work 标脏，act_apply_lists() 在 job_poll 之后搬到 g.mails
-            // 才置 L_MAILS。查询失败不标脏，重试分支下次 reload 还会再拉。
-            memset(&kc, 0, sizeof(kc));
-            kc.kind = K_MAILLIST;
-            kc.cno = g.cur.no;
-            app_act("读取邮件", char_work, &kc);
-        }
+        if (job_running(&g.job_act)) { ui_text(m_info, "正在读取邮件…"); return; }
+        // 换角色是新的读取意图，失败重试的闸要放开
+        if (s_load_cno != g.cur.no) { s_load_try = 0; s_load_cno = g.cur.no; }
+        if (s_load_try) { ui_text(m_info, "读取失败，点「刷新」重试"); return; }
+        // 查询写 act.c 的 s_mails_next 暂存，成功后由 char_work 标脏，
+        // act_apply_lists() 在 job_poll 之后搬到 g.mails 并置 L_MAILS。
+        // 失败时位不置，这一轮就不再自动重发，否则会按 tick 频率打库。
+        memset(&kc, 0, sizeof(kc));
+        kc.kind = K_MAILLIST;
+        kc.cno = g.cur.no;
+        if (app_act("读取邮件", char_work, &kc)) s_load_try = 1;
         ui_text(m_info, "正在读取邮件…");
         return;
     }
+    s_load_try = 0;
     mail_refresh_list();
 }
 
@@ -142,6 +147,8 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     if (LOWORD(wp) == M_REFRESH) {
         g.mails.n = 0;
         g.lists_ready &= ~(u32)L_MAILS;
+        s_load_try = 0;                  // 用户明确要求重试
+        s_load_cno = 0;
         mail_reload(p);
         return 0;
     }
@@ -156,9 +163,10 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             int row = ui_row_sel(m_list);
             if (row < 0 || row >= g.mails.n) return 0;
             MailRow *r = VEC_AT(&g.mails, MailRow, row);
-            if (!app_confirm(fmt_new("删除邮件 %llu？", (unsigned long long)r->postal_id))) return 0;
+            u64 pid = r->postal_id;          // 弹框期间列表可能被换掉，先取标量
+            if (!app_confirm(fmt_new("删除邮件 %llu？", (unsigned long long)pid))) return 0;
             mc.kind = A_DEL;
-            mc.postal = r->postal_id;
+            mc.postal = pid;
             if (app_act("删除邮件", mail_work, &mc)) {
                 g.mails.n = 0;
                 g.lists_ready &= ~(u32)L_MAILS;
@@ -184,6 +192,9 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         case M_SEND: {
             int target = ui_combo_sel(m_target);
             if (target < 0) target = 0;
+            // 单发以当前角色为收件人：没选角色时 g.cur 是空的（重连后也不清），
+            // 落库会写进 charac_no=0 或上一个库的编号
+            if (target == 0 && !g.char_ok) { app_info("请先在左栏选择一个角色。"); return 0; }
             char idbuf[24];
             ui_get(m_aid, idbuf, sizeof(idbuf));
             str_trim(idbuf);
@@ -199,7 +210,14 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             mc.avata = (mc.atype == AK_AVATA);
             mc.creature = (mc.atype == AK_CREATURE);
             mc.iid = id;
-            mc.inum = ui_int(m_anum) > 0 ? ui_int(m_anum) : 1;
+            int inum = ui_int(m_anum) > 0 ? ui_int(m_anum) : 1;
+            // 附件数量受堆叠上限约束：超了服务端判「物品数量错误」，收件人取不出来
+            u32 lim = id ? app_item_stack_limit(id) : 0;
+            if (lim && (u32)inum > lim) {
+                app_info(fmt_new("数量超过该物品的堆叠上限 %u。需要更多请用发放页按上限拆封。", lim));
+                return 0;
+            }
+            mc.inum = inum;
             // 附件 ID 留空 = 纯文本邮件；当前角色才有「单发文本」这条路径，
             // 全服/在线两种情况 db_send_mail_bulk 自己会按 item_id=0 发纯文本
             mc.kind = (!id && target == 0) ? A_SENDT : A_SENDI;

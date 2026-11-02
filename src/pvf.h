@@ -69,9 +69,10 @@ typedef struct {
     int      opened;
 } Pvf;
 
-int   pvf_open(Pvf *p, const char *path, PvfProg prog);   // 命中缓存秒开
+int   pvf_open(Pvf *p, const char *path, PvfProg prog, Err err);   // 命中缓存秒开
 void  pvf_close(Pvf *p);
-void  pvf_decrypt(u8 *p, size_t n, u32 crc);              // 自反：解密与加密同一变换
+void  pvf_decrypt(u8 *p, size_t n, u32 crc);              // 读：异或 + 右旋 6 位
+void  pvf_encrypt(u8 *p, size_t n, u32 crc);              // 逆变换：左旋 6 位 + 异或（自检用）
 const Leaf *pvf_find(const Pvf *p, const char *path);
 int   pvf_read(const Pvf *p, const Leaf *lf, Buf *out);
 
@@ -103,11 +104,12 @@ const char *pvf_kind_name(int kind);
 
 const char *pvf_item_name(const Pvf *p, u32 id);
 // 物品文件路径（如 equipment/character/.../xxx.equ）。没有返回空串。
-const char *pvf_item_path(const Pvf *p, u32 id, char *out, int cap);
+// 首次调用会补建「编号 → 文件」索引，因此接收可写 Pvf。
+const char *pvf_item_path(Pvf *p, u32 id, char *out, int cap);
 // [icon] 段：img 路径（如 Item/IconMaterial2.img）+ 帧号。没有返回 0。
-int  pvf_item_icon(const Pvf *p, u32 id, char *img, int cap, int *frame);
+int  pvf_item_icon(Pvf *p, u32 id, char *img, int cap, int *frame);
 // 物品详情（人类可读多行 UTF-8，供悬浮卡片用）。名字查 PVF，PVF 没有的编号返回 0。
-int  pvf_item_detail(const Pvf *p, u32 id, Str *out);
+int  pvf_item_detail(Pvf *p, u32 id, Str *out);
 int         pvf_quest_info(Pvf *p, u32 id, QuestInfo *out);
 
 // 任务材料（收集类任务要的东西）。同一件材料按「单个任务最多要多少个」记，

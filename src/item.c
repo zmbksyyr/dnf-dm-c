@@ -43,7 +43,9 @@ int blob_unpack(const void *raw, size_t n, Blob *out, Err err) {
     out->has_prefix = 1;
 
     Buf dst = {0};
-    if (!zlib_unpack((const u8 *)raw + 4, n - 4, &dst)) {
+    // 一个容器最多几百格，解压上限给到「格数上限 × 单格长度」远够；再大就是坏数据
+    const size_t cap = ITEM_SIZE * 5000;
+    if (!zlib_unpack((const u8 *)raw + 4, n - 4, &dst, cap)) {
         buf_free(&dst);
         snprintf(err, ERRBUF, "zlib 解压失败");
         return 0;

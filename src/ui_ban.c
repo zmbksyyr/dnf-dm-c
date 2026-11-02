@@ -22,6 +22,7 @@ static const int   kBanDaysVal[] = {1, 3, 7, 30, 0};
 // 用平行数组存 charac_no / mid，CB_SETITEMDATA 存索引
 static u32 s_char_no[5000], s_char_mid[5000];
 static int s_char_n;
+static u32 s_char_ver;       // 平行数组是按哪一代 g.ban_chars 建的
 
 static int s_online_only;    // 0=列表是「全服」 1=只显示在线（决定重新加载时的范围）
 static int s_filling;        // 重填列表期间屏蔽 LVN_ITEMCHANGED
@@ -45,12 +46,13 @@ static void ban_fill_chars(void) {
         s_char_n++;
     }
     if (s_char_n > 0) SendMessageW(b_char, CB_SETCURSEL, 0, 0);
+    s_char_ver = g.ban_chars_ver;    // 记下这批平行数组对应哪一代
 }
 
 // 返回当前下拉选中角色的索引（-1 = 没选）
 static int ban_sel_idx(void) {
     int idx = (int)SendMessageW(b_char, CB_GETCURSEL, 0, 0);
-    return (idx >= 0 && idx < s_char_n) ? idx : -1;
+    return (idx >= 0 && idx < s_char_n && idx < g.ban_chars.n) ? idx : -1;
 }
 
 // 该角色身上生效的封停记录。账号封禁优先：它封的是整个账号，比只封这个角色影响大，
@@ -101,27 +103,33 @@ static void ban_fill(void) {
     s_filling = 0;
 }
 
+// 两张列表各自的重试闸：一张失败不该把另一张也卡住
+static int s_try_bans, s_try_chars;
+
 static void ban_reload(Page *p) {
     (void)p;
     if (!g.db_ok) { ui_text(b_info, "请先连接数据库"); return; }
-    // 并行拉封停记录和角色列表
     if (!(g.lists_ready & L_BANS) || !(g.lists_ready & L_BANCHARS)) {
-        if (!job_running(&g.job_act)) {
-            if (!(g.lists_ready & L_BANS)) {
-                memset(&kc, 0, sizeof(kc));
-                kc.kind = K_BANLIST;
-                app_act("读取封停", char_work, &kc);
-            } else {
-                memset(&kc, 0, sizeof(kc));
-                kc.kind = K_BANCHARS;
-                kc.i1 = s_online_only;      // 0=全服 1=只在线
-                app_act("读取角色列表", char_work, &kc);
-            }
+        if (job_running(&g.job_act)) { ui_text(b_info, "正在读取数据…"); return; }
+        if (!(g.lists_ready & L_BANS)) {
+            if (s_try_bans) { ui_text(b_info, "读取失败，点「刷新」重试"); return; }
+            memset(&kc, 0, sizeof(kc));
+            kc.kind = K_BANLIST;
+            if (app_act("读取封停", char_work, &kc)) s_try_bans = 1;
+        } else {
+            if (s_try_chars) { ui_text(b_info, "读取失败，点「刷新」重试"); return; }
+            memset(&kc, 0, sizeof(kc));
+            kc.kind = K_BANCHARS;
+            kc.i1 = s_online_only;      // 0=全服 1=只在线
+            if (app_act("读取角色列表", char_work, &kc)) s_try_chars = 1;
         }
         ui_text(b_info, "正在读取数据…");
         return;
     }
-    if (!s_char_n && g.ban_chars.n) ban_fill_chars();
+    s_try_bans = s_try_chars = 0;
+    // 名单换代就重建下拉；首次进入（平行数组还是空）也要建一次
+    if (s_char_ver != g.ban_chars_ver || (s_char_n == 0 && g.ban_chars.n > 0))
+        ban_fill_chars();
     ban_fill();
 }
 
@@ -144,6 +152,7 @@ static LRESULT ban_load(Page *p, int online_only) {
     g.ban_chars.n = 0;
     s_char_n = 0;
     g.lists_ready &= ~(u32)(L_BANS | L_BANCHARS);
+    s_try_bans = s_try_chars = 0;      // 用户明确要求重试
     ban_reload(p);
     return 0;
 }
@@ -168,6 +177,7 @@ static LRESULT ban_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             g.ban_chars.n = 0;
             s_char_n = 0;
             g.lists_ready &= ~(u32)(L_BANS | L_BANCHARS);
+            s_try_bans = s_try_chars = 0;
             ban_reload(p);
             return 0;
         case B_LOADALL: return ban_load(p, 0);
@@ -225,12 +235,19 @@ static LRESULT ban_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             const char *type_name = b->type == 2 ? "角色" : "账号";
-            if (!app_confirm(fmt_new("解除 %s mid=%u（%s）的封停？", type_name, b->mid, b->account)))
+            // 确认框会跑模态循环，期间列表可能被后台查询整体换掉：
+            // 先把要用的标量拷出来，弹框之后不再碰 who / b。
+            u32 unb_mid = b->mid;
+            int unb_type = b->type;
+            u32 unb_no = who->no;
+            char unb_acc[48];
+            snprintf(unb_acc, sizeof(unb_acc), "%s", b->account);
+            if (!app_confirm(fmt_new("解除 %s mid=%u（%s）的封停？", type_name, unb_mid, unb_acc)))
                 return 0;
             kc.kind = K_UNBAN;
-            kc.mid = b->mid;
-            kc.i2 = b->type;   // 按惩罚类型精确解封
-            s_keep_cno = who->no;
+            kc.mid = unb_mid;
+            kc.i2 = unb_type;   // 按惩罚类型精确解封
+            s_keep_cno = unb_no;
             g.bans.n = 0;
             g.lists_ready &= ~(u32)L_BANS;
             app_act("解封", char_work, &kc);

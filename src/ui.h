@@ -13,6 +13,7 @@ enum {
     IDC_CHLIST, IDC_ONLINE,
     IDC_GRP_CHARS, IDC_GRP_CARD,
     IDC_IMGB, IDC_IMGS,          // 贴图包目录（后加，放尾部）
+    IDC_CANCEL,                  // 取消长任务（备份/还原/全服扫描）
     IDC_TAB = 190, IDC_STATUS,
 };
 

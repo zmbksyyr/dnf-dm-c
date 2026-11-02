@@ -282,11 +282,12 @@ static void on_restore(void) {
     char path[MAX_PATH];
     utf8(file, path, sizeof(path));
     if (!app_confirm(fmt_new("把 %s 导入数据库？\n\n%s", path,
-                             strstr(path, "char_")
+                             strstr(path, "char-")
                                  ? "角色备份：会先删掉该角色现有数据，再按备份写回。"
-                                 : "整库备份：按语句逐条执行，已存在的行可能重复。")))
+                                 : "整库备份：先清空各表的现有行，再按备份写回。")))
         return;
-    if (!app_confirm("确认执行导入？建议先做一次整库备份。")) return;
+    // 还原前会自动整库备份（app_restore_file），这里只需要确认意图
+    if (!app_confirm("确认执行导入？\n\n会先自动做一次整库备份，备份失败则中止。")) return;
     app_status("正在还原整库…");
     app_db_restore(path);
 }
@@ -383,7 +384,7 @@ static int purge_work(void *ctx, Err err) {
 static void scan_run(void) {
     s_scan_busy = 1;
     InterlockedExchange(&s_scan_live, 1);
-    if (!app_act("全服扫描", scan_work, NULL)) {     // 没提交出去：闸不能留着，否则这页再也扫不了
+    if (!app_act_null("全服扫描", scan_work)) {     // 没提交出去：闸不能留着，否则这页再也扫不了
         InterlockedExchange(&s_scan_live, 0);
         s_scan_busy = 0;
     }
@@ -475,7 +476,7 @@ static LRESULT scan_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
             s_phase = 1;
             s_scan_busy = 1;
             InterlockedExchange(&s_scan_live, 1);
-            if (!app_act("清除错误物品", purge_work, NULL)) {
+            if (!app_act_null("清除错误物品", purge_work)) {
                 InterlockedExchange(&s_scan_live, 0);
                 s_scan_busy = 0;
                 s_phase = 0;

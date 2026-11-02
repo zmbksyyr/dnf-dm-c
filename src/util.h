@@ -76,7 +76,7 @@ void vec_init(Vec *v, int esz);
 void vec_free(Vec *v);
 void vec_clear(Vec *v);
 void *vec_add(Vec *v);             // 返回新元素地址，已清零
-void *vec_at(Vec *v, int i);
+void *vec_at(const Vec *v, int i);
 
 // ---------------- 数值 ----------------
 static inline u16 rd16(const void *p) {
@@ -91,7 +91,6 @@ static inline u32 rd32be(const void *p) {
     return (u32)((const u8 *)p)[3] | (u32)((const u8 *)p)[2] << 8 | (u32)((const u8 *)p)[1] << 16 |
            (u32)((const u8 *)p)[0] << 24;
 }
-static inline u64 rd64(const void *p) { return (u64)rd32(p) | (u64)rd32((const u8 *)p + 4) << 32; }
 static inline void wr16(void *p, u16 v) { ((u8 *)p)[0] = (u8)v; ((u8 *)p)[1] = (u8)(v >> 8); }
 static inline void wr32(void *p, u32 v) {
     ((u8 *)p)[0] = (u8)v; ((u8 *)p)[1] = (u8)(v >> 8); ((u8 *)p)[2] = (u8)(v >> 16); ((u8 *)p)[3] = (u8)(v >> 24);

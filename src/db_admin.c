@@ -6,6 +6,26 @@
 #include "item.h"
 #include "zlib.h"
 #include <time.h>
+#include <stdio.h>
+
+// 备份「成功」必须等于文件完整：磁盘满、路径被占、中途被杀都会留下半截文件，
+// 那种备份比没有更危险——用户以为有后路。写完统一验一次结尾标记。
+static int file_ends_with(const char *path, const char *tail) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    int ok = 0;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long n = ftell(f), m = (long)strlen(tail);
+        if (n >= m) {
+            char buf[128];
+            if (m < (long)sizeof(buf) && fseek(f, n - m, SEEK_SET) == 0 &&
+                fread(buf, 1, (size_t)m, f) == (size_t)m)
+                ok = memcmp(buf, tail, (size_t)m) == 0;
+        }
+    }
+    fclose(f);
+    return ok;
+}
 
 // 把「列名, 数据类型」两列读进两个 Str Vec（整库备份 / 单表导出两处共用）。
 static void read_col_pairs(const MyResult *r, Vec *names, Vec *types) {
@@ -269,11 +289,13 @@ int db_set_vip(Db *d, u32 mid, const char *vip, Err err) {
 }
 
 // ---------------- 整库备份用：列出所有表 ----------------
+// 只要基表：视图没有 INSERT 目标，导出去会让还原在第一条就中断
 static int db_list_tables(Db *d, Vec *out, Err err) {
     Str s = {0};
     str_cat(&s,
             "SELECT CONCAT(table_schema,'.',table_name) FROM information_schema.tables "
-            "WHERE table_schema IN ('taiwan_cain','taiwan_cain_2nd','d_taiwan','taiwan_login',"
+            "WHERE table_type='BASE TABLE' AND table_schema IN "
+            "('taiwan_cain','taiwan_cain_2nd','d_taiwan','taiwan_login',"
             "'taiwan_billing','taiwan_game_event') ORDER BY table_schema,table_name");
     MyResult r = {0};
     if (!select1(d, &s, &r)) { snprintf(err, ERRBUF, "%s", d->err); str_free(&s); return 0; }
@@ -368,6 +390,14 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
     int nt = 0;
     u64 nr = 0;
     for (int ti = 0; ti < tabs.n; ti++) {
+        if (db_cancelled()) {
+            snprintf(err, ERRBUF, "已取消");
+            for (int k = 0; k < tabs.n; k++) str_free(VEC_AT(&tabs, Str, k));
+            vec_free(&tabs);
+            str_free(&out);
+            return 0;
+        }
+        if (db_progress_cb) db_progress_cb(tabs.n ? ti * 100 / tabs.n : 100);
         Str *full = VEC_AT(&tabs, Str, ti);
         char sc[80], tb[128];
         if (!split_tbl(str_c(full), sc, sizeof(sc), tb, sizeof(tb))) continue;
@@ -381,11 +411,10 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
         if (ddl && *ddl) {
             str_catf(&out, "\n-- %s.%s\n", sc, tb);
             if (strstr(ddl, "CREATE TABLE `")) {
-                str_cat(&out, "CREATE TABLE IF NOT EXISTS `");
-                str_cat(&out, tb);
-                str_cat(&out, "`");
+                // 表名必须带库名：连接没有默认库，`CREATE TABLE \`tb\`` 会报 1046
+                str_catf(&out, "CREATE TABLE IF NOT EXISTS `%s`.`%s`", sc, tb);
                 const char *p = strstr(ddl, "CREATE TABLE `");
-                p = p ? strchr(p + 14, '`') : NULL;    // 跳过表名，从 ")" 之前开始拼
+                p = p ? strchr(p + 14, '`') : NULL;    // 跳过表名，从 "(" 之前开始拼
                 str_cat(&out, p ? p + 1 : "");
             } else {
                 str_cat(&out, ddl);
@@ -416,7 +445,23 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
             continue;
         }
 
-        // 3) 数据
+        // 3) 先清空再灌数据：还原到仍有数据的库时，直接 INSERT 会撞主键
+        {
+            Str del = {0};
+            str_catf(&del, "DELETE FROM `%s`.`%s`;\n", sc, tb);
+            int w = file_append(path, del.p, (size_t)del.n);
+            str_free(&del);
+            if (!w) {
+                snprintf(err, ERRBUF, "写入失败：%s", path);
+                my_free(&r); str_free(&q);
+                for (int i = 0; i < names.n; i++) str_free(VEC_AT(&names, Str, i));
+                for (int i = 0; i < types.n; i++) str_free(VEC_AT(&types, Str, i));
+                vec_free(&names); vec_free(&types); str_free(&out);
+                return 0;
+            }
+        }
+
+        // 4) 数据
         str_catf(&q, "SELECT * FROM `%s`.`%s`", sc, tb);
         if (!select1(d, &q, &r)) {
             my_free(&r); str_free(&q);
@@ -492,6 +537,11 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
     str_free(&out);
     for (int i = 0; i < tabs.n; i++) str_free(VEC_AT(&tabs, Str, i));
     vec_free(&tabs);
+    if (!file_ends_with(path, "SET FOREIGN_KEY_CHECKS=1;\n")) {
+        snprintf(err, ERRBUF, "备份文件不完整（写入失败或磁盘已满）：%s", path);
+        remove(path);
+        return 0;
+    }
     if (tables) *tables = nt;
     if (rows) *rows = nr;
     {   // 只留最近 5 份整库备份
@@ -511,10 +561,52 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
 // 一个诚实的限制：MySQL 里 CREATE / DROP / ALTER 会隐式提交事务，所以整库备份
 // （带建表语句）做不到端到端原子，只能保证两个 DDL 之间的 DML 段是原子的。角色
 // 备份是纯 DML，能完整回滚 —— 而它恰恰是最需要回滚的那一种。
+static int view_sync_char(Db *d, u32 mid, u32 cno, Err err);
+int db_sql_file_complete(const char *path, int *is_full, Err err) {
+    Buf f = {0};
+    if (!file_read(path, &f)) { snprintf(err, ERRBUF, "读不到 %s", path); return 0; }
+    buf_reserve(&f, f.n + 1);
+    f.p[f.n] = 0;
+    int full = strstr((const char *)f.p, "-- DNF GM 数据库备份") != NULL;
+    int ok = !full ||
+             strstr((const char *)f.p + (f.n > 64 ? f.n - 64 : 0), "SET FOREIGN_KEY_CHECKS=1;") != NULL;
+    if (is_full) *is_full = full;
+    if (!ok) snprintf(err, ERRBUF, "备份文件不完整（缺少结尾标记），已拒绝还原：%s", path);
+    buf_free(&f);
+    return ok;
+}
+
 int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
+    // 先验完整性再动手：宁可什么都不做，也不拿半截备份去清库
+    if (!db_sql_file_complete(path, NULL, err)) return 0;
     Buf f = {0};
     if (!file_read(path, &f)) { snprintf(err, ERRBUF, "读不到 %s", path); return 0; }
     set_names(d, db_cs_name(d->charset));
+
+    // 角色备份头部带「视图」标记：还原完要把槽位补回 charac_view，
+    // 否则角色在 charac_info 里有行、客户端列表里却没有
+    u32 vmid = 0, vcno = 0;
+    {
+        buf_reserve(&f, f.n + 1);
+        f.p[f.n] = 0;
+        const char *mk = strstr((const char *)f.p, "-- 视图 m_id=");
+        if (mk) {
+            unsigned a = 0, b = 0;
+            if (sscanf(mk, "-- 视图 m_id=%u charac_no=%u", &a, &b) == 2) {
+                vmid = a;
+                vcno = b;
+            }
+        }
+        // 整库备份必须带结尾标记：没有就是写到一半（磁盘满/被杀）。
+        // 这种文件里 DELETE 已经全了而 INSERT 只有一部分，执行等于清空。
+        int is_full = strstr((const char *)f.p, "-- DNF GM 数据库备份") != NULL;
+        if (is_full && !strstr((const char *)f.p + (f.n > 64 ? f.n - 64 : 0),
+                               "SET FOREIGN_KEY_CHECKS=1;")) {
+            snprintf(err, ERRBUF, "备份文件不完整（缺少结尾标记），已拒绝还原：%s", path);
+            buf_free(&f);
+            return 0;
+        }
+    }
 
     // 关自动提交，把后面所有语句收进同一个事务。
     // 这一步失败就不继续：下面每一步都假定自己在事务里，事实不是那样的话，
@@ -569,6 +661,7 @@ int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
         }
         if (c == ';') {
             if (cur.n) {
+                if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); goto fail; }
                 if (!run(d, &cur)) { snprintf(err, ERRBUF, "第 %d 条：%s", n + 1, d->err); goto fail; }
                 n++;
                 str_clear(&cur);
@@ -581,6 +674,7 @@ int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
         int only_ws = 1;
         for (int i = 0; i < cur.n; i++)
             if (cur.p[i] > ' ') { only_ws = 0; break; }
+        if (!only_ws && db_cancelled()) { snprintf(err, ERRBUF, "已取消"); goto fail; }
         if (!only_ws && !run(d, &cur)) { snprintf(err, ERRBUF, "第 %d 条：%s", n + 1, d->err); goto fail; }
         if (!only_ws) n++;
     }
@@ -600,6 +694,8 @@ int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
         set_names(d, db_cs_name(d->charset));
         if (!ok) return 0;
     }
+    // 角色备份：把槽位补回账号视图（失败要报出来，数据行已经还原，只差这一步）
+    if (vmid && vcno && !view_sync_char(d, vmid, vcno, err)) return 0;
     if (stmts) *stmts = n;
     return 1;
 
@@ -641,9 +737,111 @@ typedef struct {
 #define CV_SLOT 296
 #define CV_NAME 20
 
+// 把某个角色补回账号的槽位视图。缺槽的角色在 charac_info 里明明有行，
+// 客户端也画不出来（charac_count 还是旧的）——角色备份还原后必须补这一步。
+static int view_sync_char(Db *d, u32 mid, u32 cno, Err err) {
+    Str s = {0};
+    MyResult r = {0};
+    str_catf(&s, "SELECT charac_name,job,grow_type,lev FROM taiwan_cain.charac_info "
+                 "WHERE charac_no=%u", cno);
+    if (!select1(d, &s, &r) || !r.nrow) { my_free(&r); str_free(&s); return 1; }
+    char name[64] = "";
+    cp_text(name, sizeof(name), &r, 0, 0);
+    int job = (int)my_i64(&r, 0, 1, 0);
+    int grow = (int)my_i64(&r, 0, 2, 0);
+    int lev = (int)my_i64(&r, 0, 3, 0);
+    my_free(&r);
+    str_clear(&s);
+
+    // 现有视图（可能没有这一行）
+    str_catf(&s, "SELECT info FROM taiwan_cain.charac_view WHERE m_id=%u", mid);
+    Buf plain = {0};
+    u8 prefix[4] = {0};
+    int have = 0;
+    if (select1(d, &s, &r) && r.nrow) {
+        const char *bp = my_text(&r, 0, 0);
+        int bn = my_len(&r, 0, 0);
+        if (bp && bn > 4) {
+            memcpy(prefix, bp, 4);
+            have = zlib_unpack((const u8 *)bp + 4, (size_t)(bn - 4), &plain,
+                               (size_t)CV_SLOT * 4096);
+        }
+    }
+    my_free(&r);
+    str_free(&s);
+
+    if (!have || plain.n < CV_SLOT) {
+        buf_clear(&plain);
+        u8 zero[CV_SLOT];
+        memset(zero, 0, sizeof(zero));
+        buf_put(&plain, zero, CV_SLOT);
+    }
+
+    int nslot = (int)(plain.n / CV_SLOT);
+    int t = -1, existing = 0;
+    for (int k = 0; k < nslot && t < 0; k++)
+        if (rd32(plain.p + k * CV_SLOT) == cno) { t = k; existing = 1; }  // 已有槽：原地更新
+    for (int k = 0; k < nslot && t < 0; k++) {
+        int z = 1;
+        for (int j = 0; j < CV_SLOT; j++)
+            if (plain.p[k * CV_SLOT + j]) { z = 0; break; }
+        if (z) t = k;                                       // 空槽
+    }
+    if (t < 0) {
+        buf_free(&plain);
+        snprintf(err, ERRBUF, "账号 %u 的角色槽位已满，无法把角色 %u 写回列表", mid, cno);
+        return 0;
+    }
+
+    u8 *slot = plain.p + t * CV_SLOT;
+    // 已有槽只改已知字段：其余字节是客户端/服务端填的，别抹掉
+    if (!existing) memset(slot, 0, CV_SLOT);
+    wr32(slot + 0, cno);
+    memset(slot + 4, 0, CV_NAME);
+    size_t nl = strlen(name);
+    memcpy(slot + 4, name, nl < CV_NAME - 1 ? nl : CV_NAME - 1);
+    slot[24] = (u8)job;
+    slot[25] = (u8)grow;
+    slot[26] = (u8)lev;
+
+    Buf pk = {0};
+    zlib_pack(plain.p, plain.n, &pk);
+    Buf out = {0};
+    buf_put(&out, prefix, 4);
+    buf_put(&out, pk.p, pk.n);
+
+    Str u = {0};
+    str_cat(&u, "UPDATE taiwan_cain.charac_view SET `info`=");
+    sql_lit(&u, (const char *)out.p, (int)out.n, 1);
+    str_catf(&u, ", `charac_count`=(SELECT COUNT(*) FROM taiwan_cain.charac_info"
+                 " WHERE `m_id`=%u AND `delete_flag`=0) WHERE `m_id`=%u", mid, mid);
+    u64 aff = 0;
+    int ok = run_aff(d, &u, &aff);
+    if (ok && aff == 0) {
+        // 0 行受影响也可能只是「内容本来就一样」，先确认这一行到底在不在
+        Str cq = {0};
+        MyResult cr = {0};
+        str_catf(&cq, "SELECT COUNT(*) FROM taiwan_cain.charac_view WHERE `m_id`=%u", mid);
+        int exists = select1(d, &cq, &cr) && cr.nrow && my_u64(&cr, 0, 0, 0) > 0;
+        my_free(&cr);
+        str_free(&cq);
+        if (!exists) {
+            // 没有这一行：不擅自建（charac_view 还有别的列），报出来让人知道差这一步
+            snprintf(err, ERRBUF, "账号 %u 在 charac_view 里没有行，角色 %u 的槽位没写回", mid, cno);
+            ok = 0;
+        }
+    } else if (!ok) {
+        snprintf(err, ERRBUF, "写回角色槽位失败：%s", d->err);
+    }
+    str_free(&u);
+    buf_free(&out);
+    buf_free(&pk);
+    buf_free(&plain);
+    return ok;
+}
+
 // 按 m_id 归属的表必须手工列，不能自动发现：那一列只说明「属于某个账号」，
-// 里面混着封停记录（member_punish_info）、建角限制、计费数据。自动扫出来
-// 再复制过去，等于把封号一起克隆 —— 那不是备份，是复制故障。
+// 里面混着封停记录、建角限制、计费数据，自动复制等于把封号一起克隆。
 // 要跟着角色走的只有这两张：账号金库 + 已开图。
 static const CharTab kMidTabs[] = {
     {"taiwan_cain", "account_cargo",  1},
@@ -663,8 +861,8 @@ static int tab_excluded(const char *tb) {
 }
 
 // 扫 information_schema 把「按 charac_no 归属」的表全捞出来，再接上手工
-// 白名单的账号级表。以前是一份写死的清单，漏了 11 张表 —— 克隆出的角色
-// 缺这些行，界面上看不出异常，进游戏却被服务端校验踢掉，极难定位。
+// 白名单的账号级表。写死清单会漏表：漏掉的行让克隆角色看着正常、进游戏却被
+// 服务端校验踢掉。
 // 返回 1 = 成功，0 = 失败（err 已填）。
 static int char_tabs(Db *d, Vec *out, Err err) {
     vec_clear(out);
@@ -720,9 +918,11 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
     now_str(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S");
     str_catf(&out,
              "-- DNF GM 角色备份 · %s\n-- charac_no=%u  %s  (m_id=%u)\n"
+             "-- 视图 m_id=%u charac_no=%u\n"
              "-- 还原会先删掉该角色在这些表里的现有行，再按备份写回\n"
              "SET NAMES %s;\nSET FOREIGN_KEY_CHECKS=0;\n\n",
-             ts, c->no, c->name, c->mid, cs);
+             ts, c->no, c->name, c->mid,
+             c->mid, c->no, cs);
     if (!file_write(path, out.p, (size_t)out.n)) {
         snprintf(err, ERRBUF, "无法写入 %s", path);
         str_free(&out);
@@ -778,10 +978,11 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
 
         // 注释和 DELETE 必须先落盘：数据是边查边 append 的，
         // 攒到最后写会让「插入」跑到「删除」前面，还原等于清空。
+        // DELETE 无条件输出：备份时该表没有行，不代表还原时也没有
+        //（account_cargo / charac_quest_shop 这类行是懒建的）。
         str_catf(&out, "-- %s.%s (%d 行)%s\n", ct->db, ct->tb, r.nrow,
                  ct->by_mid ? " · 账号共享" : "");
-        if (r.nrow)
-            str_catf(&out, "DELETE FROM `%s`.`%s` WHERE `%s`=%u;\n", ct->db, ct->tb, key, kv);
+        str_catf(&out, "DELETE FROM `%s`.`%s` WHERE `%s`=%u;\n", ct->db, ct->tb, key, kv);
         file_append(path, out.p, (size_t)out.n);
         str_clear(&out);
 
@@ -837,6 +1038,17 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
         vec_free_strs(&types);
     }
     vec_free(&tabs);
+    {   // 结尾标记：还原端/用户都能据此判断文件是不是完整的
+        Str fin = {0};
+        str_cat(&fin, "-- 备份结束\n");
+        file_append(path, fin.p, (size_t)fin.n);
+        str_free(&fin);
+    }
+    if (!file_ends_with(path, "-- 备份结束\n")) {
+        snprintf(err, ERRBUF, "角色备份文件不完整（写入失败或磁盘已满）：%s", path);
+        remove(path);
+        return 0;
+    }
     if (tables) *tables = nt;
     if (rows) *rows = nr;
     {   // 角色备份只留最近 6 份
@@ -1230,7 +1442,9 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
             const char *bp = my_text(&rv, 0, 0);
             int bn = my_len(&rv, 0, 0);
             Buf plain = {0};
-            if (bp && bn > 4 && zlib_unpack((const u8 *)bp + 4, (size_t)(bn - 4), &plain)) {
+            if (bp && bn > 4 &&
+                zlib_unpack((const u8 *)bp + 4, (size_t)(bn - 4), &plain,
+                            (size_t)CV_SLOT * 4096)) {
                 int nslot = (int)(plain.n / CV_SLOT);
                 int t = -1;
                 for (int k = 1; k < nslot; k++) {          // 0 号槽是源角色，从 1 开始找空位
@@ -1700,6 +1914,14 @@ int db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, ItemStackLim lim, 
     Vec mids;                       // 账号金库按账号扫一次就够
     vec_init(&mids, sizeof(u32));
     for (int ci = 0; ci < ch.nrow; ci++) {
+        if (db_cancelled()) {
+            snprintf(err, ERRBUF, "已取消");
+            my_free(&ch);
+            str_free(&s);
+            vec_free(&mids);
+            return 0;
+        }
+        if (db_progress_cb) db_progress_cb(ch.nrow ? ci * 100 / ch.nrow : 100);
         Charac c;
         memset(&c, 0, sizeof(c));
         c.no = (u32)my_u64(&ch, ci, 0, 0);
@@ -1836,7 +2058,8 @@ int db_purge_bad(Db *d, Vec *rows, int *done, Err err) {
                 ScanRow *t = VEC_AT(rows, ScanRow, j);
                 if (handled[j] || t->kind != 0 || t->cno != r->cno || strcmp(t->cont, r->cont))
                     continue;
-                if (t->slot >= 1 && t->slot <= b.n) {
+                // 只清扫描时看到的那一格：期间玩家整理过背包，槽位号可能已经换人
+                if (t->slot >= 1 && t->slot <= b.n && item_id(&b.items[t->slot - 1]) == t->id) {
                     memset(&b.items[t->slot - 1], 0, sizeof(Item));
                     cleared++;
                 }
