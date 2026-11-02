@@ -359,7 +359,7 @@ static void pet_lock(Page *p) {
     for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
 }
 
-static void pet_build(Page *p, HWND parent) {
+static void pet_build(HWND parent) {
     p_list = ui_list(parent, P_LIST);
     p_sep = ui_hline(parent);
     p_info = ui_label(parent, "请先选择角色", P_INFO);
@@ -510,7 +510,7 @@ static void ava_lock(Page *p) {
     for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
 }
 
-static void ava_build(Page *p, HWND parent) {
+static void ava_build(HWND parent) {
     a_list = ui_list(parent, A_LIST);
     a_sep = ui_hline(parent);
     a_info = ui_label(parent, "请先选择角色", A_INFO);
@@ -749,7 +749,7 @@ static void quest_lock(Page *p) {
     for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
 }
 
-static void quest_build(Page *p, HWND parent) {
+static void quest_build(HWND parent) {
     q_list = ui_list(parent, Q_LIST);
     q_sep = ui_hline(parent);
     q_info = ui_label(parent, "请先选择角色", Q_INFO);
@@ -889,8 +889,7 @@ static void log_lock(Page *p) {
     (void)p;
 }
 
-static void log_build(Page *p, HWND parent) {
-    (void)p;
+static void log_build(HWND parent) {
     l_text = ui_make(parent, L"EDIT", L"",
                      WS_BORDER | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
                      WS_EX_CLIENTEDGE, L_TEXT);

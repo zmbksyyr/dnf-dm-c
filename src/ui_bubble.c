@@ -198,7 +198,7 @@ static void bub_layout(Page *p, int w, int h) {
 }
 
 // ---------------- 构建 ----------------
-static void bub_build(Page *p, HWND parent) {
+static void bub_build(HWND parent) {
     // 分组框先建，后建的控件才压在框上面。
     // 这几个必须接住返回值：组框是自绘容器，只靠 ID 拿不到位置，忘了赋值它就一直是
     // 0×0，界面上等于没有框（踩过一次）。
@@ -275,7 +275,6 @@ static void bub_build(Page *p, HWND parent) {
     bub_sync_tno();
     bub_fill_plan();
     bub_status_sync();
-    (void)p;
 }
 
 // 目标 ID 只在「指定角色 / 指定账号」下才有意义，其余情况置灰：
@@ -307,6 +306,7 @@ static int bub_read_hours(void) {
 }
 
 static LRESULT bub_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
+    (void)p;
     (void)lp;
     if (m != WM_COMMAND) return -1;
     int id = LOWORD(wp);

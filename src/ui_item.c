@@ -528,7 +528,7 @@ static void item_lock(Page *p) {
     for (int i = 0; i < 4; i++) ui_enable(bs[i], on);
 }
 
-static void item_build(Page *p, HWND parent) {
+static void item_build(HWND parent) {
     s_sub = ui_combo(parent, I_SUB, 1);
     ui_combo_fill(s_sub, kSubName, COUNT_OF(kSubName), 0);
     s_list = ui_list(parent, I_LIST);
@@ -589,9 +589,9 @@ static void common_list(const unsigned int *ids, int n, const char *what) {
         u32 id = (u32)ids[i];
         const char *nm = pvf_item_name(&g.pvf, id);
         if (!nm || !*nm) { miss++; continue; }   // 这版 PVF 里没有，跳过
-        char ids[16];
-        fmt(ids, sizeof(ids), "%u", id);
-        const char *cells[4] = {ids, nm, "1", "双击加入发放队列"};
+        char idtxt[16];
+        fmt(idtxt, sizeof(idtxt), "%u", id);
+        const char *cells[4] = {idtxt, nm, "1", "双击加入发放队列"};
         ui_row_add(q_list, cells, 4, QROW(id, 1));
         hit++;
     }
@@ -761,7 +761,7 @@ static LRESULT query_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 static void query_layout(Page *p, int w, int h) {
-    int pad = ui_scale(6), rowh = ui_scale(23), g = ui_scale(6);
+    int pad = ui_scale(6), rowh = ui_scale(23), gap = ui_scale(6);
     URow r;
     ui_row(&r, p->wnd, pad, pad, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "物品名"), ui_scale(44));
@@ -773,7 +773,7 @@ static void query_layout(Page *p, int w, int h) {
 
     // 第二行：四个「加载常用」+ 五个分类，九样东西排一行。宽度按页面可用宽度
     // 整体缩放 —— 窗口拉窄时不缩会把最右边那几个顶出界外。
-    int y2 = pad + rowh + g;
+    int y2 = pad + rowh + gap;
     struct { HWND h; int w; } b2[] = {
         {ui_btn_at(p->wnd, Q_MAT, "加载常用材料"),  ui_scale(100)},
         {ui_btn_at(p->wnd, Q_EQU, "加载常用装备"),  ui_scale(100)},
@@ -797,13 +797,13 @@ static void query_layout(Page *p, int w, int h) {
         ui_add(&r, b2[i].h, bw);
     }
 
-    int ly = y2 + rowh + g;                   // 按钮和列表之间断一刀
+    int ly = y2 + rowh + gap;                   // 按钮和列表之间断一刀
     ui_place(q_sep, pad, ly, w - pad * 2, ui_scale(2));
     // 底部让一行给操作说明：悬停气泡会跟编号悬浮卡撞，写成常驻一句更省事
     int listtop = ly + ui_scale(8);
     int tipy    = h - pad - rowh;
     ui_place(q_tip, pad, tipy, w - pad * 2, rowh);
-    ui_place(q_list, pad, listtop, w - pad * 2, tipy - g - listtop);
+    ui_place(q_list, pad, listtop, w - pad * 2, tipy - gap - listtop);
     q_fit_cols();
 }
 
@@ -828,7 +828,7 @@ static void query_lock(Page *p) {
     ui_enable(GetDlgItem(p->wnd, Q_BPET), pet_ok);
 }
 
-static void query_build(Page *p, HWND parent) {
+static void query_build(HWND parent) {
     q_kw = ui_edit(parent, "", Q_KW, 0);
     q_list = ui_list(parent, Q_LIST);
     q_info = ui_label(parent, "未加载 PVF", Q_INFO);
@@ -1110,12 +1110,12 @@ static void newest_grant(char *out, int cap) {
     FILETIME best = fd.ftLastWriteTime;
     char nm[MAX_PATH];
     utf8(fd.cFileName, nm, sizeof(nm));
-    snprintf(out, cap, "%s\\%s", dir, nm);
+    fmt(out, cap, "%s\\%s", dir, nm);
     while (FindNextFileW(h, &fd)) {
         if (CompareFileTime(&fd.ftLastWriteTime, &best) <= 0) continue;
         best = fd.ftLastWriteTime;
         utf8(fd.cFileName, nm, sizeof(nm));
-        snprintf(out, cap, "%s\\%s", dir, nm);
+        fmt(out, cap, "%s\\%s", dir, nm);
     }
     FindClose(h);
 }
@@ -1167,7 +1167,7 @@ static void grant_export(void) {
         str_catf(&s, "%u\t%s\t%u\t%s\t%d\t%s\t%u\t%d\t%s\t%d\t%u\r\n", n->id, n->name, n->num, tn,
                  n->enhance, in, n->inc_val, n->forge, n->seal ? "是" : "否", n->seal_cnt, n->dur);
     }
-    int ok = file_write(path, s.p, s.n);
+    int ok = file_write(path, s.p, (size_t)s.n);
     str_free(&s);
     if (!ok) app_info("写入失败。");
     else {
@@ -1366,7 +1366,7 @@ static void grant_layout(Page *p, int w, int h) {
     (void)h;
     RECT rc;
     GetClientRect(p->wnd, &rc);
-    int pad = ui_scale(6), rowh = ui_scale(23), g = ui_scale(5);
+    int pad = ui_scale(6), rowh = ui_scale(23), gap = ui_scale(5);
     URow r;
 
     ui_row(&r, p->wnd, pad, pad, rowh);
@@ -1379,7 +1379,7 @@ static void grant_layout(Page *p, int w, int h) {
     ui_add(&r, ui_lbl_at(p->wnd, "耐久"), ui_scale(34));
     ui_add(&r, g_dur, ui_scale(56));
 
-    int y = pad + rowh + g;
+    int y = pad + rowh + gap;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "强化"), ui_scale(34));
     ui_add(&r, g_enh, ui_scale(44));
@@ -1393,7 +1393,7 @@ static void grant_layout(Page *p, int w, int h) {
     ui_add(&r, ui_lbl_at(p->wnd, "次数"), ui_scale(34));
     ui_add(&r, g_sealc, ui_scale(40));
 
-    y += rowh + g;
+    y += rowh + gap;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_btn_at(p->wnd, G_ADD, "加入队列"), ui_scale(88));
     ui_add(&r, g_gauto, ui_scale(88));
@@ -1402,11 +1402,11 @@ static void grant_layout(Page *p, int w, int h) {
     ui_add(&r, ui_btn_at(p->wnd, G_EXPORT, "导出"), ui_scale(56));
     ui_add(&r, ui_btn_at(p->wnd, G_IMPORT, "导入"), ui_scale(56));
 
-    int ly = y + rowh + g;                   // 按钮行下面画一条线，把表单和队列断开
+    int ly = y + rowh + gap;                   // 按钮行下面画一条线，把表单和队列断开
     ui_place(g_sep, pad, ly, rc.right - pad * 2, ui_scale(2));
     int listtop = ly + ui_scale(8);
     int by = rc.bottom - pad - rowh;
-    MoveWindow(g_list, pad, listtop, rc.right - pad * 2, by - g - listtop, TRUE);
+    MoveWindow(g_list, pad, listtop, rc.right - pad * 2, by - gap - listtop, TRUE);
     int bw = ui_scale(96);
     ui_place(GetDlgItem(p->wnd, G_MAIL), rc.right - pad - bw * 2 - ui_scale(8), by, bw, rowh);
     ui_place(GetDlgItem(p->wnd, G_INV), rc.right - pad - bw, by, bw, rowh);
@@ -1425,7 +1425,7 @@ static void grant_lock(Page *p) {
     else grant_type_sync();          // 灰掉时也填默认值，别留着上一件物品的类型
 }
 
-static void grant_build(Page *p, HWND parent) {
+static void grant_build(HWND parent) {
     // 创建顺序就是 Tab 顺序：这一行照视觉排（编号 → 类型 → 数量 → 强化 …），
     // g_num 原来建在 g_type 前面，Tab 会从编号直接跳到数量再绕回类型。
     // 类型做成只读框：内容按编号从 PVF 判出来的，用户改不了，改编号就行。
@@ -1489,7 +1489,6 @@ static void grant_build(Page *p, HWND parent) {
     ui_tip(parent, GetDlgItem(parent, G_IMPORT), "从 .tsv 导入队列（默认预填上次导出的文件）");
     ui_tip(parent, GetDlgItem(parent, G_MAIL), "把队列里的物品以邮件附件发给目标角色（≤10 件/封）");
     ui_tip(parent, GetDlgItem(parent, G_INV), "把队列里的物品直接写入背包空槽，要求角色离线");
-    (void)p;
 }
 
 // 取码回填：只在发放页已建好时写编号

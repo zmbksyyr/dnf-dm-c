@@ -17,7 +17,7 @@ static int ent_cmp(const void *a, const void *b) {
 static u8 ks_byte(int i) {
     static const char head[] = "puchikon@neople dungeon and fighter ";
     if (i < (int)sizeof(head) - 1) return (u8)head[i];
-    return (u8) "DNF"[(i - (sizeof(head) - 1)) % 3];
+    return (u8) "DNF"[(i - (int)sizeof(head) + 1) % 3];
 }
 
 // 目录里收 npk 文件。子目录不递归 —— ImagePacks2 是平的。
@@ -278,7 +278,7 @@ HBITMAP npk_icon(Npk *p, const char *img, int frame, int *w, int *h) {
     u8 *out = (u8 *)xalloc(need);
     if (type == 0x10) {                        // 32 位，字节序 B G R A，直接用
         if ((comp == 6 ? unc.n : (size_t)len) < need) { free(out); goto fail; }
-        for (size_t i = 0; i < W * (size_t)H; i++) {
+        for (size_t i = 0; i < (size_t)W * (size_t)H; i++) {
             u8 bl = px[i * 4], gr = px[i * 4 + 1], r = px[i * 4 + 2], a = px[i * 4 + 3];
             // AlphaBlend 要预乘
             out[i * 4]     = (u8)(bl * a / 255);
@@ -288,7 +288,7 @@ HBITMAP npk_icon(Npk *p, const char *img, int frame, int *w, int *h) {
         }
     } else if (type == 0x0E) {                 // 1555
         if ((comp == 6 ? unc.n : (size_t)len) < (size_t)W * (size_t)H * 2) { free(out); goto fail; }
-        for (size_t i = 0; i < W * (size_t)H; i++) {
+        for (size_t i = 0; i < (size_t)W * (size_t)H; i++) {
             u16 v = rd16(px + i * 2);
             u8 a = (v & 0x8000) ? 255 : 0;
             out[i * 4]     = (u8)((v & 31) * 255 / 31 * a / 255);
@@ -298,7 +298,7 @@ HBITMAP npk_icon(Npk *p, const char *img, int frame, int *w, int *h) {
         }
     } else if (type == 0x0F) {                 // 4444
         if ((comp == 6 ? unc.n : (size_t)len) < (size_t)W * (size_t)H * 2) { free(out); goto fail; }
-        for (size_t i = 0; i < W * (size_t)H; i++) {
+        for (size_t i = 0; i < (size_t)W * (size_t)H; i++) {
             u16 v = rd16(px + i * 2);
             u8 a = (u8)(((v >> 12) & 15) * 17);
             out[i * 4]     = (u8)((v & 15) * 17 * a / 255);

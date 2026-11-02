@@ -189,7 +189,7 @@ static void left_layout(int x, int y0, int w, int h) {
         s_chw = inner;
         static const int kPct[3] = {30, 28, 42};   // 状态列最长（Lv.85 · 职业 · 在线）
         for (int i = 0; i < 3; i++)
-            SendMessageW(g_chlist, LVM_SETCOLUMNWIDTH, i,
+            SendMessageW(g_chlist, LVM_SETCOLUMNWIDTH, (WPARAM)i,
                          MAKELPARAM((inner - ui_scale(4)) * kPct[i] / 100, 0));
     }
 
@@ -377,7 +377,7 @@ static int grab_probe_main(void) {
     exe_dir(dir, sizeof(dir));
     path_join(path, sizeof(path), dir, "config");
     path_join(path, sizeof(path), path, "grab-probe.txt");
-    int ok = file_write(path, str_c(&s), (int)s.n);
+    int ok = file_write(path, str_c(&s), (size_t)s.n);
     str_free(&s);
     app_shutdown();
     return ok ? 0 : 1;

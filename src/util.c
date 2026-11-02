@@ -147,16 +147,16 @@ void vec_clear(Vec *v) { v->n = 0; }
 void *vec_add(Vec *v) {
     if (v->n >= v->cap) {
         int c = v->cap ? v->cap * 2 : 8;
-        v->p = xrealloc(v->p, (size_t)c * v->esz);
+        v->p = xrealloc(v->p, (size_t)c * (size_t)v->esz);
         v->cap = c;
     }
-    void *e = (u8 *)v->p + (size_t)v->n * v->esz;
+    void *e = (u8 *)v->p + (size_t)v->n * (size_t)v->esz;
     memset(e, 0, (size_t)v->esz);
     v->n++;
     return e;
 }
 
-void *vec_at(Vec *v, int i) { return (u8 *)v->p + (size_t)i * v->esz; }
+void *vec_at(Vec *v, int i) { return (u8 *)v->p + (size_t)i * (size_t)v->esz; }
 
 // ---------------- 编码 ----------------
 int u16_from_u8(const char *src, int n, WCHAR *out, int cap) {
@@ -367,10 +367,10 @@ void exe_dir(char *out, int cap) {
 }
 
 void path_join(char *out, int cap, const char *a, const char *b) {
-    if (!a || !*a) { snprintf(out, cap, "%s", b ? b : ""); return; }
+    if (!a || !*a) { fmt(out, cap, "%s", b ? b : ""); return; }
     size_t n = strlen(a);
     char last = a[n - 1];
-    snprintf(out, cap, "%s%s%s", a, (last == '\\' || last == '/') ? "" : "\\", b ? b : "");
+    fmt(out, cap, "%s%s%s", a, (last == '\\' || last == '/') ? "" : "\\", b ? b : "");
 }
 
 // ---------------- 运行期生成物 ----------------

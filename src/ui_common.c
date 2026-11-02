@@ -902,7 +902,7 @@ void ui_pages_switch(int page) {
     if (!p->wnd) {
         p->wnd = ui_page_new(p, g_main);
         p->busy = 1;
-        if (p->build) p->build(p, p->wnd);
+        if (p->build) p->build(p->wnd);
         p->busy = 0;
     }
     for (int i = 0; i < PAGE_COUNT; i++)

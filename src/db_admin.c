@@ -1231,7 +1231,7 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
             int bn = my_len(&rv, 0, 0);
             Buf plain = {0};
             if (bp && bn > 4 && zlib_unpack((const u8 *)bp + 4, (size_t)(bn - 4), &plain)) {
-                int nslot = plain.n / CV_SLOT;
+                int nslot = (int)(plain.n / CV_SLOT);
                 int t = -1;
                 for (int k = 1; k < nslot; k++) {          // 0 号槽是源角色，从 1 开始找空位
                     int z = 1;
@@ -1240,12 +1240,12 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
                     if (z) { t = k; break; }
                 }
                 if (t >= 0) {
-                    u8 *q = plain.p + t * CV_SLOT;
-                    memcpy(q, plain.p, CV_SLOT);           // 以源角色那一格为模板
-                    wr32(q + 0, new_no);
-                    memset(q + 4, 0, 20);
-                    memcpy(q + 4, cand, strlen(cand) < 20 ? strlen(cand) : 19);
-                    q[26] = (u8)nlev;
+                    u8 *slot = plain.p + t * CV_SLOT;
+                    memcpy(slot, plain.p, CV_SLOT);        // 以源角色那一格为模板
+                    wr32(slot + 0, new_no);
+                    memset(slot + 4, 0, 20);
+                    memcpy(slot + 4, cand, strlen(cand) < 20 ? strlen(cand) : 19);
+                    slot[26] = (u8)nlev;
 
                     Buf pk = {0};
                     zlib_pack(plain.p, plain.n, &pk);
@@ -1550,8 +1550,8 @@ int db_import_quest(Db *d, const Charac *c, const char *path, int *tables, Err e
         if (!split_tbl(full, dbn, sizeof(dbn), tb, sizeof(tb))) continue;
 
         int have_sec = 0;
-        for (int i = 0; i < lines.n; i++)
-            if (!strcmp(str_c(&VEC_AT(&lines, TplLine, i)->sec), full)) { have_sec = 1; break; }
+        for (int li = 0; li < lines.n; li++)
+            if (!strcmp(str_c(&VEC_AT(&lines, TplLine, li)->sec), full)) { have_sec = 1; break; }
         if (!have_sec) continue;                // 模版里没这一段就别动这张表
 
         Vec names;
@@ -1562,10 +1562,10 @@ int db_import_quest(Db *d, const Charac *c, const char *path, int *tables, Err e
                      "WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' ORDER BY ORDINAL_POSITION",
                  dbn, tb);
         if (select1(d, &q, &r)) {
-            for (int i = 0; i < r.nrow; i++) {
+            for (int ci = 0; ci < r.nrow; ci++) {
                 Str *a = VEC_ADD(&names, Str);
                 memset(a, 0, sizeof(*a));
-                str_set(a, my_text(&r, i, 0) ? my_text(&r, i, 0) : "");
+                str_set(a, my_text(&r, ci, 0) ? my_text(&r, ci, 0) : "");
             }
         }
         my_free(&r);

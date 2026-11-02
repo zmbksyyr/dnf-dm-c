@@ -97,7 +97,7 @@ static int get_lenenc(const u8 *p, size_t n, size_t *off, u64 *v) {
     if (b == 0xFE) {
         if (*off + 8 > n) return 0;
         *v = 0;
-        for (int i = 0; i < 8; i++) *v |= (u64)p[*off + i] << (8 * i);
+        for (int i = 0; i < 8; i++) *v |= (u64)p[*off + (size_t)i] << (8 * i);
         *off += 8;
         return 1;
     }
@@ -175,7 +175,7 @@ int mysql_probe(const char *host, int port, int timeout_ms) {
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return 0;
     u_long nb = 1;
-    ioctlsocket(s, FIONBIO, &nb);
+    ioctlsocket(s, (long)FIONBIO, &nb);
     int ok = 0;
     if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
         ok = 1;
@@ -300,7 +300,7 @@ static void err_packet(MySql *m, MyResult *r, const u8 *p, size_t n) {
     (void)r;
 }
 
-static int read_ok(MySql *m, Buf *pkt, MyResult *r) {
+static int read_ok(Buf *pkt, MyResult *r) {
     size_t off = 1;
     u64 aff = 0, id = 0;
     get_lenenc(pkt->p, pkt->n, &off, &aff);
@@ -456,7 +456,7 @@ int mysql_query(MySql *m, const char *sql, MyResult *r) {
     int ret = 0;
     if (!recv_packet(m, &pkt) || pkt.n == 0) { die(m, "读取查询结果失败"); goto done; }
 
-    if (pkt.p[0] == 0x00) { ret = read_ok(m, &pkt, r); goto done; }
+    if (pkt.p[0] == 0x00) { ret = read_ok(&pkt, r); goto done; }
     if (pkt.p[0] == 0xFF) { err_packet(m, r, pkt.p, pkt.n); goto done; }
 
     {

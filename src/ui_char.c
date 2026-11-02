@@ -1060,7 +1060,7 @@ static void gm_lock(Page *p) {
     ui_enable(GetDlgItem(p->wnd, G_CLONE), g.db_ok && g.char_ok);
 }
 
-static void gm_build(Page *p, HWND parent) {
+static void gm_build(HWND parent) {
     // 分组框先建：后建的控件在 z 轴上层，框才不会盖住输入框
     ui_group(parent, "角色", G_BOX_ROLE);
     ui_group(parent, "资产", G_BOX_ASSET);
@@ -1196,7 +1196,6 @@ static void gm_build(Page *p, HWND parent) {
 
     ui_set_int(g_win, 0);
     ui_set_int(g_point, 0);
-    (void)p;
 }
 
 void page_gm_create(Page *p) {

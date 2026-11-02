@@ -81,7 +81,7 @@ static u32 ev_pick_combo(char *label, int cap) {
     int sel = ui_combo_sel(e_combo);
     if (sel < 0 || sel >= eN) return 0;
     EventInfo *ei = VEC_AT(&g.event_info, EventInfo, sel);
-    snprintf(label, cap, "%s", ei->explain[0] ? ei->explain : ei->name);
+    fmt(label, cap, "%s", ei->explain[0] ? ei->explain : ei->name);
     return ei->id;
 }
 
@@ -93,7 +93,7 @@ static u32 ev_pick_id(char *label, int cap) {
         EventInfo *ei = VEC_AT(&g.event_info, EventInfo, i);
         if (ei->id == (u32)eid) { nm = ei->explain[0] ? ei->explain : ei->name; break; }
     }
-    snprintf(label, cap, "%s (编号 %u)", nm ? nm : "未在字典中", (u32)eid);
+    fmt(label, cap, "%s (编号 %u)", nm ? nm : "未在字典中", (u32)eid);
     return (u32)eid;
 }
 
@@ -196,7 +196,7 @@ static void ev_layout(Page *p, int w, int h) {
     (void)h;
     RECT rc;
     GetClientRect(p->wnd, &rc);
-    int pad = ui_scale(8), rowh = ui_scale(23), g = ui_scale(8);
+    int pad = ui_scale(8), rowh = ui_scale(23), gap = ui_scale(8);
     int x0 = pad, cw = rc.right - pad * 2;
     int ix = x0 + ui_scale(12), iw = cw - ui_scale(24);
     (void)iw;
@@ -212,14 +212,14 @@ static void ev_layout(Page *p, int w, int h) {
     // ---- 组一：启用活动 ----
     // 三行各有分工，不再把 7 个控件全塞在一行：活动下拉独占一行（长活动名才读得全），
     // 参数与时长一行，按编号启用一行。
-    int g1h = ui_scale(24) + rowh * 3 + g * 2 + ui_scale(10);
+    int g1h = ui_scale(24) + rowh * 3 + gap * 2 + ui_scale(10);
     ui_place(GetDlgItem(p->wnd, E_GRP1), x0, y, cw, g1h);
 
     int iy = y + ui_scale(24);
     const int iy1 = iy;
 
     // 行 2：参数 / 持续天数 / 启用（按钮紧跟字段，不推到窗口最右）
-    iy += rowh + g;
+    iy += rowh + gap;
     ui_row(&r, p->wnd, ix, iy, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "参数1"), ui_scale(40));
     ui_add(&r, e_p1, ui_scale(70));
@@ -235,7 +235,7 @@ static void ev_layout(Page *p, int w, int h) {
     const int btn_right = bx + bwx;                // 启用活动按钮的右端
 
     // 行 3：按编号启用（下拉里翻不到时走这条）
-    iy += rowh + g;
+    iy += rowh + gap;
     ui_row(&r, p->wnd, ix, iy, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "活动编号"), ui_scale(64));
     ui_add(&r, e_eid, ui_scale(70));
@@ -253,7 +253,7 @@ static void ev_layout(Page *p, int w, int h) {
     ui_add(&r, e_combo, cw1);
 
     // ---- 组二：新增活动定义 ----
-    y += g1h + g;
+    y += g1h + gap;
     int g2h = ui_scale(24) + rowh + ui_scale(10);
     ui_place(GetDlgItem(p->wnd, E_GRP3), x0, y, cw, g2h);
     iy = y + ui_scale(24);
@@ -274,7 +274,7 @@ static void ev_layout(Page *p, int w, int h) {
     // ---- 组三：当前启用的活动 ----
     // 「清空活动」从组一挪到这里：它清的是这张列表，和「停用所选」是一类操作，
     // 之前在启用区最右边，既容易被当成"清空表单"又离列表很远。
-    y += g2h + g;
+    y += g2h + gap;
     int g3h = rc.bottom - pad - y;
     ui_place(GetDlgItem(p->wnd, E_GRP2), x0, y, cw, g3h);
     iy = y + ui_scale(24);
@@ -297,7 +297,7 @@ static void ev_lock(Page *p) {
     for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), g.db_ok);
 }
 
-static void ev_build(Page *p, HWND parent) {
+static void ev_build(HWND parent) {
     // 组框先建，后面的控件才盖在上面
     ui_group(parent, "启用活动", E_GRP1);
     ui_group(parent, "新增活动定义", E_GRP3);
@@ -337,7 +337,6 @@ static void ev_build(Page *p, HWND parent) {
     ui_tip(parent, GetDlgItem(parent, E_ADDICT), "往 dnf_event_info 活动字典插一条，下拉里没有的活动可自己补定义");
     ui_tip(parent, GetDlgItem(parent, E_DEL), "删掉列表里选中的那条启用记录，该活动随即停用");
     ui_tip(parent, GetDlgItem(parent, E_REF), "重新读取活动字典与当前启用列表");
-    (void)p;
 }
 
 void page_event_create(Page *p) {

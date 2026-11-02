@@ -30,7 +30,7 @@ struct Page {
     const char *name;                     // 页签名（UTF-8）
     HWND        wnd;
     int         busy;                     // build/reload 进行中：屏蔽消息转发与重入布局
-    void (*build)(Page *p, HWND parent);  // 首次创建子控件
+    void (*build)(HWND parent);          // 首次创建子控件（parent 即 p->wnd）
     void (*layout)(Page *p, int w, int h);
     void (*reload)(Page *p);              // 数据变化后刷新
     void (*lock)(Page *p);                // 依就绪状态置灰

@@ -79,7 +79,10 @@ void *vec_add(Vec *v);             // 返回新元素地址，已清零
 void *vec_at(Vec *v, int i);
 
 // ---------------- 数值 ----------------
-static inline u16 rd16(const void *p) { return (u16)((const u8 *)p)[0] | (u16)((const u8 *)p)[1] << 8; }
+static inline u16 rd16(const void *p) {
+    const u8 *b = (const u8 *)p;
+    return (u16)((u32)b[0] | ((u32)b[1] << 8));
+}
 static inline u32 rd32(const void *p) {
     return (u32)((const u8 *)p)[0] | (u32)((const u8 *)p)[1] << 8 | (u32)((const u8 *)p)[2] << 16 |
            (u32)((const u8 *)p)[3] << 24;

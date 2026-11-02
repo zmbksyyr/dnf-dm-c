@@ -218,7 +218,7 @@ static void mail_layout(Page *p, int w, int h) {
     (void)h;
     RECT rc;
     GetClientRect(p->wnd, &rc);
-    int pad = ui_scale(6), rowh = ui_scale(23), g = ui_scale(5);
+    int pad = ui_scale(6), rowh = ui_scale(23), gap = ui_scale(5);
     URow r;
     // 顶行：刷新 / 删除所选 / 全部删除 / 删除全服邮件 / 状态
     ui_row(&r, p->wnd, pad, pad, rowh);
@@ -231,7 +231,7 @@ static void mail_layout(Page *p, int w, int h) {
 
     // 底部两行：① 投递参数 ② 正文 + 发送
     int bottom = rc.bottom - pad;
-    int sendh = rowh * 2 + g;
+    int sendh = rowh * 2 + gap;
     // 列表上下各断一刀：上面是操作按钮，下面是投递表单，中间这块才是邮件列表
     int sepy1 = pad + rowh + ui_scale(4);
     ui_place(m_sep1, pad, sepy1, rc.right - pad * 2, ui_scale(2));
@@ -255,7 +255,7 @@ static void mail_layout(Page *p, int w, int h) {
     ui_add(&r, ui_lbl_at(p->wnd, "数量"), ui_scale(34));
     ui_add(&r, m_anum, ui_scale(50));
 
-    y += rowh + g;
+    y += rowh + gap;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "正文"), ui_scale(34));
     // 正文框定宽：原来它一直算到窗口右边，一千多像素宽，写两句话的地方
@@ -280,7 +280,7 @@ static void mail_lock(Page *p) {
     ui_enable(GetDlgItem(p->wnd, M_DELALLS), g.db_ok);
 }
 
-static void mail_build(Page *p, HWND parent) {
+static void mail_build(HWND parent) {
     m_list = ui_list(parent, M_LIST);
     m_info = ui_label(parent, "请先选择角色", M_INFO);
     m_sep1 = ui_hline(parent);

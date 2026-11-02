@@ -28,7 +28,10 @@ if not defined ZBIN for %%C in ("C:\zig\zig.exe" "%LOCALAPPDATA%\zig\zig.exe") d
 if not defined ZBIN goto :nozig
 
 set "TARGET=-target x86_64-windows-gnu"
-set "CFLAGS=%TARGET% -std=c11 -O2 -DNDEBUG -DUNICODE -D_UNICODE"
+rem 警告开关与 CI 保持一致：本地编译出来的告警和 CI 一样多，
+rem 不会出现「本地干净、CI 报错」或反过来。全库当前零告警。
+set "WARN=-Wall -Wextra -Wshadow -Wconversion"
+set "CFLAGS=%TARGET% -std=c11 -O2 -DNDEBUG -DUNICODE -D_UNICODE %WARN%"
 rem Accumulate on separate lines rather than with a trailing caret: inside
 rem double quotes cmd treats ^ as a literal, so the continuation silently
 rem breaks and the later files never get compiled (undefined symbols at link).

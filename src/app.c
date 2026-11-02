@@ -1797,7 +1797,7 @@ static int bubble_in_window(void) {
 
 void app_bubble_status(char *out, int cap) {
     if (!g.cfg.bubble_on) {
-        snprintf(out, cap, "未启用");
+        fmt(out, cap, "未启用");
         return;
     }
     // 生效时长：持续 或 「剩余 x 小时 y 分」
@@ -1815,11 +1815,11 @@ void app_bubble_status(char *out, int cap) {
         }
     }
     if (!bubble_in_window()) {
-        snprintf(out, cap, "已启用 · 已到生效时长，停止结算%s", tw);
+        fmt(out, cap, "已启用 · 已到生效时长，停止结算%s", tw);
         return;
     }
     if (!g.db_ok) {
-        snprintf(out, cap, "已启用 · 等数据库连接后开始计时%s", tw);
+        fmt(out, cap, "已启用 · 等数据库连接后开始计时%s", tw);
         return;
     }
     u64 now = now_ms();
@@ -1827,12 +1827,12 @@ void app_bubble_status(char *out, int cap) {
     const char *tg = g.cfg.bubble_target==0?"仅在线":g.cfg.bubble_target==1?"全服":
                      g.cfg.bubble_target==2?"指定角色":"指定账号";
     if (!s_bubble_runs)
-        snprintf(out, cap, "已启用 · %s · %d 秒后首次结算%s", tg, left, tw);
+        fmt(out, cap, "已启用 · %s · %d 秒后首次结算%s", tg, left, tw);
     else if (s_bubble_paid)
-        snprintf(out, cap, "已启用 · %s · 上次 %u 个对象已加奖励 · %d 秒后下次%s",
+        fmt(out, cap, "已启用 · %s · 上次 %u 个对象已加奖励 · %d 秒后下次%s",
                  tg, s_bubble_paid, left, tw);
     else
-        snprintf(out, cap, "已启用 · %s · 上次没有符合条件的对象 · %d 秒后下次%s", tg, left, tw);
+        fmt(out, cap, "已启用 · %s · 上次没有符合条件的对象 · %d 秒后下次%s", tg, left, tw);
 }
 
 // ---------------- 周期轮询 ----------------

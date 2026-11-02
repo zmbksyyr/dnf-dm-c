@@ -224,6 +224,7 @@ static void br_add_all(BrCtx *c) {
 // ---------------------------------------------------------------- 窗口
 
 static LRESULT br_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
+    (void)d;
     BrCtx *c = (BrCtx *)ctx;
 
     if (m == WM_NOTIFY) {

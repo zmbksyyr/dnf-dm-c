@@ -129,7 +129,7 @@ static int char_do(void *ctx, Err err) {
             // 同上，写暂存。活动字典小，每次刷新都重拉，保证「新增定义」能立刻出现在下拉里
             if (!db_list_event_info(&g.db, &s_event_info_next, err)) return 0;
             return db_list_events(&g.db, &s_events_next, err);
-        case K_EVADD: return db_add_event(&g.db, (u32)c->i1, c->u1, c->u2, c->i2, err);
+        case K_EVADD: return db_add_event(&g.db, (u32)c->i1, (i64)c->u1, (i64)c->u2, c->i2, err);
         case K_EVCLEAR: return db_clear_events(&g.db, err);
         case K_EVADDICT: return db_add_event_info(&g.db, (u32)c->u1, c->s, c->s2, err);
         case K_EVDEL: return db_del_event(&g.db, (u64)c->u1, err);

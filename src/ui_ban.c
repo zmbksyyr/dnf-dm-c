@@ -259,7 +259,7 @@ static void ban_layout(Page *p, int w, int h) {
     (void)h;
     RECT rc;
     GetClientRect(p->wnd, &rc);
-    int pad = ui_scale(6), rowh = ui_scale(23), g = ui_scale(5);
+    int pad = ui_scale(6), rowh = ui_scale(23), gap = ui_scale(5);
     URow r;
     ui_row(&r, p->wnd, pad, pad, rowh);
     ui_add(&r, ui_btn_at(p->wnd, B_REFRESH, "刷新"), ui_scale(60));
@@ -271,14 +271,14 @@ static void ban_layout(Page *p, int w, int h) {
     int y = pad + rowh + ui_scale(6);
     // 列表 + 底部操作区（2 行：字段 / 按钮）。原来还有第三行整段说明，
     // 内容已经挂在「类型」「时长」两个下拉的提示上，删掉后列表高出一行。
-    int btm = rc.bottom - pad - rowh * 2 - g * 2;
+    int btm = rc.bottom - pad - rowh * 2 - gap * 2;
     ui_place(b_sep, pad, btm - ui_scale(6), rc.right - pad * 2, ui_scale(2));
     MoveWindow(b_list, pad, y, rc.right - pad * 2, btm - ui_scale(8) - y, TRUE);
 
     // 第一行：角色选择 + 封禁类型 + 时长 + 原因
     // 角色下拉收窄到 200：原先把「原因」挤成一小格，而原因才是每次都要填的；
     // 角色名太长时下拉展开就能看全，不必靠输入框宽度撑。
-    y = btm + g;
+    y = btm + gap;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_lbl_at(p->wnd, "角色"), ui_scale(34));
     ui_add(&r, b_char, ui_scale(200));
@@ -290,7 +290,7 @@ static void ban_layout(Page *p, int w, int h) {
     ui_add(&r, b_reason, -1);
 
     // 第二行：封停按钮 + 密码管理
-    y += rowh + g;
+    y += rowh + gap;
     ui_row(&r, p->wnd, pad, y, rowh);
     ui_add(&r, ui_btn_at(p->wnd, B_BAN, "执行封停"), ui_scale(88));
     ui_add(&r, ui_lbl_at(p->wnd, "新密码"), ui_scale(52));
@@ -307,7 +307,7 @@ static void ban_lock(Page *p) {
     for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
 }
 
-static void ban_build(Page *p, HWND parent) {
+static void ban_build(HWND parent) {
     b_list = ui_list(parent, B_LIST);
     b_sep = ui_hline(parent);
     b_info = ui_label(parent, "请先连接数据库", B_INFO);

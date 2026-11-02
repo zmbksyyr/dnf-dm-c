@@ -23,5 +23,8 @@ shots/
 *.tmp
 *.bak
 
+# POSIX shell 下 `> nul` 会真的建出名为 nul 的文件，不是 Windows 设备名
+/nul
+
 # 回归脚本日志（run_regress.py 默认落这里）
 tools/regress-logs/

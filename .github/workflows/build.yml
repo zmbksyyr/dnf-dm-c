@@ -55,6 +55,9 @@ jobs:
           $cc = @(
             'cc', '-target', 'x86_64-windows-gnu', '-std=c11', '-O2',
             '-DNDEBUG', '-DUNICODE', '-D_UNICODE',
+            # 警告即错误：全库当前零告警，任何新引入的告警都必须当场解决，
+            # 而不是攒着等人看见。开关与 tools/build.bat 一致。
+            '-Wall', '-Wextra', '-Wshadow', '-Wconversion', '-Werror',
             '-Isrc', '-static', '-s', '-Wl,--subsystem,windows'
           )
           $cc += (Get-ChildItem src/*.c | ForEach-Object { $_.FullName })
