@@ -69,7 +69,7 @@ typedef struct {
     int      opened;
 } Pvf;
 
-int   pvf_open(Pvf *p, const char *path, PvfProg prog);   // 命中缓存秒开
+int   pvf_open(Pvf *p, const char *path, PvfProg prog, Err err);   // 命中缓存秒开
 void  pvf_close(Pvf *p);
 void  pvf_decrypt(u8 *p, size_t n, u32 crc);              // 读：异或 + 右旋 6 位
 void  pvf_encrypt(u8 *p, size_t n, u32 crc);              // 逆变换：左旋 6 位 + 异或（自检用）

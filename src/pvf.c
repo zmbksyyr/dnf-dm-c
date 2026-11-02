@@ -993,27 +993,38 @@ static void reset_keep_id(Pvf *p) {
     snprintf(p->fp, sizeof(p->fp), "%s", fp);
 }
 
-int pvf_open(Pvf *p, const char *path, PvfProg prog) {
-    Err err = {0};
+int pvf_open(Pvf *p, const char *path, PvfProg prog, Err err) {
     pvf_close(p);
     snprintf(p->path, sizeof(p->path), "%s", path);
     if (prog.pct) *prog.pct = 2;
     if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "比对文件指纹");
 
-    if (!file_exists(path)) return 0;
+    if (!file_exists(path)) { snprintf(err, ERRBUF, "PVF 文件不存在：%s", path); return 0; }
     // 指纹只取长度 + 头尾各 64KB：全量 md5 要半秒多，而判断「包换没换」用不着那么严
-    if (!hash_file_fp(path, p->fp)) return 0;
+    if (!hash_file_fp(path, p->fp)) { snprintf(err, ERRBUF, "读取 PVF 指纹失败"); return 0; }
 
     if (load_cache(p)) {
-        p->opened = 1;
-        if (prog.pct) *prog.pct = 100;
-        if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "缓存已就绪");
-        return 1;
+        // 旧缓存也可能是「截断的 PVF」算出来的：一条物品名都没有就别信
+        if (p->items.n > 0) {
+            p->opened = 1;
+            if (prog.pct) *prog.pct = 100;
+            if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "缓存已就绪");
+            return 1;
+        }
+        pvf_close(p);
+        snprintf(p->path, sizeof(p->path), "%s", path);
     }
     reset_keep_id(p);
 
     if (!parse_tree(p, err, prog)) return 0;
     build_dicts(p, prog);
+    // 文件树能解析、物品名却是空的：多半是文件被截断（物品表在树的后面）。
+    // 这种包继续用只会把物品写成编号，宁可拒绝，也不让人拿假数据去改库。
+    if (p->nleaf > 0 && p->items.n == 0) {
+        snprintf(err, ERRBUF, "PVF 里读不到任何物品名（文件可能被截断），已拒绝加载");
+        pvf_close(p);
+        return 0;
+    }
     if (prog.pct) *prog.pct = 96;
     if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "写入缓存");
     save_cache(p);

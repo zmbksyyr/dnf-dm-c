@@ -716,8 +716,7 @@ static PvfCtx g_pvf_ctx;
 static int w_pvf(void *ctx, Err err) {
     PvfCtx *c = (PvfCtx *)ctx;
     PvfProg prog = {&g.pvf_pct, g.pvf_stage, (int)sizeof(g.pvf_stage)};
-    (void)err;
-    return pvf_open(&g.pvf, c->path, prog);
+    return pvf_open(&g.pvf, c->path, prog, err);
 }
 
 // ---------------- 贴图包（编号悬浮卡的图标来源） ----------------
