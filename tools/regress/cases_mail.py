@@ -949,7 +949,8 @@ def ban_chars_fail_keeps(ctx):
         ctx.check("失败后列表没塌成 0 行", _rows(ctx, B_LIST), n)
         ctx.check("失败后角色下拉没被清空", _combo_n(ctx), n)
         info = core.txt(ctx.ctl(B_INFO), 512)
-        ctx.ok("提示停在「正在读取数据…」", "正在读取数据" in info, info)
+        # 失败后程序会明确提示重试（不再无限自动重发），也允许还停在读取中
+        ctx.ok("提示写明失败或读取中", ("读取失败" in info) or ("正在读取数据" in info), info)
         ctx.ok("提示没有变成「共 0 个角色」", "共 0 个角色" not in info, info)
 
         lock.close()

@@ -178,7 +178,10 @@ const char *app_page_field(int page);
 
 // 即时落库：改完立刻生效到内存，并在 200ms 后合并写库（不弹确认、不留草稿）
 void app_item_set(int page, int slot, const Item *it);
-void app_pending_page(int page);                 // 整页写回（清空整页等）
+// 这个容器的这一格能不能放该类型：背包按区段，穿戴/宠物各有允许类型
+int  app_item_slot_ok(int page, int slot, u8 type);
+int  app_pending_page(int page);                 // 整页写回（清空整页等）；0 = 被拒
+                                                 // （在线/未载入）：调用方要把快照重读回来
 int  app_page_busy(int page);                    // 该页有未完成/进行中的写入
 void app_flush_pending(void);                    // 立刻把攒着的写操作发出去（关窗/切角色前）
 void app_save_draft(void);                       // 同上，旧名字，别处还在调

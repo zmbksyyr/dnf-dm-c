@@ -161,6 +161,7 @@ static void card_build(HWND parent) {
 }
 
 // 左栏：两张卡片，和右侧同款（细线 + 粗体标题），底部与右侧组框齐平
+static int s_kw;        // 角色卡标签列宽：按当前 DPI 量一次，换 DPI 时清零重算
 static void left_layout(int x, int y0, int w, int h) {
     int rowh = ui_scale(21), crh = ui_scale(20);
     int padx = ui_scale(12);
@@ -192,9 +193,7 @@ static void left_layout(int x, int y0, int w, int h) {
     }
 
     ui_place(g_grp_card, x, g2y, w, g2h);
-    // 标签列宽按最长的那条量，不写死像素：写死 56 时「装备 / 仓库」的「库」、
-    // 72 时「SP / TP」后面那个值又换成被裁，换字号/DPI 还得再调一次。
-    static int s_kw;
+    // 标签列宽按最长的那条量，不写死像素：字号/DPI 变了要跟着变
     if (s_kw <= 0) {
         for (int i = 0; i < CARD_N; i++) {
             int tw = ui_text_w(kCardKey[i]);
@@ -820,8 +819,19 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         case WM_DPICHANGED: {
             int dpi = HIWORD(wp);
             ui_set_dpi(dpi);
+            s_kw = 0;              // 标签列宽按新缩放重量
+            // 窗口尺寸也按新 DPI 重算：s_win_w/s_win_h 同时给 WM_GETMINMAXINFO 用，
+            // 留着旧值会把窗口钳在旧像素尺寸上
+            int cw = ui_scale(1240), ch = ui_scale(800);
+            int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+            if (cw > sw * 96 / 100) cw = sw * 96 / 100;
+            if (ch > sh * 92 / 100) ch = sh * 92 / 100;
+            RECT rc = {0, 0, cw, ch};
+            AdjustWindowRectEx(&rc, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), FALSE, 0);
+            s_win_w = rc.right - rc.left;
+            s_win_h = rc.bottom - rc.top;
             RECT *r = (RECT *)lp;
-            SetWindowPos(h, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top,
+            SetWindowPos(h, NULL, r->left, r->top, s_win_w, s_win_h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
             do_layout();
             return 0;

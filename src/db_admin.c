@@ -529,10 +529,27 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
 // 一个诚实的限制：MySQL 里 CREATE / DROP / ALTER 会隐式提交事务，所以整库备份
 // （带建表语句）做不到端到端原子，只能保证两个 DDL 之间的 DML 段是原子的。角色
 // 备份是纯 DML，能完整回滚 —— 而它恰恰是最需要回滚的那一种。
+static int view_sync_char(Db *d, u32 mid, u32 cno, Err err);
 int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
     Buf f = {0};
     if (!file_read(path, &f)) { snprintf(err, ERRBUF, "读不到 %s", path); return 0; }
     set_names(d, db_cs_name(d->charset));
+
+    // 角色备份头部带「视图」标记：还原完要把槽位补回 charac_view，
+    // 否则角色在 charac_info 里有行、客户端列表里却没有
+    u32 vmid = 0, vcno = 0;
+    {
+        buf_reserve(&f, f.n + 1);
+        f.p[f.n] = 0;
+        const char *mk = strstr((const char *)f.p, "-- 视图 m_id=");
+        if (mk) {
+            unsigned a = 0, b = 0;
+            if (sscanf(mk, "-- 视图 m_id=%u charac_no=%u", &a, &b) == 2) {
+                vmid = a;
+                vcno = b;
+            }
+        }
+    }
 
     // 关自动提交，把后面所有语句收进同一个事务。
     // 这一步失败就不继续：下面每一步都假定自己在事务里，事实不是那样的话，
@@ -618,6 +635,8 @@ int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
         set_names(d, db_cs_name(d->charset));
         if (!ok) return 0;
     }
+    // 角色备份：把槽位补回账号视图（失败要报出来，数据行已经还原，只差这一步）
+    if (vmid && vcno && !view_sync_char(d, vmid, vcno, err)) return 0;
     if (stmts) *stmts = n;
     return 1;
 
@@ -658,6 +677,91 @@ typedef struct {
 // +26 lev。布局是从库里现存的原生槽逐字节量出来的，不是猜的。
 #define CV_SLOT 296
 #define CV_NAME 20
+
+// 把某个角色补回账号的槽位视图。缺槽的角色在 charac_info 里明明有行，
+// 客户端也画不出来（charac_count 还是旧的）——角色备份还原后必须补这一步。
+static int view_sync_char(Db *d, u32 mid, u32 cno, Err err) {
+    Str s = {0};
+    MyResult r = {0};
+    str_catf(&s, "SELECT charac_name,job,grow_type,lev FROM taiwan_cain.charac_info "
+                 "WHERE charac_no=%u", cno);
+    if (!select1(d, &s, &r) || !r.nrow) { my_free(&r); str_free(&s); return 1; }
+    char name[64] = "";
+    cp_text(name, sizeof(name), &r, 0, 0);
+    int job = (int)my_i64(&r, 0, 1, 0);
+    int grow = (int)my_i64(&r, 0, 2, 0);
+    int lev = (int)my_i64(&r, 0, 3, 0);
+    my_free(&r);
+    str_clear(&s);
+
+    // 现有视图（可能没有这一行）
+    str_catf(&s, "SELECT info FROM taiwan_cain.charac_view WHERE m_id=%u", mid);
+    Buf plain = {0};
+    u8 prefix[4] = {0};
+    int have = 0;
+    if (select1(d, &s, &r) && r.nrow) {
+        const char *bp = my_text(&r, 0, 0);
+        int bn = my_len(&r, 0, 0);
+        if (bp && bn > 4) {
+            memcpy(prefix, bp, 4);
+            have = zlib_unpack((const u8 *)bp + 4, (size_t)(bn - 4), &plain,
+                               (size_t)CV_SLOT * 4096);
+        }
+    }
+    my_free(&r);
+    str_free(&s);
+
+    if (!have || plain.n < CV_SLOT) {
+        buf_clear(&plain);
+        u8 zero[CV_SLOT];
+        memset(zero, 0, sizeof(zero));
+        buf_put(&plain, zero, CV_SLOT);
+    }
+
+    int nslot = (int)(plain.n / CV_SLOT);
+    int t = -1;
+    for (int k = 0; k < nslot && t < 0; k++)
+        if (rd32(plain.p + k * CV_SLOT) == cno) t = k;      // 已有槽：原地更新
+    for (int k = 0; k < nslot && t < 0; k++) {
+        int z = 1;
+        for (int j = 0; j < CV_SLOT; j++)
+            if (plain.p[k * CV_SLOT + j]) { z = 0; break; }
+        if (z) t = k;                                       // 空槽
+    }
+    if (t < 0) {
+        buf_free(&plain);
+        snprintf(err, ERRBUF, "账号 %u 的角色槽位已满，无法把角色 %u 写回列表", mid, cno);
+        return 0;
+    }
+
+    u8 *slot = plain.p + t * CV_SLOT;
+    memset(slot, 0, CV_SLOT);
+    wr32(slot + 0, cno);
+    size_t nl = strlen(name);
+    memcpy(slot + 4, name, nl < CV_NAME - 1 ? nl : CV_NAME - 1);
+    slot[24] = (u8)job;
+    slot[25] = (u8)grow;
+    slot[26] = (u8)lev;
+
+    Buf pk = {0};
+    zlib_pack(plain.p, plain.n, &pk);
+    Buf out = {0};
+    buf_put(&out, prefix, 4);
+    buf_put(&out, pk.p, pk.n);
+
+    Str u = {0};
+    str_cat(&u, "UPDATE taiwan_cain.charac_view SET `info`=");
+    sql_lit(&u, (const char *)out.p, (int)out.n, 1);
+    str_catf(&u, ", `charac_count`=(SELECT COUNT(*) FROM taiwan_cain.charac_info"
+                 " WHERE `m_id`=%u AND `delete_flag`=0) WHERE `m_id`=%u", mid, mid);
+    int ok = run(d, &u);
+    if (!ok) snprintf(err, ERRBUF, "写回角色槽位失败：%s", d->err);
+    str_free(&u);
+    buf_free(&out);
+    buf_free(&pk);
+    buf_free(&plain);
+    return ok;
+}
 
 // 按 m_id 归属的表必须手工列，不能自动发现：那一列只说明「属于某个账号」，
 // 里面混着封停记录、建角限制、计费数据，自动复制等于把封号一起克隆。
@@ -737,9 +841,11 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
     now_str(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S");
     str_catf(&out,
              "-- DNF GM 角色备份 · %s\n-- charac_no=%u  %s  (m_id=%u)\n"
+             "-- 视图 m_id=%u charac_no=%u\n"
              "-- 还原会先删掉该角色在这些表里的现有行，再按备份写回\n"
              "SET NAMES %s;\nSET FOREIGN_KEY_CHECKS=0;\n\n",
-             ts, c->no, c->name, c->mid, cs);
+             ts, c->no, c->name, c->mid,
+             c->mid, c->no, cs);
     if (!file_write(path, out.p, (size_t)out.n)) {
         snprintf(err, ERRBUF, "无法写入 %s", path);
         str_free(&out);
@@ -795,10 +901,11 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
 
         // 注释和 DELETE 必须先落盘：数据是边查边 append 的，
         // 攒到最后写会让「插入」跑到「删除」前面，还原等于清空。
+        // DELETE 无条件输出：备份时该表没有行，不代表还原时也没有
+        //（account_cargo / charac_quest_shop 这类行是懒建的）。
         str_catf(&out, "-- %s.%s (%d 行)%s\n", ct->db, ct->tb, r.nrow,
                  ct->by_mid ? " · 账号共享" : "");
-        if (r.nrow)
-            str_catf(&out, "DELETE FROM `%s`.`%s` WHERE `%s`=%u;\n", ct->db, ct->tb, key, kv);
+        str_catf(&out, "DELETE FROM `%s`.`%s` WHERE `%s`=%u;\n", ct->db, ct->tb, key, kv);
         file_append(path, out.p, (size_t)out.n);
         str_clear(&out);
 

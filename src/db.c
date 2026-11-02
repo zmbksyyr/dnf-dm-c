@@ -1129,6 +1129,8 @@ int db_bubble_tick(Db *d, const BubbleCfg *cfg, u32 *paid, Err err) {
         str_catf(&mids, "SELECT %u AS m_id", cfg->tno);
     }
 
+    // 四段奖励同生共死：只发出一半（比如点券已加、D币失败）比整体不发更糟
+    if (!db_tx_begin(d, err)) { str_free(&chs); str_free(&mids); return 0; }
     int ok = 1;
     u64 aff = 0, paid_rows = 0;
     // 赠送点券（角色级，inventory.coin）
@@ -1175,8 +1177,13 @@ int db_bubble_tick(Db *d, const BubbleCfg *cfg, u32 *paid, Err err) {
         }
     }
     str_free(&chs); str_free(&mids);
+    if (!ok) {
+        db_tx_rollback(d);
+        return 0;
+    }
+    if (!db_tx_commit(d, err)) return 0;
     if (paid) *paid = (u32)paid_rows;
-    return ok;
+    return 1;
 }
 
 // ---------------- GM 一键 ----------------

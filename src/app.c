@@ -324,13 +324,14 @@ const char *app_page_field(int page) {
 // ---------------- 即时落库 ----------------
 // 页面改完立刻写库（不再有「保存改动」按钮，也不攒草稿）：
 // 内存先改，200ms 内的多次编辑合并成一次写，写完再刷新界面。
-void app_pending_page(int page) {
-    if (page < 0 || page > 5 || !g.char_ok) return;
+int app_pending_page(int page) {
+    if (page < 0 || page > 5 || !g.char_ok) return 0;
     Blob *b = app_page_blob(page);
-    if (!b || !b->ok) return;
-    if (g.cur.online) { app_status("角色在线，改动未写入——请先退出游戏"); return; }
+    if (!b || !b->ok) return 0;
+    if (g.cur.online) { app_status("角色在线，改动未写入——请先退出游戏"); return 0; }
     g.pend_mask |= 1u << page;
     g.pend_ms = now_ms();
+    return 1;
 }
 
 void app_item_set(int page, int slot, const Item *it) {
@@ -1220,6 +1221,23 @@ static void inv_zone(u8 t, int *lo, int *hi, const char **name) {
     }
 }
 
+// 这个容器/槽位能不能放这个类型的物品。背包按区段（快捷栏通用），
+// 穿戴与宠物各有允许的类型；仓库/珠宝/账号金库不分区。
+int app_item_slot_ok(int page, int slot, u8 type) {
+    if (type == IT_EMPTY) return 1;
+    if (page == 0) {
+        if (slot >= 1 && slot < INV_EQUIP_LO) return 1;      // 快捷栏：放什么都行
+        int lo, hi;
+        const char *name;
+        inv_zone(type, &lo, &hi, &name);
+        return slot >= lo && slot < hi;
+    }
+    if (page == 1) return type == IT_EQUIP || type == IT_CREATURE_EQUIP;
+    if (page == 2)
+        return type == IT_CREATURE || type == IT_CREATURE_EQUIP || type == IT_CREATURE_STACK;
+    return 1;
+}
+
 static int w_grant(void *ctx, Err err) {
     GrantCtx *c = (GrantCtx *)ctx;
     // 硬校验：UI 线程的在线位是缓存，可能过期；发放前在 job 线程里查一次真值
@@ -1832,15 +1850,10 @@ void app_bubble_status(char *out, int cap) {
 }
 
 // ---------------- 周期轮询 ----------------
-void app_bubble_export(void) {
-    char dir[MAX_PATH], outp[MAX_PATH], logp[MAX_PATH];
-    app_log_path(logp, sizeof(logp));
-    art_dir("export", dir, sizeof(dir));
-    path_join(outp, sizeof(outp), dir, "泡点记录.txt");
-    FILE *fin = fopen(logp, "rb");
-    if (!fin) { app_info("没有可导出的泡点记录（日志文件不存在）"); return; }
-    FILE *fout = fopen(outp, "wb");
-    if (!fout) { fclose(fin); app_info("导出失败：无法写入 泡点记录.txt"); return; }
+// 把一份日志里与泡点有关的行追加到 fout，返回条数
+static int bubble_export_file(const char *path, FILE *fout) {
+    FILE *fin = fopen(path, "rb");
+    if (!fin) return 0;
     char line[2048];
     int n = 0;
     while (fgets(line, sizeof(line), fin)) {
@@ -1849,7 +1862,57 @@ void app_bubble_export(void) {
             n++;
         }
     }
-    fclose(fin); fclose(fout);
+    fclose(fin);
+    return n;
+}
+
+static int cmp_logname(const void *a, const void *b) {
+    return strcmp((const char *)a, (const char *)b);
+}
+
+void app_bubble_export(void) {
+    char dir[MAX_PATH], outp[MAX_PATH], logp[MAX_PATH];
+    app_log_path(logp, sizeof(logp));
+    art_dir("export", dir, sizeof(dir));
+    path_join(outp, sizeof(outp), dir, "泡点记录.txt");
+    FILE *fout = fopen(outp, "wb");
+    if (!fout) { app_info("导出失败：无法写入 泡点记录.txt"); return; }
+
+    // 日志按天轮转：跨天的活动记录在昨天或更早的文件里，不能只读今天那份
+    char logdir[MAX_PATH];
+    snprintf(logdir, sizeof(logdir), "%s", logp);
+    char *slash = strrchr(logdir, '\\');
+    if (slash) *slash = 0;
+
+    char names[32][MAX_PATH];
+    int nn = 0;
+    char pat[MAX_PATH];
+    path_join(pat, sizeof(pat), logdir, "log-*.txt");
+    WCHAR wpat[MAX_PATH];
+    utf16(pat, wpat, MAX_PATH);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(wpat, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (nn >= COUNT_OF(names)) break;
+            utf8(fd.cFileName, names[nn], MAX_PATH);
+            nn++;
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    qsort(names, (size_t)nn, sizeof(names[0]), cmp_logname);   // 文件名带日期，字典序即时间序
+
+    int n = 0;
+    for (int i = 0; i < nn; i++) {
+        char full[MAX_PATH];
+        path_join(full, sizeof(full), logdir, names[i]);
+        n += bubble_export_file(full, fout);
+    }
+    fclose(fout);
+    if (!nn) {
+        app_info("没有可导出的泡点记录（日志目录为空）");
+        return;
+    }
     app_info(fmt_new("已导出 %d 条泡点记录到：\n%s", n, outp));
 }
 

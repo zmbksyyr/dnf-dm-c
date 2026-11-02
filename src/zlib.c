@@ -215,6 +215,14 @@ int zlib_unpack(const void *src, size_t n, Buf *out, size_t max_out) {
         int r = type == 0 ? stored(&s) : type == 1 ? fixed(&s) : type == 2 ? dynamic(&s) : -1;
         if (r) return 0;
     } while (!last);
+
+    // 尾部 adler32 是坏数据的最后一道闸：stored 块没有编码冗余，改一个字节
+    // 照样能解出等长内容，只有校验和能发现问题。
+    u32 want = rd32be(p + n - 4);
+    if (adler32_calc(out->p, out->n) != want) {
+        out->n = 0;
+        return 0;
+    }
     return 1;
 }
 

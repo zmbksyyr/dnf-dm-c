@@ -56,6 +56,8 @@ static void ev_fill_list(void) {
     ui_text(e_info, fmt_new("已启用 %d 项 · 活动字典 %d 条", g.events.n, g.event_info.n));
 }
 
+static int s_load_try;       // 本轮已提交过读取：失败后不再自动重试
+
 static void ev_reload(Page *p) {
     (void)p;
     if (!g.db_ok) {
@@ -63,13 +65,15 @@ static void ev_reload(Page *p) {
         return;
     }
     if (!(g.lists_ready & L_EVENTS)) {
-        if (!job_running(&g.job_act)) {
-            kc.kind = K_EVLIST;
-            app_act("读取活动", char_work, &kc);
-        }
+        if (job_running(&g.job_act)) { ui_text(e_info, "正在读取活动…"); return; }
+        // 查询失败时位不置，这一轮不再自动重发
+        if (s_load_try) { ui_text(e_info, "读取失败，点「刷新」重试"); return; }
+        kc.kind = K_EVLIST;
+        if (app_act("读取活动", char_work, &kc)) s_load_try = 1;
         ui_text(e_info, "正在读取活动…");
         return;
     }
+    s_load_try = 0;
     ev_fill_combo();
     ev_fill_list();
 }
@@ -186,6 +190,7 @@ static LRESULT ev_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         }
         case E_REF:
             g.lists_ready &= ~(u32)L_EVENTS;
+            s_load_try = 0;                 // 用户明确要求重试
             ev_reload(p);
             return 0;
         case E_COMBO:

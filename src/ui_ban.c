@@ -103,27 +103,33 @@ static void ban_fill(void) {
     s_filling = 0;
 }
 
+// 两张列表各自的重试闸：一张失败不该把另一张也卡住
+static int s_try_bans, s_try_chars;
+
 static void ban_reload(Page *p) {
     (void)p;
     if (!g.db_ok) { ui_text(b_info, "请先连接数据库"); return; }
-    // 并行拉封停记录和角色列表
     if (!(g.lists_ready & L_BANS) || !(g.lists_ready & L_BANCHARS)) {
-        if (!job_running(&g.job_act)) {
-            if (!(g.lists_ready & L_BANS)) {
-                memset(&kc, 0, sizeof(kc));
-                kc.kind = K_BANLIST;
-                app_act("读取封停", char_work, &kc);
-            } else {
-                memset(&kc, 0, sizeof(kc));
-                kc.kind = K_BANCHARS;
-                kc.i1 = s_online_only;      // 0=全服 1=只在线
-                app_act("读取角色列表", char_work, &kc);
-            }
+        if (job_running(&g.job_act)) { ui_text(b_info, "正在读取数据…"); return; }
+        if (!(g.lists_ready & L_BANS)) {
+            if (s_try_bans) { ui_text(b_info, "读取失败，点「刷新」重试"); return; }
+            memset(&kc, 0, sizeof(kc));
+            kc.kind = K_BANLIST;
+            if (app_act("读取封停", char_work, &kc)) s_try_bans = 1;
+        } else {
+            if (s_try_chars) { ui_text(b_info, "读取失败，点「刷新」重试"); return; }
+            memset(&kc, 0, sizeof(kc));
+            kc.kind = K_BANCHARS;
+            kc.i1 = s_online_only;      // 0=全服 1=只在线
+            if (app_act("读取角色列表", char_work, &kc)) s_try_chars = 1;
         }
         ui_text(b_info, "正在读取数据…");
         return;
     }
-    if (s_char_ver != g.ban_chars_ver) ban_fill_chars();   // 名单换代就重建下拉
+    s_try_bans = s_try_chars = 0;
+    // 名单换代就重建下拉；首次进入（平行数组还是空）也要建一次
+    if (s_char_ver != g.ban_chars_ver || (s_char_n == 0 && g.ban_chars.n > 0))
+        ban_fill_chars();
     ban_fill();
 }
 
@@ -146,6 +152,7 @@ static LRESULT ban_load(Page *p, int online_only) {
     g.ban_chars.n = 0;
     s_char_n = 0;
     g.lists_ready &= ~(u32)(L_BANS | L_BANCHARS);
+    s_try_bans = s_try_chars = 0;      // 用户明确要求重试
     ban_reload(p);
     return 0;
 }
@@ -170,6 +177,7 @@ static LRESULT ban_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             g.ban_chars.n = 0;
             s_char_n = 0;
             g.lists_ready &= ~(u32)(L_BANS | L_BANCHARS);
+            s_try_bans = s_try_chars = 0;
             ban_reload(p);
             return 0;
         case B_LOADALL: return ban_load(p, 0);

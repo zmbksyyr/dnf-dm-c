@@ -113,24 +113,30 @@ static void mail_refresh_list(void) {
     ui_text(m_info, g.char_ok ? fmt_new("%s · 共 %d 封邮件", g.cur.name, g.mails.n) : "请先选择角色");
 }
 
+static int s_load_try;      // 本轮已提交过读取：失败后不再自动重试
+static u32 s_load_cno;      // 上一次读取是为哪个角色发的
+
 static void mail_reload(Page *p) {
     (void)p;
     // PVF 可能是进页面之后才加载完的，每次刷新都重问一次类型
     mail_type_sync();
     if (!g.char_ok) { ui_text(m_info, "请先选择角色"); return; }
     if (!(g.lists_ready & L_MAILS)) {
-        if (!job_running(&g.job_act)) {
-            // 与封停/活动页的列表动作同形：查询写 act.c 的 s_mails_next 暂存，
-            // 成功后由 char_work 标脏，act_apply_lists() 在 job_poll 之后搬到 g.mails
-            // 才置 L_MAILS。查询失败不标脏，重试分支下次 reload 还会再拉。
-            memset(&kc, 0, sizeof(kc));
-            kc.kind = K_MAILLIST;
-            kc.cno = g.cur.no;
-            app_act("读取邮件", char_work, &kc);
-        }
+        if (job_running(&g.job_act)) { ui_text(m_info, "正在读取邮件…"); return; }
+        // 换角色是新的读取意图，失败重试的闸要放开
+        if (s_load_cno != g.cur.no) { s_load_try = 0; s_load_cno = g.cur.no; }
+        if (s_load_try) { ui_text(m_info, "读取失败，点「刷新」重试"); return; }
+        // 查询写 act.c 的 s_mails_next 暂存，成功后由 char_work 标脏，
+        // act_apply_lists() 在 job_poll 之后搬到 g.mails 并置 L_MAILS。
+        // 失败时位不置，这一轮就不再自动重发，否则会按 tick 频率打库。
+        memset(&kc, 0, sizeof(kc));
+        kc.kind = K_MAILLIST;
+        kc.cno = g.cur.no;
+        if (app_act("读取邮件", char_work, &kc)) s_load_try = 1;
         ui_text(m_info, "正在读取邮件…");
         return;
     }
+    s_load_try = 0;
     mail_refresh_list();
 }
 
@@ -141,6 +147,8 @@ static LRESULT mail_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     if (LOWORD(wp) == M_REFRESH) {
         g.mails.n = 0;
         g.lists_ready &= ~(u32)L_MAILS;
+        s_load_try = 0;                  // 用户明确要求重试
+        s_load_cno = 0;
         mail_reload(p);
         return 0;
     }
