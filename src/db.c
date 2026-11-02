@@ -164,6 +164,18 @@ int db_open(Db *d, const char *host, int port, const char *user, const char *pwd
 void db_close(Db *d) { mysql_close(&d->conn); }
 int  db_alive(const Db *d) { return mysql_alive(&d->conn); }
 
+// 角色列表三处查询（db_list_chars / db_poll_chars / db_list_ban_chars）共用的
+// 核心 6 字段：SELECT 前 6 列固定为 charac_no,charac_name,job,grow_type,lev,m_id。
+// 账号名 / 在线列位各不相同，留在各自站点处理。
+static void charac_core(Charac *c, const MyResult *r, int i) {
+    c->no = (u32)my_u64(r, i, 0, 0);
+    cp_text(c->name, sizeof(c->name), r, i, 1);
+    c->job = (int)my_i64(r, i, 2, 0);
+    c->grow = (int)my_i64(r, i, 3, 0);
+    c->lev = (int)my_i64(r, i, 4, 0);
+    c->mid = (u32)my_u64(r, i, 5, 0);
+}
+
 // ---------------- 角色 ----------------
 // 搜索关键字同时匹配 角色名 / 账号名 / 角色编号
 int db_list_chars(Db *d, Vec *out, int limit, const char *kw, Err err) {
@@ -195,12 +207,7 @@ int db_list_chars(Db *d, Vec *out, int limit, const char *kw, Err err) {
     vec_clear(out);
     for (int i = 0; i < r.nrow; i++) {
         Charac *c = VEC_ADD(out, Charac);
-        c->no = (u32)my_u64(&r, i, 0, 0);
-        cp_text(c->name, sizeof(c->name), &r, i, 1);
-        c->job = (int)my_i64(&r, i, 2, 0);
-        c->grow = (int)my_i64(&r, i, 3, 0);
-        c->lev = (int)my_i64(&r, i, 4, 0);
-        c->mid = (u32)my_u64(&r, i, 5, 0);
+        charac_core(c, &r, i);
         c->online = my_i64(&r, i, 6, 0) == 1;
         cp_text(c->account, sizeof(c->account), &r, i, 7);
     }
@@ -266,12 +273,7 @@ int db_poll_chars(Db *d, Vec *out, int limit, Err err) {
     vec_clear(out);
     for (int i = 0; i < r.nrow; i++) {
         Charac *c = VEC_ADD(out, Charac);
-        c->no = (u32)my_u64(&r, i, 0, 0);
-        cp_text(c->name, sizeof(c->name), &r, i, 1);
-        c->job = (int)my_i64(&r, i, 2, 0);
-        c->grow = (int)my_i64(&r, i, 3, 0);
-        c->lev = (int)my_i64(&r, i, 4, 0);
-        c->mid = (u32)my_u64(&r, i, 5, 0);
+        charac_core(c, &r, i);
         cp_text(c->account, sizeof(c->account), &r, i, 6);   // 列序：6=accountname
         int acct = (int)my_i64(&r, i, 7, 0);                 // 7=login_status
         int playing = cur_tab ? (int)my_i64(&r, i, 8, 0) : 1;
@@ -324,12 +326,7 @@ int db_list_ban_chars(Db *d, Vec *out, int online_only, int limit, Err err) {
         int online = acct == 1 && playing == 1;
         if (online_only && !online) continue;       // 过滤在填的时候做，SQL 少一层子查询
         Charac *c = VEC_ADD(out, Charac);
-        c->no = (u32)my_u64(&r, i, 0, 0);
-        cp_text(c->name, sizeof(c->name), &r, i, 1);
-        c->job = (int)my_i64(&r, i, 2, 0);
-        c->grow = (int)my_i64(&r, i, 3, 0);
-        c->lev = (int)my_i64(&r, i, 4, 0);
-        c->mid = (u32)my_u64(&r, i, 5, 0);
+        charac_core(c, &r, i);
         cp_text(c->account, sizeof(c->account), &r, i, 6);
         c->online = online;
     }
