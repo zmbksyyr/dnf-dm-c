@@ -233,6 +233,9 @@ const BubblePlan *app_bubble_plan_at(int i);   // i=0 是最新一条
 int  app_bubble_plan_ver(void);                // 每次增减都 +1，页面据此决定要不要重填
 
 // 发放
+// 一次发送的队列上限：界面上所有「加入队列」的批量入口也用它，免得攒出
+// 发不出去的队列
+#define APP_GRANT_MAX 256
 void app_grant_add(u32 id, u32 num);           // num = 这次要几个，0 当 1
 // 批量入队：不刷状态栏。队列里已有的把数量取大（不重复加行）。
 // 返回 1 = 新增，2 = 沿用旧行、数量补大，0 = 原样没动。

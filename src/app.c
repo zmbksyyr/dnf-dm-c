@@ -41,21 +41,17 @@ static void cfg_load(Config *c, const char *path) {
     c->port = ini_int(L"db", L"port", 3306, w);
     ini_str(L"db", L"user", c->user, sizeof(c->user), w);
     if (!c->user[0]) snprintf(c->user, sizeof(c->user), "game");
-    // 口令明文读、明文存（settings.ini 里就是原文），这是**定好的取舍**，不是漏做：
-    // 本机连库用，掩码之后看不见、改不动、连不上时也核对不了；本地加密也挡不住
-    // 能碰到这台机器的人。界面上对应一个可编辑下拉（main.c 的 kPwdList 有预置项），
-    // tools/v_pwd.py 把「必须是明文、必须可手填」钉成用例。
+    // 口令明文读、明文存：本机连库用，掩码之后看不见、改不动、连不上时也核对不了。
+    // 界面上是可编辑下拉，预置项见 main.c 的 kPwdList。
     ini_str(L"db", L"pwd", c->pwd, sizeof(c->pwd), w);
     if (!c->pwd[0]) snprintf(c->pwd, sizeof(c->pwd), "uu5!^%%jg");
-    // 45 = utf8mb4。以前默认 33（utf8，也就是 utf8mb3），那种连接存不下 4 字节字符：
-    // 名字或邮件正文里带个 emoji / 扩展汉字，写进去就永久丢了，而且不打招呼。
-    // utf8mb4 是它的超集，读写 utf8(mb3) 的表完全没问题，所以默认值换成 45。
-    // 已经在用的 settings.ini 里仍是 33 的，在设置里存一次就会跟着更新。
+    // 45 = utf8mb4：33（utf8mb3）存不下 4 字节字符，emoji 会被静默替换。
+    // 已在用的 settings.ini 仍是 33 时，在设置里存一次就会更新。
     c->charset = ini_int(L"db", L"charset", 45, w);
 
     ini_str(L"pvf", L"path", c->pvf, sizeof(c->pvf), w);
     ini_str(L"pvf", L"img", c->img_dir, sizeof(c->img_dir), w);
-    // 等级上限默认 85：多数端在这个版本封顶 85，之前写死 100 会把等级写到超出范围
+    // 等级上限按端配置，服务端封顶多少这里就填多少
     c->lev_max = ini_int(L"gm", L"lev_max", 85, w);
     if (c->lev_max < 1 || c->lev_max > 255) c->lev_max = 85;
     c->font = ini_int(L"ui", L"font", 9, w);
@@ -666,14 +662,8 @@ static volatile LONG s_reload_later;     // 写失败的回滚请求（job 线�
 static volatile LONG s_load_recheck;
 static int g_pq_head, g_pq_n;            // 环形：head 出队，n 排队数
 
-// 「断开」和「退出」在关连接之前都要先等这批作业停下来：它们共用同一条 MySQL
-// 连接（db_busy 那一份），紧接着的 db_close / db_free_data 释放的正是它们手里的
-// 收发包缓冲和容器 blob —— job_stop 的注释就是为这件事写的。
-// 抽成一份，是为了两边永远同步：以前断开只停 4 个、漏了 job_conn（连接作业正在
-// db_open/select 时点断开，db_close 就撞上它的收发包缓冲），以后新增作业也不会
-// 再漏第二次。
-// 只列用这条连接的 5 个：pvf / npk / grab 只读游戏进程内存，不必等它们
-// （退出那一段仍然全停，但那是「进程要走了」，不是连接安全的需要）。
+// 「断开」与「退出」共用的停机顺序：先停用这条连接的作业，再关连接。
+// 只列这 5 个；pvf / npk / grab 不碰 MySQL 连接，退出时才需要等。
 static int stop_db_jobs(void) {
     int stopped = job_stop(&g.job_conn);
     stopped &= job_stop(&g.job_load);
@@ -684,14 +674,8 @@ static int stop_db_jobs(void) {
 }
 
 void app_disconnect(void) {
-    // 先等占用这条连接的作业退出，再关连接。
-    // db_close 会 free 收发包缓冲并关掉 socket，而 w_write / w_load / w_poll 此刻
-    // 可能正在这条连接上 recv/memmove；紧接着的 db_free_data 释放的又正是它们手中
-    // 那份容器。写 6 个容器要几百毫秒，这几百毫秒里「断开」一直可点 ——
-    // 退出路径（main.c:929 WM_CLOSE）早就是这个顺序，断开这条漏了同一步。
-    //
-    // 等不到就不能往下走：全服扫描、整库备份/还原在真实库上轻易超过 30 秒，
-    // job_stop 超时后线程仍在跑，接着 db_close 就是一边 free 一边 recv。
+    // 作业没停就关连接，等于一边 free 收发包缓冲一边 recv。
+    // 等不到就拒绝这次断开，连接与队列都保留，用户可再点一次。
     int stopped = stop_db_jobs();
     if (!stopped) {
         app_status("后台任务还在跑，稍后再断开（连接没有关）");
@@ -1116,20 +1100,14 @@ int app_act_idle(void) {
 }
 
 // ---------------- 会话边界：丢弃还没开始的动作 ----------------
-// 「断开」= 丢掉所有还没开始的动作。这个语义以前只落在 app 层的 g_pq 上，
-// 页面层各自还攒着自己的队列和闸：GM 页的写队列 s_gmq、扫描页的 s_scan_live、
-// 表内扫描的 g_tab_pending。它们各自找地方复位，于是同一个漏法发作了四次
-// （R1-006 / R3-003 / R3-004 / R3-007）。现在统一从这一个入口走。
+// 断开的语义是「丢掉所有还没开始的动作」。页面层的写队列、扫描闸、待弹窗标记
+// 也要一起复位，否则它们会在重连后对着新连接执行旧意图。
 //
-// 用「注册钩子」而不是在 app_disconnect 里逐个调 page_xxx_drop()：后者要求
-// 每新增一个带页面队列的页都回来改 app.c，漏一次就是下一次 R3-00x；钩子在
-// 页面自己的 create 里注册，app.c 不认识页面名。
+// 用注册钩子而不是在 app_disconnect 里逐个调 page_xxx_drop()：页面在自己的
+// create 里注册，新增页面不用回头改 app.c。
 //
-// 安全性来自调用时机：只有确认共用那条连接的作业都停了（stop_db_jobs 返回 1）
-// 才会走到这里。也就是说钩子复位的一定是「死状态」，不会去清一个还在往 s_scan 里
-// 追加的作业手里的闸 —— 那是 R1-006 用 s_scan_live 挡住的那类 use-after-free。
-// 注意这里说的只是「db 侧作业」：pvf / npk / grab 那三个不碰这条连接，也不持有
-// 页面队列，等不等它们都不影响钩子清的是什么。
+// 调用时机保证安全：只有共用连接的作业都停了才会走到这里，钩子复位的是死状态，
+// 不会去清一个还在往暂存区追加的作业。
 #define DROP_HOOKS 8
 static void (*s_drop_hook[DROP_HOOKS])(void);
 static int s_drop_hooks;
@@ -1198,7 +1176,7 @@ int app_grant_add_new(u32 id, u32 num) {
 // g.grant 是竞态（realloc 后指针悬空 / 删项后越界）。发前拷一份，job 只读快照。
 // 快照放独立静态数组（不在 GrantCtx 里）：GrantCtx 要塞进 app_act 的 768B 队列缓冲，
 // 带不下 256 项物品。一次只发一批，所以一份快照就够。
-#define GRANT_SNAP_MAX 256
+#define GRANT_SNAP_MAX APP_GRANT_MAX
 static NamedId s_grant_snap[GRANT_SNAP_MAX];
 static int     s_grant_snap_n;
 // 走邮件时一种物品最多拆成几封。一封一个附件，拆得太狠（比如发 9999 个上限为 1
@@ -1209,11 +1187,9 @@ typedef struct {
 } GrantCtx;
 static GrantCtx g_grant_ctx;
 
-// 背包是分段的，不是一整条。服务端逐槽校验，物品只要落错区段，InventoryVerify
-// 就判整个背包非法并断开连接 —— 而且一次只报第一个（ERROR_ITEM_LOG），删掉它只会
-// 让报错顺延到下一件，看起来就像"删了没用"。
+// 背包是分段的，不是一整条。服务端逐槽校验，物品落错区段就判整个背包非法并断开
+// 连接，而且一次只报第一件（ERROR_ITEM_LOG），删掉它只会让报错顺延到下一件。
 //
-// 分区标尺取自 2026.3.14 源码 GUI.py 的 positionDict（新旧两版一致）：
 //     槽 0        保留位，任何物品都不该落这里
 //     槽 1..8     快捷栏，通用，放什么都行
 //     槽 9..56    装备     (type=0x01)
@@ -1221,11 +1197,6 @@ static GrantCtx g_grant_ctx;
 //     槽 105..152 材料     (type=0x03)
 //     槽 153..200 任务材料 (type=0x04)
 //     槽 201..248 副职业   (type=0x0a)
-//
-// 早先这里只分「普通栏 / 材料栏」两档，一刀切在 153，有两个错：
-//   1) 材料(type=3)真区间是 105..152，被塞进了任务材料区 153..200
-//   2) 非材料类从槽 0 起找，而槽 0 是保留位 —— 服务端日志里那条
-//      ERROR_ITEM_LOG ... slot(0) 就是这么来的
 #define INV_EQUIP_LO    9
 #define INV_EQUIP_HI   57
 #define INV_STACK_LO   57

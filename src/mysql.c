@@ -357,8 +357,13 @@ static int handshake(MySql *m, const char *user, const char *pwd, const char *db
     buf_putc(&b, (u8)(charset & 0xff));
     for (int i = 0; i < 23; i++) buf_putc(&b, 0);
     buf_put(&b, user, strlen(user) + 1);
-    buf_putc(&b, 20);
-    buf_put(&b, auth, 20);
+    // 空口令时 auth-response 长度必须是 0：服务端按 20 字节校验会对不上
+    if (pwd && *pwd) {
+        buf_putc(&b, 20);
+        buf_put(&b, auth, 20);
+    } else {
+        buf_putc(&b, 0);
+    }
     if (use & CAP_CONNECT_WITH_DB) buf_put(&b, db, strlen(db) + 1);
     buf_put(&b, "mysql_native_password", 22);
 

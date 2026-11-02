@@ -660,8 +660,7 @@ typedef struct {
 #define CV_NAME 20
 
 // 按 m_id 归属的表必须手工列，不能自动发现：那一列只说明「属于某个账号」，
-// 里面混着封停记录（member_punish_info）、建角限制、计费数据。自动扫出来
-// 再复制过去，等于把封号一起克隆 —— 那不是备份，是复制故障。
+// 里面混着封停记录、建角限制、计费数据，自动复制等于把封号一起克隆。
 // 要跟着角色走的只有这两张：账号金库 + 已开图。
 static const CharTab kMidTabs[] = {
     {"taiwan_cain", "account_cargo",  1},
@@ -681,8 +680,8 @@ static int tab_excluded(const char *tb) {
 }
 
 // 扫 information_schema 把「按 charac_no 归属」的表全捞出来，再接上手工
-// 白名单的账号级表。以前是一份写死的清单，漏了 11 张表 —— 克隆出的角色
-// 缺这些行，界面上看不出异常，进游戏却被服务端校验踢掉，极难定位。
+// 白名单的账号级表。写死清单会漏表：漏掉的行让克隆角色看着正常、进游戏却被
+// 服务端校验踢掉。
 // 返回 1 = 成功，0 = 失败（err 已填）。
 static int char_tabs(Db *d, Vec *out, Err err) {
     vec_clear(out);
