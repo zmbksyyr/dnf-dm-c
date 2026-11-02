@@ -144,6 +144,8 @@ int  job_start(Job *j, int (*fn)(void *ctx, Err err), void *ctx);
 int  job_poll(Job *j, Err err);      // 返回 1 表示本轮刚结束（成功或失败）
 int  job_stop(Job *j);               // 1 = 线程真的停了；0 = 30 秒没等到，还在跑
 int  job_running(const Job *j);
+int  job_stop_by(Job *j, u64 deadline);  // 共用截止时刻的停机（整批一起等）
+int  app_db_busy(void);                  // 有作业占着那条 MySQL 连接
 
 // 会话边界（断开 / 重连）：丢掉所有还没开始的动作，并让页面复位自己的队列与闸。
 // 页面在自己的 create 里调 app_on_drop() 注册，新增页面不用回头改 app.c。

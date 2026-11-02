@@ -240,114 +240,7 @@ void app_info(const char *text) {
 }
 
 // ---------------- 任务 ----------------
-static DWORD WINAPI job_thread(LPVOID param) {
-    Job *j = (Job *)param;
-    Err err = {0};
-    int ok = j->fn(j->ctx, err);
-    if (ok) {
-        j->err[0] = 0;
-        InterlockedExchange(&j->state, 2);
-    } else {
-        snprintf(j->err, ERRBUF, "%s", err[0] ? err : "未知错误");
-        InterlockedExchange(&j->state, 3);
-    }
-    return 0;
-}
-
-int job_running(const Job *j) { return j->state == 1; }
-
-int job_start(Job *j, int (*fn)(void *ctx, Err err), void *ctx) {
-    if (j->state == 1) return 0;                 // 还在跑：不能重入
-    if (j->state == 2 || j->state == 3) {
-        // 上一轮跑完了但没人 poll。不先收掉的话，下面 CloseHandle 会连同那份
-        // 结果一起扔掉——错误信息就这么静默消失。按现有调用方不该走到这里，
-        // 真走到这里说明有人漏了 poll，至少别让结论也跟着丢
-        Err drop;
-        job_poll(j, drop);
-    }
-    if (j->th) { CloseHandle(j->th); j->th = NULL; }
-    j->fn = fn;
-    j->ctx = ctx;
-    j->progress = 0;
-    j->stage[0] = 0;
-    j->err[0] = 0;
-    InterlockedExchange(&j->state, 1);
-    j->th = CreateThread(NULL, 0, job_thread, j, 0, NULL);
-    if (!j->th) {
-        InterlockedExchange(&j->state, 3);
-        snprintf(j->err, ERRBUF, "创建线程失败");
-        return 0;
-    }
-    return 1;
-}
-
-int job_poll(Job *j, Err err) {
-    LONG st = j->state;
-    if (st != 2 && st != 3) return 0;
-    if (j->th) {
-        WaitForSingleObject(j->th, INFINITE);
-        CloseHandle(j->th);
-        j->th = NULL;
-    }
-    snprintf(err, ERRBUF, "%s", j->err);       // err 是数组参数，不可能为 NULL
-    InterlockedExchange(&j->state, 0);
-    return 1;
-}
-
-// 共用同一条 MySQL 连接的作业：协议是严格串行的，任一在跑，别的必须等。
-// 只互斥 app_act 是不够的——轮询/载入撞上写库会在同一连接上交错收发，包就串了
-static int db_busy(void) {
-    return job_running(&g.job_conn) || job_running(&g.job_load) ||
-           job_running(&g.job_act) || job_running(&g.job_poll) ||
-           job_running(&g.job_bubble);
-}
-
-// 等作业线程退出。等的同时泵消息：停机可能持续几十秒，不泵的话窗口会变白、
-// 系统把它标成「未响应」。消息里只跳过主窗口的 WM_TIMER —— 那一拍会去 poll
-// 正在等的这个作业，和停机抢状态机。
-static int wait_job(Job *j, u64 deadline) {
-    int was = g_main && IsWindowEnabled(g_main);
-    if (g_main) EnableWindow(g_main, FALSE);      // 停机期间不接受新操作
-    int ok = 0;
-    for (;;) {
-        u64 now = now_ms();
-        if (now >= deadline) { ok = WaitForSingleObject(j->th, 0) == WAIT_OBJECT_0; break; }
-        DWORD left = (DWORD)(deadline - now);
-        DWORD r = MsgWaitForMultipleObjects(1, &j->th, FALSE, left, QS_ALLINPUT);
-        if (r == WAIT_OBJECT_0) { ok = 1; break; }
-        if (r == WAIT_TIMEOUT) { ok = 0; break; }
-        MSG m;
-        while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
-            if (m.message == WM_TIMER && m.hwnd == g_main) continue;
-            if (!IsDialogMessageW(g_main, &m)) {
-                TranslateMessage(&m);
-                DispatchMessageW(&m);
-            }
-        }
-    }
-    if (g_main && was) EnableWindow(g_main, TRUE);   // 原本就禁用（模态中）就别解锁
-    return ok;
-}
-
-static int job_stop_by(Job *j, u64 deadline) {
-    if (j->th) {
-        if (!wait_job(j, deadline)) {
-            // 超时：线程还在跑，不能关句柄（线程退出时句柄才可关）。
-            // 标记 abandoned 并记日志，泄漏一个句柄但状态机不会假空闲。
-            // 必须把「没等到」这件事告诉调用方：它接着要释放的正是这个线程
-            // 正在读的收发包缓冲（db_close → free(m->buf)），不看返回值就等于
-            // 一边 free 一边 recv。
-            app_log("任务线程未在期限内退出，放弃等待（句柄保留）");
-            return 0;                     // 保留 j->th 和 state，等下次 job_poll 收
-        }
-        CloseHandle(j->th);
-        j->th = NULL;
-    }
-    InterlockedExchange(&j->state, 0);
-    return 1;
-}
-
-int job_stop(Job *j) { return job_stop_by(j, now_ms() + 30000); }
+// 作业原语见 app_job.c；这里保留与连接相关的「忙」判定与停机顺序。
 
 // ---------------- 页面 ----------------
 Blob *app_page_blob(int page) {
@@ -465,7 +358,7 @@ static int w_write(void *argv, Err err) {
 
 void app_flush_pending(void) {
     if (!g.pend_mask || !g.db_ok || !g.char_ok) return;
-    if (db_busy()) return;                       // 连接被别的作业占着：等它让出来
+    if (app_db_busy()) return;                       // 连接被别的作业占着：等它让出来
     if (now_ms() - g.pend_ms < 200) return;      // 合并连续编辑
     u32 m = g.pend_mask;
     g.pend_mask = 0;
@@ -488,7 +381,7 @@ void app_flush_pending(void) {
         }
     }
     // app_act 返回 1 有两种含义：「已启动」和「已排队」（app_act_n 在连接忙或队列
-    // 非空时走入队分支）。本函数入口只查了 db_busy()，没查 g_pq_n，所以不能假定
+    // 非空时走入队分支）。本函数入口只查了 app_db_busy()，没查 g_pq_n，所以不能假定
     // 「一定走 act_start、不会排队」。
     // 真正的保险是上下文按值拷贝：act_start 把 g_warg 连着 WriteCtx* 一起 memcpy
     // 进 g_act_ctx.buf，排队那条路则 memcpy 进 g_pq[i].buf —— 所有权随入队交出，
@@ -716,7 +609,7 @@ static void connect_begin(void) {
     // 没有经过 app_disconnect，队列里可能还压着「上一个库」的动作；
     // 不清的话，重连成功的第一时间它们就按旧快照打进新库。
     // 作业还在跑就先不动：那时候页面状态归那个作业所有，等断开那次统一收。
-    if (!db_busy()) app_drop_queued();
+    if (!app_db_busy()) app_drop_queued();
     g.lists_ready = 0;
     g.db_ok = 0;
     g.char_ok = 0;
@@ -958,7 +851,7 @@ static int w_load(void *ctx, Err err) {
 }
 
 static void load_kick(void) {
-    if (!s_load_want || db_busy()) return;
+    if (!s_load_want || app_db_busy()) return;
     s_load_want = 0;
     job_start(&g.job_load, w_load, &g_load_ctx);
 }
@@ -1169,7 +1062,7 @@ int app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz) {
         app_status("请先连接数据库");
         return 0;
     }
-    if (!db_busy() && !g_pq_n) return act_start(what, fn, ctx, ctxsz);
+    if (!app_db_busy() && !g_pq_n) return act_start(what, fn, ctx, ctxsz);
     if (ctxsz < 0 || ctxsz > PEND_BUF) return 0;
     if (g_pq_n >= PEND_N) {
         app_status("已有 %d 个操作在排队，这个没提交", g_pq_n);
@@ -1190,7 +1083,7 @@ int app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz) {
 // 现在能不能直接发一个写动作：连接空闲，且队列是空的。
 // 页面自己攒队列时用它判断，免得自己的动作排到队尾等太久
 int app_act_idle(void) {
-    return !db_busy() && !g_pq_n;
+    return !app_db_busy() && !g_pq_n;
 }
 
 // ---------------- 会话边界：丢弃还没开始的动作 ----------------
@@ -1974,7 +1867,7 @@ void app_tick(void) {
 
     // 连接空出来了：先把排队的动作发完，再补载入。
     // 顺序不能反 —— 载入会换掉 g.data，若排队的写还在等，它拿到的就是新角色的数据。
-    if (!db_busy()) {
+    if (!app_db_busy()) {
         if (g_pq_n) {
             int i = g_pq_head;
             g_pq_head = (g_pq_head + 1) % PEND_N;
@@ -2024,7 +1917,7 @@ void app_tick(void) {
     }
     // 轮询：单条查询同时取角色列表/在线/当前角色，每 poll_sec 一次；
     // 连接被别的作业占着就跳过这一轮，不抢（抢会把包串了）
-    if (g.db_ok && !db_busy() && now_ms() - last_poll > (u64)g.cfg.poll_sec * 1000) {
+    if (g.db_ok && !app_db_busy() && now_ms() - last_poll > (u64)g.cfg.poll_sec * 1000) {
         last_poll = now_ms();
         job_start(&g.job_poll, w_poll, NULL);
     }

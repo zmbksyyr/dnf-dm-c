@@ -200,21 +200,46 @@ def check_npk(args):
 
 
 
+SQL_TOK = ["'", '"', "`", ";", "--", "/*", "*/", "\n", "\r", " ", "\t", "\\", "\\'", "''",
+           "foo", "бар", "中文", "?", "0x", "\\0", "%", "_", "#", "=", ",", "(", ")",
+           "\x00"]
+
+
 def check_sql(args):
-    """语法错误的还原文件：报错并回滚，进程活着。"""
-    path = os.path.join(core.BUILD, "config", "backup", "fuzz-bad.sql")
+    """用随机词法碎片喂还原器：切分逻辑必须报错退出，不能崩、不能挂。
+
+    只用标点/注释/引号和非关键字词元，保证拼不出任何合法语句——数据不会被改。
+    """
+    import subprocess
+
+    rounds = args.sql or 1
+    path = os.path.join(core.BUILD, "config", "backup", "fuzz-sql.sql")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    open(path, "w", encoding="utf-8").write("SET NAMES utf8mb4;\nNOT VALID SQL;;;\n")
-    print("[1/1] 语法错误的 SQL 还原")
+    exe_dir = os.path.dirname(core.EXE)
+    bad = 0
     try:
-        alive, _ = boot_check("就绪", 8.0)
-        print("      启动正常=%s（还原路径由 db.restore_bad_sql 用例覆盖）" % alive)
-        return alive
+        for i in range(rounds):
+            n = random.choice([64, 512, 4096, 20000])
+            body = "".join(random.choice(SQL_TOK) for _ in range(n // 2))
+            open(path, "w", encoding="utf-8", errors="replace").write(
+                "SET NAMES utf8mb4;\n" + body)
+            try:
+                r = subprocess.run([core.EXE, "--db-restore=" + path], cwd=exe_dir,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=30)
+                rc = r.returncode
+            except subprocess.TimeoutExpired:
+                rc = "TIMEOUT"
+            good = rc in (0, 1)        # 0=全被当注释；1=正常报错；其余视为崩溃
+            print("[%d/%d] %6d 字节 rc=%s %s" % (i + 1, rounds, n, rc, "" if good else "<-- 异常"))
+            if not good:
+                bad += 1
     finally:
         try:
             os.remove(path)
         except OSError:
             pass
+    return bad == 0
 
 
 def check_pvf(args):
@@ -243,7 +268,7 @@ def check_pvf(args):
 def main():
     ap = argparse.ArgumentParser(description="畸形输入模糊测试")
     ap.add_argument("--config", action="store_true", help="损坏 settings.ini")
-    ap.add_argument("--sql", action="store_true", help="语法错误的还原文件")
+    ap.add_argument("--sql", type=int, nargs="?", const=1, default=0, help="随机词法碎片喂还原器（可给轮数）")
     ap.add_argument("--pvf", type=int, default=0, help="PVF 畸形副本轮数")
     ap.add_argument("--npk", action="store_true", help="合成病态 npk 贴图包")
     a = ap.parse_args()
