@@ -7,6 +7,16 @@
 #include "zlib.h"
 #include <time.h>
 
+// 把「列名, 数据类型」两列读进两个 Str Vec（整库备份 / 单表导出两处共用）。
+static void read_col_pairs(const MyResult *r, Vec *names, Vec *types) {
+    for (int i = 0; i < r->nrow; i++) {
+        Str *a = VEC_ADD(names, Str); memset(a, 0, sizeof(*a));
+        str_set(a, my_text(r, i, 0) ? my_text(r, i, 0) : "");
+        Str *b = VEC_ADD(types, Str); memset(b, 0, sizeof(*b));
+        str_set(b, my_text(r, i, 1) ? my_text(r, i, 1) : "");
+    }
+}
+
 // ---------------- 活动 ----------------
 int db_list_events(Db *d, Vec *out, Err err) {
     Str s = {0};
@@ -397,12 +407,7 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
                      "WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' ORDER BY ORDINAL_POSITION",
                  sc, tb);
         if (select1(d, &q, &r)) {
-            for (int i = 0; i < r.nrow; i++) {
-                Str *a = VEC_ADD(&names, Str); memset(a, 0, sizeof(*a));
-                str_set(a, my_text(&r, i, 0) ? my_text(&r, i, 0) : "");
-                Str *b = VEC_ADD(&types, Str); memset(b, 0, sizeof(*b));
-                str_set(b, my_text(&r, i, 1) ? my_text(&r, i, 1) : "");
-            }
+            read_col_pairs(&r, &names, &types);
         }
         my_free(&r);
         str_clear(&q);
@@ -747,12 +752,7 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
                      "WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' ORDER BY ORDINAL_POSITION",
                  ct->db, ct->tb);
         if (select1(d, &q, &r)) {
-            for (int i = 0; i < r.nrow; i++) {
-                Str *a = VEC_ADD(&names, Str); memset(a, 0, sizeof(*a));
-                str_set(a, my_text(&r, i, 0) ? my_text(&r, i, 0) : "");
-                Str *b = VEC_ADD(&types, Str); memset(b, 0, sizeof(*b));
-                str_set(b, my_text(&r, i, 1) ? my_text(&r, i, 1) : "");
-            }
+            read_col_pairs(&r, &names, &types);
         }
         my_free(&r);
         str_clear(&q);
