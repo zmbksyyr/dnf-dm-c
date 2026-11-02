@@ -172,6 +172,12 @@ void app_disconnect(void);
 void app_list_chars(const char *kw);
 void app_select_char(int idx);
 void app_reload(void);
+// 载入状态由 app_load.c 维护，app_tick 只调这几个入口
+void app_load_pending(void);             // 补上载入期间点过的角色
+void app_load_poll(void);                // 载入作业的结果（快照换代 / 失败清暂存）
+void app_load_kick_if_wanted(void);      // 连接空闲后补发挂起的载入
+void app_load_drop(void);                // 断开/换库：作废挂起意图与暂存区
+int  app_load_take_reload(void);         // 取走「写失败后要重载」的请求
 void app_reload_later(void);       // 任务线程里用：让下一次 app_tick 重读当前角色
 int  app_sync_char(void);          // 写后校验（job 线程）：结果暂存，返回 1=与缓存一致
 void app_sync_apply(void);         // UI 线程：把暂存的校验结果搬到 g.*（job_poll 后调）

@@ -45,13 +45,6 @@ void app_cancel_current(void) {
     app_log("用户请求取消当前任务：%s", g.act_what);
 }
 
-// 载入暂存区。断开连接、退出、载入完成这三处都要动它，所以实例放在全局区，
-// 别藏在「角色」小节里——那边看到它的人容易以为它只跟选角色有关。
-typedef struct {
-    Charac   c;
-    CharData d;        // 载入到这里，成功那一刻整块换给 g.data
-} LoadCtx;
-static LoadCtx g_load_ctx;
 
 // ---------------- 配置 ----------------
 static int ini_int(const WCHAR *sec, const WCHAR *key, int def, const WCHAR *path) {
@@ -663,16 +656,7 @@ void app_connect(void) {
     connect_begin();
 }
 
-// 「排队动作」和「待载入」两组状态：队列本体（g_pq）和载入上下文定义在下面的
-// 「角色」「通用异步动作」两段里，但断开时要连这两个计数一起清，所以先声明在这里
-// （搬上来的话，得把 PEND_BUF / PEND_N 和 g_pq 一起挪）。
-static int s_load_want;                  // 想载入但连接正忙：等空闲了再发
-// 载入作业独占 g_load_ctx：跑着的时候不能改它，后来的选择先记在这里。
-static int s_load_pending = -1;
-static volatile LONG s_reload_later;     // 写失败的回滚请求（job 线程置，UI 线程取）
-// 载入前要不要先把 name/job/grow/lev 从库里读回来（UI 线程置 1，载入作业取走）。
-// 跨线程所以用 Interlocked：和 s_reload_later 同一套写法。
-static volatile LONG s_load_recheck;
+// 写队列在 app_act.c、载入状态在 app_load.c；这里只剩连接与停机顺序。
 // 写队列本体在 app_act.c：这里只剩「能不能发」与出队入口
 
 // 「断开」与「退出」共用的停机顺序：先停用这条连接的作业，再关连接。
@@ -719,7 +703,7 @@ void app_disconnect(void) {
     InterlockedExchange(&s_chars_dirty, 0);
     vec_clear(&g.cre_ids);          // 换库连就得换清单，留着旧的等于认错宠物
     db_free_data(&g.data);
-    db_free_data(&g_load_ctx.d);      // 载入到一半断开时，暂存区里还有东西
+    app_load_drop();                   // 载入到一半断开：暂存区与挂起的意图一起作废
     app_status("已断开数据库");
 }
 
@@ -863,83 +847,7 @@ void app_grab_auto(int on) {
     }
 }
 
-// ---------------- 角色 ----------------
-
-// 载入写进 g_load_ctx.d 而不是直接写 g.data：
-// db_load_data 第一件事就是 db_free_data(out)，也就是先 free 掉 6 个 blob 再重填。
-// 直接对着 g.data 做，UI 线程在那一瞬间正在画物品列表，读到的就是刚被释放的指针
-// （现在之所以没崩，只是因为 blob_unpack 把 ok=1 放在最后一句，属于撞对了顺序）。
-// 用一块暂存区就没有这个问题——g.data 在交换之前一直是完整可用的旧快照。
-static int w_load(void *ctx, Err err) {
-    LoadCtx *c = (LoadCtx *)ctx;
-    // 回滚/重载要用库里的真值当快照：db_load_data 的 SELECT 里没有 charac_name
-    // （lev/job/grow 也没有），光靠它重读一遍，名字永远回不来 —— 改名被拒时界面
-    // 就一直停在那个没写进库的重名上。回读失败就维持传进来的那份：一条小查询
-    // 不该把整个载入打挂。查询放在这里做是因为连接归载入作业独占，UI 线程不查库。
-    if (InterlockedExchange(&s_load_recheck, 0)) {     // 取走即清零
-        Err e = {0};
-        if (!db_read_charac(&g.db, c->c.no, &c->c, e))
-            app_err("重载：回读角色失败，按内存快照载入：%s", e);
-    }
-    db_free_data(&c->d);                 // 上一轮失败留下的半成品
-    return db_load_data(&g.db, &c->c, &c->d, err);
-}
-
-static void load_kick(void) {
-    if (!s_load_want || app_db_busy()) return;
-    s_load_want = 0;
-    job_start(&g.job_load, w_load, &g_load_ctx);
-}
-
-void app_select_char(int idx) {
-    if (idx < 0 || idx >= g.chars.n) return;
-    if (job_running(&g.job_load)) {          // 上一轮还在读库：记下意图，读完再接
-        s_load_pending = idx;
-        return;
-    }
-    // 切换前把合并窗里的背包改动落盘。直接清零等于丢数据，而"先切再写"更糟：
-    // blob 数据会被新角色的载入换掉，写进去的就是别人的背包。
-    if (g.pend_mask) {
-        g.pend_ms = 0;                       // 不等 200ms 合并窗
-        for (int i = 0; i < 12 && g.pend_mask; i++) {
-            app_tick();                      // 里面会尝试 flush
-            Sleep(50);
-        }
-        if (g.pend_mask) {
-            app_status("正在写库，稍后再切换角色");
-            return;
-        }
-    }
-    Charac *c = VEC_AT(&g.chars, Charac, idx);
-    // 这里不碰 g.cur：快照换人放在载入成功那一刻，一次完成。
-    // 提前把 g.cur 改掉，正在跑的写作业就会拿旧数据去写新角色。
-    g.sel = idx;
-    g.lists_ready = 0;
-    g.char_ok = 0;                  // 数据到位前先锁住页面
-    g_load_ctx.c = *c;
-    app_status("正在载入 %s 的数据…", c->name);
-    s_load_want = 1;
-    load_kick();
-}
-
-void app_reload(void) {
-    if (!g.char_ok) return;
-    if (job_running(&g.job_load)) {          // 同上：别在作业读 g_load_ctx 时改它
-        InterlockedExchange(&s_reload_later, 1);
-        return;
-    }
-    // 写失败后的回滚要回到库里的真值，而不是内存里这份：改名/改等级是「先改快照、
-    // 再写库」（gm_apply 的乐观更新），失败时 g.cur 里躺的正是那个没写进库的值，
-    // 照它重读等于把假值再确认一次。所以让载入作业先回读 charac_info 再载入
-    // （s_load_recheck，见 w_load）—— 顺带把 lev/job/grow 一起纠正。
-    g_load_ctx.c = g.cur;
-    InterlockedExchange(&s_load_recheck, 1);
-    s_load_want = 1;
-    load_kick();
-}
-
-// 任务线程不能直接开作业（job_start 要跟 UI 线程抢同一份状态机），只留个请求
-void app_reload_later(void) { InterlockedExchange(&s_reload_later, 1); }
+// 角色载入 / 重载 / 选角见 app_load.c
 
 // ---------------- 写后校验 ----------------
 // 写库之后把真值读回来，跟内存里的快照比一次（两条小查询，只在真写库后跑一次）：
@@ -1066,7 +974,7 @@ void app_on_drop(void (*fn)(void)) {
 
 void app_drop_queued(void) {
     app_act_clear_queue();
-    s_load_want = 0;
+    app_load_drop();
     for (int i = 0; i < s_drop_hooks; i++) s_drop_hook[i]();
 }
 
@@ -1651,7 +1559,7 @@ void app_shutdown(void) {
         pvf_close(&g.pvf);
         npk_free(&g.npk);
         db_free_data(&g.data);
-        db_free_data(&g_load_ctx.d);
+        app_load_drop();
         act_free();                              // 列表暂存 Vec
         if (g.db_ok) db_close(&g.db);
     }
@@ -1685,11 +1593,6 @@ void app_tick(void) {
     static u64 last_poll = 0;
 
     app_npk_tick();                   // 贴图包扫描完成的收尾
-    if (s_load_pending >= 0 && !job_running(&g.job_load)) {
-        int next = s_load_pending;             // 载入期间点过的角色，下一帧补上
-        s_load_pending = -1;
-        app_select_char(next);
-    }
     if (job_poll(&g.job_conn, err)) {
         if (err[0]) {
             snprintf(g.db_err, sizeof(g.db_err), "%s", err);
@@ -1716,32 +1619,8 @@ void app_tick(void) {
         }
     }
 
-    if (job_poll(&g.job_load, err)) {
-        if (err[0]) {
-            g.char_ok = 0;
-            db_free_data(&g_load_ctx.d);      // 半成品不留在暂存区里
-            app_status("载入角色失败：%s", err);
-        } else {
-            // 快照在这里整体换代：job_poll 已经等到载入线程结束，此刻没有并发读者，
-            // 交换 Blob 指针（浅拷贝）是安全的，而且旧快照直到这一刻都还能正常显示。
-            db_free_data(&g.data);
-            g.data = g_load_ctx.d;
-            memset(&g_load_ctx.d, 0, sizeof(g_load_ctx.d));   // 暂存区交出去，别再动它
-            // 载入期间 g.cur 一直是旧角色，所以这期间完成的旧角色写操作
-            // 也不会把数据糊到新角色头上。
-            g.cur = g_load_ctx.c;
-            if (g.sel >= 0 && g.sel < g.chars.n) {       // 在线状态以轮询为准
-                Charac *lc = VEC_AT(&g.chars, Charac, g.sel);
-                if (lc->no == g.cur.no) g.cur.online = lc->online;
-            }
-            g.char_ok = 1;
-            g.data_ver++;
-            int used = 0;
-            for (int i = 0; i < g.data.inv.n; i++)
-                if (!item_empty(&g.data.inv.items[i])) used++;
-            app_status("已载入 %s · 物品栏 %d 件", g.cur.name, used);
-        }
-    }
+    app_load_pending();               // 载入期间点过的角色，这一帧补上
+    app_load_poll();                  // 载入结果：快照换代 / 失败清暂存
 
     if (job_poll(&g.job_pvf, err)) {
         if (err[0]) {
@@ -1810,9 +1689,7 @@ void app_tick(void) {
     }
 
     // 写失败的回滚请求：重读当前角色，把乐观更新改过的内存恢复成库里的值
-    if (InterlockedExchange(&s_reload_later, 0)) {
-        app_reload();
-    }
+    if (app_load_take_reload()) app_reload();
 
     // 断线自动重连：还有次数、连接确实断着、也没有连接作业在跑，就再试一次
     if (s_recon_left > 0 && !g.db_ok && !job_running(&g.job_conn) && now_ms() >= s_recon_at) {
@@ -1833,8 +1710,8 @@ void app_tick(void) {
         int sz = 0;
         if (app_act_take_queued(what, sizeof(what), &fn, &ctx, &sz)) {
             app_act_run(what, fn, ctx, sz);
-        } else if (s_load_want) {
-            load_kick();
+        } else {
+            app_load_kick_if_wanted();
         }
     }
 
