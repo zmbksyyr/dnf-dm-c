@@ -34,7 +34,7 @@ static void npk_list_files(Npk *p, const char *dir) {
         char path[MAX_PATH];
         utf8(fd.cFileName, path, MAX_PATH);
         char *full = (char *)xalloc(strlen(dir) + strlen(path) + 2);
-        sprintf(full, "%s\\%s", dir, path);
+        snprintf(full, strlen(dir) + strlen(path) + 2, "%s\\%s", dir, path);
         p->files = (char **)xrealloc(p->files, sizeof(char *) * (size_t)(p->nfiles + 1));
         p->files[p->nfiles++] = full;
     } while (FindNextFileW(h, &fd));

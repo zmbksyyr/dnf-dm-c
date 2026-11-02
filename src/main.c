@@ -1041,6 +1041,20 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     if (wcsstr(GetCommandLineW(), L"--db-dump")) return db_dump_main();
     if (wcsstr(GetCommandLineW(), L"--db-restore")) return db_restore_main();
 
+    // 单实例提醒：两个窗口同时改同一个号，写库会互相覆盖（且没人能看出是哪边写的）。
+    // 命令行模式（--db-dump/--db-restore 等）不受限，脚本要能边开界面边跑。
+    HANDLE once = CreateMutexW(NULL, TRUE, L"Local\\DNF_GM_SingleInstance");
+    if (once && GetLastError() == ERROR_ALREADY_EXISTS) {
+        int yes = MessageBoxW(NULL,
+                              L"已经有一个 DNF GM 工具在运行。\n\n"
+                              L"两个窗口同时写库可能互相覆盖，确定还要再开一个吗？",
+                              L"DNF GM 工具", MB_YESNO | MB_ICONWARNING) == IDYES;
+        if (!yes) {
+            CloseHandle(once);
+            return 0;
+        }
+    }
+
     WNDCLASSEXW wc;
     memset(&wc, 0, sizeof(wc));
     wc.cbSize = sizeof(wc);

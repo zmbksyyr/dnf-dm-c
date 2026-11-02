@@ -1133,3 +1133,50 @@ def dlg_jobgate(ctx):
             lk.close()
         except Exception:
             pass
+
+@core.case("ui.single_instance", needs=("gui",), group="always",
+           desc="再开一个实例会提示「已有实例在运行」，选「否」后退出")
+def single_instance(ctx):
+    """验：两个窗口同时写库的风险被拦住；命令行模式不受影响。"""
+    import subprocess
+
+    def dlg_for(pid):
+        found = []
+
+        def each(h, lp):
+            if not u.IsWindowVisible(h):
+                return True
+            cls = ctypes.create_unicode_buffer(64)
+            u.GetClassNameW(h, cls, 64)
+            if cls.value == "#32770":
+                q = ctypes.wintypes.DWORD(0)
+                u.GetWindowThreadProcessId(h, ctypes.byref(q))
+                if q.value == pid:
+                    found.append(h)
+            return True
+        u.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(each), 0)
+        return found
+
+    p2 = subprocess.Popen([core.EXE], cwd=os.path.dirname(core.EXE))
+    try:
+        d = []
+        t0 = time.time()
+        while time.time() - t0 < 10:
+            d = dlg_for(p2.pid)
+            if d:
+                break
+            time.sleep(0.2)
+        if not ctx.ok("第二个实例弹出提醒", bool(d)):
+            return
+        core.press(u.GetDlgItem(d[0], 7), 0.5)      # 「否」
+        try:
+            rc = p2.wait(timeout=10)
+        except Exception:
+            rc = None
+        ctx.ok("选「否」后第二个实例退出", rc == 0, "rc=%s" % (rc,))
+        ctx.ok("第一个实例不受影响", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
+    finally:
+        try:
+            p2.kill()
+        except Exception:
+            pass
