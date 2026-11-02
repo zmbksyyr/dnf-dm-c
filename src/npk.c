@@ -197,7 +197,7 @@ static const u8 *img_frame(const u8 *img, size_t n, int want, u32 *plen, u32 *pt
     for (int hop = 0; hop < 8; hop++) {
         if (cur < 0 || cur >= (int)cnt) return NULL;
         size_t o = 0;
-        u32 skip = 0;
+        size_t skip = 0;
         for (int i = 0; i < (int)cnt; i++) {
             // cnt 由文件给出，索引区未必真装得下这么多条目 —— 每一项都要先
             // 确认读得完整，否则畸形包会把我们带出缓冲区
@@ -211,7 +211,9 @@ static const u8 *img_frame(const u8 *img, size_t n, int want, u32 *plen, u32 *pt
             if (o + 36 > (size_t)idx_size) return NULL;
             u32 l = rd32(idx + o + 16);
             if (i == cur) {
-                if (skip + l > n - (size_t)(data - img)) return NULL;
+                // 减法判界：skip+l 用 32 位相加会回绕，绕过检查
+                size_t avail = n - (size_t)(data - img);
+                if (skip > avail || (size_t)l > avail - skip) return NULL;
                 u32 w = rd32(idx + o + 8), h = rd32(idx + o + 12);
                 if (w == 0 || w > 4096 || h == 0 || h > 4096) return NULL;
                 *plen = l; *ptype = t; *pcomp = rd32(idx + o + 4); *pw = w; *ph = h;

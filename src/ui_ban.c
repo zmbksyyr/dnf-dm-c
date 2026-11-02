@@ -225,12 +225,19 @@ static LRESULT ban_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             const char *type_name = b->type == 2 ? "角色" : "账号";
-            if (!app_confirm(fmt_new("解除 %s mid=%u（%s）的封停？", type_name, b->mid, b->account)))
+            // 确认框会跑模态循环，期间列表可能被后台查询整体换掉：
+            // 先把要用的标量拷出来，弹框之后不再碰 who / b。
+            u32 unb_mid = b->mid;
+            int unb_type = b->type;
+            u32 unb_no = who->no;
+            char unb_acc[48];
+            snprintf(unb_acc, sizeof(unb_acc), "%s", b->account);
+            if (!app_confirm(fmt_new("解除 %s mid=%u（%s）的封停？", type_name, unb_mid, unb_acc)))
                 return 0;
             kc.kind = K_UNBAN;
-            kc.mid = b->mid;
-            kc.i2 = b->type;   // 按惩罚类型精确解封
-            s_keep_cno = who->no;
+            kc.mid = unb_mid;
+            kc.i2 = unb_type;   // 按惩罚类型精确解封
+            s_keep_cno = unb_no;
             g.bans.n = 0;
             g.lists_ready &= ~(u32)L_BANS;
             app_act("解封", char_work, &kc);

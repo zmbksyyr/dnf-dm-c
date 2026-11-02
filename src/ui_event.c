@@ -171,12 +171,15 @@ static LRESULT ev_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             int row = ui_row_sel(e_list);
             if (row < 0 || row >= g.events.n) { app_info("请先在列表里选一项。"); return 0; }
             EventRow *e = VEC_AT(&g.events, EventRow, row);
-            if (!app_confirm(fmt_new("停用「%s」？（删掉 log_id=%llu）",
-                                     e->explain[0] ? e->explain : e->name,
-                                     (unsigned long long)e->log_id)))
+            // 弹框期间列表可能被后台查询换掉：标量先拷出来
+            u64 del_id = e->log_id;
+            char del_name[64];
+            snprintf(del_name, sizeof(del_name), "%s", e->explain[0] ? e->explain : e->name);
+            if (!app_confirm(fmt_new("停用「%s」？（删掉 log_id=%llu）", del_name,
+                                     (unsigned long long)del_id)))
                 return 0;
             kc.kind = K_EVDEL;
-            kc.u1 = e->log_id;
+            kc.u1 = del_id;
             g.lists_ready &= ~(u32)L_EVENTS;
             app_act("停用活动", char_work, &kc);
             return 0;

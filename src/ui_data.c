@@ -80,6 +80,7 @@ static Vec  g_tabscan;          // Vec<TabOrphan>
 static Vec  g_tabdel;           // 本轮要删的行
 static int  g_tab_pending;      // 扫描完成等下一次刷新弹窗
 static int  g_tab_rescan;       // 删除完成后自动重扫
+static int  g_tab_failed;       // 上一轮扫描失败：不能把结果当成「0 条」
 
 static int tab_has(u32 id, void *ctx) {
     (void)ctx;
@@ -88,8 +89,11 @@ static int tab_has(u32 id, void *ctx) {
 
 static int tab_work(void *ctx, Err err) {
     DCtx *c = (DCtx *)ctx;
-    if (c->kind == D_TABSCAN)
-        return db_scan_tab_orphan(&g.db, &g_tabscan, g.pvf_ok ? tab_has : NULL, NULL, err);
+    if (c->kind == D_TABSCAN) {
+        int ok = db_scan_tab_orphan(&g.db, &g_tabscan, g.pvf_ok ? tab_has : NULL, NULL, err);
+        g_tab_failed = !ok;          // 失败要留痕：空结果不能当成「没有错误记录」
+        return ok;
+    }
     if (c->kind == D_TABDEL) {
         for (int i = 0; i < g_tabdel.n; i++) {
             TabOrphan *o = VEC_AT(&g_tabdel, TabOrphan, i);
@@ -105,6 +109,7 @@ static void tab_scan_start(void) {
     if (job_running(&g.job_act)) { app_info("上一个操作还在进行，等它完成"); return; }
     if (!g_tabscan.cap) vec_init(&g_tabscan, sizeof(TabOrphan));
     g_tabscan.n = 0;
+    g_tab_failed = 0;
     g_tab_pending = 1;
     dc.kind = D_TABSCAN;
     app_status("正在扫描宠物/时装表…");
@@ -157,7 +162,7 @@ static void tab_del_run(int all) {
         return;
     g_tab_rescan = 1;
     dc.kind = D_TABDEL;
-    app_act("删除错误记录", tab_work, &dc);
+    if (!app_act("删除错误记录", tab_work, &dc)) g_tab_rescan = 0;
 }
 
 static LRESULT tab_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
@@ -167,10 +172,19 @@ static LRESULT tab_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
         if (g.act_ver == t_ver) return 0;
         t_ver = g.act_ver;
         if (g_tab_rescan) { g_tab_rescan = 0; tab_scan_start(); }   // 删完自动重扫
-        else tab_fill();
+        else if (g_tab_failed) {                                    // 失败不能显示成「0 条」
+            ui_rows_clear(t_list);
+            ui_text(t_info, "扫描失败，未得到结果（详见状态栏或日志）");
+        } else tab_fill();
         return 0;
     }
-    if (m == WM_DESTROY) { KillTimer(d, 1); t_list = t_info = NULL; return 0; }
+    if (m == WM_DESTROY) {          // 窗口没了，没跑完的意图也一起作废
+        KillTimer(d, 1);
+        g_tab_pending = 0;
+        g_tab_rescan = 0;
+        t_list = t_info = NULL;
+        return 0;
+    }
     if (m == WM_COMMAND) {
         switch (LOWORD(wp)) {
         case 6301: tab_del_run(0); return 0;            // 删除所选
@@ -477,9 +491,9 @@ static LRESULT ava_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             app_act("时装续期", ava_work, &dc);
             return 0;
         case A_DEL:
+            dc.ui_id = r->ui_id;          // 弹框前取走，之后不再读 r
             if (!app_confirm("删除这件时装？")) return 0;
             dc.kind = D_AVADEL;
-            dc.ui_id = r->ui_id;
             g.avatars.n = 0;
             app_act("删除时装", ava_work, &dc);
             return 0;
@@ -663,8 +677,11 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (id == Q_DROP || id == Q_DONE || id == Q_SEND || id == Q_PURGE) {
-        QuestRow *r = quest_sel();
-        if (!r) { app_info("请先选中一行任务。"); return 0; }
+        QuestRow *sel = quest_sel();
+        if (!sel) { app_info("请先选中一行任务。"); return 0; }
+        // 确认框的模态循环里列表可能被后台查询换掉：先拷一份再弹
+        QuestRow snap = *sel;
+        QuestRow *r = &snap;
 
         if (id == Q_DROP) {
             if (!app_confirm(fmt_new("放弃任务「%s」(%u)？", r->name[0] ? r->name : "?", r->id)))
@@ -814,15 +831,16 @@ static void log_load(void) {
     // 重写整段文本会把视口拽回第一行 —— 这版第一行恰恰是最新的，正是想看的，所以
     // 不用再做「跟到底」。只有正在往下翻历史的人要还原位置，别给他掀回开头。
     if (first > 0) SendMessageW(l_text, EM_LINESCROLL, 0, (LPARAM)first);
+    int nlines = ln.n;                 // vec_free 会把 n 清零，先记下来
     str_free(&s);
     vec_free(&ln);
     buf_free(&b);
     // 截断对用户是静默的：不说明他会以为自己看全了当天所有操作记录。
     const char *nm = strrchr(path, '\\');
     char info[256];
-    if (ln.n > LOG_MAX_LINES)
+    if (nlines > LOG_MAX_LINES)
         snprintf(info, sizeof(info), "%s · 共 %d 行（显示最近 %d 行）",
-                 nm ? nm + 1 : path, (int)ln.n, LOG_MAX_LINES);
+                 nm ? nm + 1 : path, nlines, LOG_MAX_LINES);
     else
         snprintf(info, sizeof(info), "%s · 共 %d 行", nm ? nm + 1 : path, (int)ln.n);
     ui_text(l_info, info);

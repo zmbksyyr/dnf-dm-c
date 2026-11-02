@@ -78,17 +78,17 @@ static void cfg_load(Config *c, const char *path) {
     c->bubble_tno = (u32)ini_int(L"bubble", L"tno", 0, w);
     c->bubble_hours = ini_int(L"bubble", L"hours", 0, w);
     c->bubble_until = (u64)(u32)ini_int(L"bubble", L"until", 0, w);
-    if (c->bubble_hours != 1 && c->bubble_hours != 3 && c->bubble_hours != 5 &&
-        c->bubble_hours != 7)
-        c->bubble_hours = 0;
+    if (c->bubble_hours < 0 || c->bubble_hours > 8760) c->bubble_hours = 0;
     // 截止时刻已经过去 = 这次活动结束了，别把它当成「还要再跑」
     if (c->bubble_until && c->bubble_until <= (u64)time(NULL)) {
         c->bubble_until = 0;
         c->bubble_on = 0;
     }
-    // 旧版只有单一 val（=D币），迁移到 dcoin
-    if (c->bubble_coin==0 && c->bubble_dpoint==0 && c->bubble_dcoin==0)
-        c->bubble_dcoin = ini_int(L"bubble", L"val", 1, w);
+    // 旧版只有单一 val（=D币）。键不存在时保持原值，不能凭空造出一条奖励。
+    if (c->bubble_coin == 0 && c->bubble_dpoint == 0 && c->bubble_dcoin == 0) {
+        int val = ini_int(L"bubble", L"val", -1, w);
+        if (val >= 0) c->bubble_dcoin = val;
+    }
 
     if (c->font < 8 || c->font > 14) c->font = 9;
     if (c->poll_sec < 2) c->poll_sec = 3;
@@ -566,7 +566,10 @@ static int w_connect(void *ctx, Err err) {
     err[0] = 0;
     g.self_bad = db_selfcheck(&g.db, g.self, (int)sizeof(g.self), err);
     err[0] = 0;
-    if (!db_list_chars(&g.db, &g.chars, 200, "", err)) return 0;
+    if (!db_list_chars(&g.db, &g.chars, 200, "", err)) {
+        db_close(&g.db);          // 连接已建成：失败也要关，否则重试会漏 socket
+        return 0;
+    }
     g.char_total = db_count_chars(&g.db, "");
     g.chars_ver++;
     return 1;
@@ -655,6 +658,9 @@ void app_connect(void) {
 // 「角色」「通用异步动作」两段里，但断开时要连这两个计数一起清，所以先声明在这里
 // （搬上来的话，得把 PEND_BUF / PEND_N 和 g_pq 一起挪）。
 static int s_load_want;                  // 想载入但连接正忙：等空闲了再发
+// 载入作业独占 g_load_ctx：跑着的时候不能改它，后来的选择先记在这里。
+static int s_load_pending = -1;
+static volatile LONG s_reload_later;     // 写失败的回滚请求（job 线程置，UI 线程取）
 // 载入前要不要先把 name/job/grow/lev 从库里读回来（UI 线程置 1，载入作业取走）。
 // 跨线程所以用 Interlocked：和 s_reload_later 同一套写法。
 static volatile LONG s_load_recheck;
@@ -735,6 +741,11 @@ static int w_npk(void *ctx, Err err) {
 
 void app_load_npk(const char *dir) {
     if (!dir || !*dir) return;
+    // 扫描线程正在写 g.npk：这时 free / 重开会让它按旧容量继续写
+    if (job_running(&g.job_npk)) {
+        app_status("贴图包正在扫描，扫完再换目录");
+        return;
+    }
     snprintf(g.cfg.img_dir, sizeof(g.cfg.img_dir), "%s", dir);
     cfg_save(&g.cfg, g.cfg_path);
     // 收尾都在 UI 线程做：npk_build 只管往 g.npk 里填，不负责释放上一轮的数据；
@@ -795,6 +806,8 @@ HBITMAP app_item_icon(u32 id, int *w, int *h) {
 
 void app_load_pvf(const char *path) {
     if (job_running(&g.job_pvf)) return;
+    // 解析会在作业线程里 pvf_close + 重建同一对象：在此之前先让读者停下
+    g.pvf_ok = 0;
     snprintf(g_pvf_ctx.path, sizeof(g_pvf_ctx.path), "%s", path);
     snprintf(g.cfg.pvf, sizeof(g.cfg.pvf), "%s", path);
     g.pvf_pct = 0;
@@ -876,6 +889,10 @@ static void load_kick(void) {
 
 void app_select_char(int idx) {
     if (idx < 0 || idx >= g.chars.n) return;
+    if (job_running(&g.job_load)) {          // 上一轮还在读库：记下意图，读完再接
+        s_load_pending = idx;
+        return;
+    }
     // 切换前把合并窗里的背包改动落盘。直接清零等于丢数据，而"先切再写"更糟：
     // blob 数据会被新角色的载入换掉，写进去的就是别人的背包。
     if (g.pend_mask) {
@@ -903,6 +920,10 @@ void app_select_char(int idx) {
 
 void app_reload(void) {
     if (!g.char_ok) return;
+    if (job_running(&g.job_load)) {          // 同上：别在作业读 g_load_ctx 时改它
+        InterlockedExchange(&s_reload_later, 1);
+        return;
+    }
     // 写失败后的回滚要回到库里的真值，而不是内存里这份：改名/改等级是「先改快照、
     // 再写库」（gm_apply 的乐观更新），失败时 g.cur 里躺的正是那个没写进库的值，
     // 照它重读等于把假值再确认一次。所以让载入作业先回读 charac_info 再载入
@@ -914,7 +935,6 @@ void app_reload(void) {
 }
 
 // 任务线程不能直接开作业（job_start 要跟 UI 线程抢同一份状态机），只留个请求
-static volatile LONG s_reload_later;
 void app_reload_later(void) { InterlockedExchange(&s_reload_later, 1); }
 
 // ---------------- 写后校验 ----------------
@@ -1062,6 +1082,11 @@ static int act_start(const char *what, ActFn fn, void *ctx, int ctxsz) {
 }
 
 int app_act_n(const char *what, ActFn fn, void *ctx, int ctxsz) {
+    // 加载 PVF 期间物品类型/附件种类都算不出来，这时提交写库会写错字段
+    if (job_running(&g.job_pvf)) {
+        app_status("PVF 正在加载，稍后再操作");
+        return 0;
+    }
     if (!g.db_ok) {
         app_status("请先连接数据库");
         return 0;
@@ -1862,6 +1887,11 @@ void app_tick(void) {
     static u64 last_poll = 0;
 
     app_npk_tick();                   // 贴图包扫描完成的收尾
+    if (s_load_pending >= 0 && !job_running(&g.job_load)) {
+        int next = s_load_pending;             // 载入期间点过的角色，下一帧补上
+        s_load_pending = -1;
+        app_select_char(next);
+    }
     if (job_poll(&g.job_conn, err)) {
         if (err[0]) {
             snprintf(g.db_err, sizeof(g.db_err), "%s", err);

@@ -339,6 +339,20 @@ typedef struct {
 static NstrMap g_nstr[NSTR_CACHE];
 static int g_nstr_pos;
 
+// 缓存以编号为键；换一份 PVF 后编号的含义就变了，关闭时必须整体丢弃。
+static void nstr_reset(void) {
+    for (int i = 0; i < NSTR_CACHE; i++) {
+        free(g_nstr[i].blob);
+        free(g_nstr[i].pair);
+        g_nstr[i].blob = NULL;
+        g_nstr[i].pair = NULL;
+        g_nstr[i].n = 0;
+        g_nstr[i].used = 0;
+        g_nstr[i].id = 0;
+    }
+    g_nstr_pos = 0;
+}
+
 static int cmp_nstrpair(const void *a, const void *b) {
     return strcmp(((const NstrPair *)a)->k, ((const NstrPair *)b)->k);
 }
@@ -742,7 +756,7 @@ static void build_dicts(Pvf *p, PvfProg prog) {
     {
         const Leaf *lf = pvf_find(p, "etc/avatar_roulette/avatarfixedhiddenoptionlist.etc");
         Buf c = {0};
-        if (lf && pvf_read(p, lf, &c)) {
+        if (lf && pvf_read(p, lf, &c) && c.n >= 7) {
             StabBuild sb;
             sb_init(&sb, &p->avatar_hidden);
             size_t n = (c.n - 2) / 5;
@@ -956,6 +970,8 @@ static int load_cache(Pvf *p) {
 }
 
 // ---------------- 对外 ----------------
+static void quest_cache_reset(void);
+
 static void reset_keep_id(Pvf *p) {
     char path[MAX_PATH], fp[33];
     snprintf(path, sizeof(path), "%s", p->path);
@@ -996,6 +1012,7 @@ int pvf_open(Pvf *p, const char *path, PvfProg prog) {
 
 void pvf_close(Pvf *p) {
     if (!p) return;
+    p->opened = 0;          // 先落旗，读者看到 false 就不会再去碰下面的索引
     if (p->base) { UnmapViewOfFile(p->base); p->base = NULL; }
     if (p->map) { CloseHandle(p->map); p->map = NULL; }
     if (p->file) { CloseHandle(p->file); p->file = NULL; }
@@ -1025,9 +1042,14 @@ void pvf_close(Pvf *p) {
     p->opened = 0;
     p->fp[0] = 0;
     p->path[0] = 0;
+    nstr_reset();
+    quest_cache_reset();
 }
 
-const char *pvf_item_name(const Pvf *p, u32 id) { return idtab_get(&p->items, id); }
+const char *pvf_item_name(const Pvf *p, u32 id) {
+    if (!p || !p->opened) return "";
+    return idtab_get(&p->items, id);
+}
 
 // 物品编号在物品表里的下标（-1 = 没有这件）
 static int key_index(const IdTab *t, u32 key) {
@@ -1075,9 +1097,13 @@ const char *pvf_kind_name(int kind) {
     }
 }
 
-const char *pvf_job_name(const Pvf *p, int job) { return idtab_get(&p->jobs, (u32)job); }
+const char *pvf_job_name(const Pvf *p, int job) {
+    if (!p || !p->opened) return "";
+    return idtab_get(&p->jobs, (u32)job);
+}
 
 const char *pvf_seal_name(const Pvf *p, int id) {
+    if (!p || !p->opened) return "";
     return (id >= 0 && id < p->seals.n) ? stab_get(&p->seals, id) : "";
 }
 
@@ -1086,10 +1112,10 @@ int pvf_is_equip(const Pvf *p, u32 id) {
     return k == PK_EQUIP || k == PK_AVATAR;
 }
 
-int pvf_item_count(const Pvf *p) { return p ? p->items.n : 0; }
+int pvf_item_count(const Pvf *p) { return (p && p->opened) ? p->items.n : 0; }
 
 u32 pvf_item_at(const Pvf *p, int i, const char **name) {
-    if (!p || i < 0 || i >= p->items.n) {
+    if (!p || !p->opened || i < 0 || i >= p->items.n) {
         if (name) *name = "";
         return 0;
     }
@@ -1288,6 +1314,14 @@ static QPair    *g_qp;
 static int       g_qn;
 static const Pvf *g_qpvf;
 
+// Pvf 只有一个全局实例，指针相同不代表内容没换，所以关闭时显式作废。
+static void quest_cache_reset(void) {
+    free(g_qp);
+    g_qp = NULL;
+    g_qn = 0;
+    g_qpvf = NULL;
+}
+
 static void quest_index(Pvf *p) {
     if (g_qpvf == p && g_qn) return;
     free(g_qp);
@@ -1299,9 +1333,11 @@ static void quest_index(Pvf *p) {
     if (!lf) return;
     Buf b = {0};
     if (!pvf_read(p, lf, &b)) return;
+    if (b.n < 7) { buf_free(&b); return; }        // 空表：cnt 会下溢成天文数字
 
     size_t cnt = (b.n - 2) / 5;
     g_qp = calloc(cnt + 1, sizeof(QPair));
+    if (!g_qp) { buf_free(&b); return; }
     u32 pend = 0;
     int has = 0;
     for (size_t i = 0; i < cnt; i++) {

@@ -1836,7 +1836,8 @@ int db_purge_bad(Db *d, Vec *rows, int *done, Err err) {
                 ScanRow *t = VEC_AT(rows, ScanRow, j);
                 if (handled[j] || t->kind != 0 || t->cno != r->cno || strcmp(t->cont, r->cont))
                     continue;
-                if (t->slot >= 1 && t->slot <= b.n) {
+                // 只清扫描时看到的那一格：期间玩家整理过背包，槽位号可能已经换人
+                if (t->slot >= 1 && t->slot <= b.n && item_id(&b.items[t->slot - 1]) == t->id) {
                     memset(&b.items[t->slot - 1], 0, sizeof(Item));
                     cleared++;
                 }
