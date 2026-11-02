@@ -383,11 +383,10 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
         if (ddl && *ddl) {
             str_catf(&out, "\n-- %s.%s\n", sc, tb);
             if (strstr(ddl, "CREATE TABLE `")) {
-                str_cat(&out, "CREATE TABLE IF NOT EXISTS `");
-                str_cat(&out, tb);
-                str_cat(&out, "`");
+                // 表名必须带库名：连接没有默认库，`CREATE TABLE \`tb\`` 会报 1046
+                str_catf(&out, "CREATE TABLE IF NOT EXISTS `%s`.`%s`", sc, tb);
                 const char *p = strstr(ddl, "CREATE TABLE `");
-                p = p ? strchr(p + 14, '`') : NULL;    // 跳过表名，从 ")" 之前开始拼
+                p = p ? strchr(p + 14, '`') : NULL;    // 跳过表名，从 "(" 之前开始拼
                 str_cat(&out, p ? p + 1 : "");
             } else {
                 str_cat(&out, ddl);

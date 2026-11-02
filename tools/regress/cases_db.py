@@ -1423,3 +1423,51 @@ def conn_killed(ctx):
            core.wait_until(lambda: _enabled(u.GetDlgItem(ctx.main, IDC_CONN)), 10.0))
     core.press(u.GetDlgItem(ctx.main, IDC_CONN), 3.0)
     ctx.ok("重连成功", _wait_status(ctx, "数据库已连接", 30.0), _status(ctx))
+
+# ---------------------------------------------------------------- 整库往返
+SCHEMAS = ["taiwan_cain", "taiwan_cain_2nd", "d_taiwan", "taiwan_login",
+           "taiwan_billing", "taiwan_game_event"]
+
+
+def _checksums(ctx):
+    """逐张基表的校验和：整库备份还原后必须逐张一致。"""
+    out = {}
+    for s in SCHEMAS:
+        for (t,) in ctx.q("SELECT table_name FROM information_schema.tables "
+                          "WHERE table_schema=%s AND table_type='BASE TABLE'", (s,)):
+            ctx.cur.execute("CHECKSUM TABLE `%s`.`%s`" % (s, t))
+            out["%s.%s" % (s, t)] = ctx.cur.fetchone()[1]
+    return out
+
+
+@core.case("db.full_roundtrip", needs=("db",), group="always",
+           desc="整库备份再还原：所有基表校验和逐张一致")
+def full_roundtrip(ctx):
+    """验：导出的 SQL 能原样还原回去（含建表、清空、回填、字符集）。"""
+    import subprocess
+
+    dump = os.path.join(core.BUILD, "config", "backup", "regress-roundtrip.sql")
+    before = _checksums(ctx)
+    if not ctx.ok("库里有表", bool(before), "%d 张" % len(before)):
+        return
+    exe_dir = os.path.dirname(core.EXE)
+    try:
+        r = subprocess.run([core.EXE, "--db-dump=" + dump], cwd=exe_dir,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+        if not ctx.check("备份退出码", r.returncode, 0):
+            return
+        ctx.ok("备份文件非空", os.path.exists(dump) and os.path.getsize(dump) > 1024,
+               "%d 字节" % (os.path.getsize(dump) if os.path.exists(dump) else 0))
+        r = subprocess.run([core.EXE, "--db-restore=" + dump], cwd=exe_dir,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+        if not ctx.check("还原退出码", r.returncode, 0):
+            return
+        after = _checksums(ctx)
+        diff = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+        ctx.ok("所有基表校验和一致", not diff,
+               "差异 %d 张：%s" % (len(diff), diff[:5]))
+    finally:
+        try:
+            os.remove(dump)
+        except OSError:
+            pass
