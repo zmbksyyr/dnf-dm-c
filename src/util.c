@@ -279,7 +279,8 @@ static HANDLE open_w(const char *path, DWORD access, DWORD share, DWORD disp) {
 
 int file_read(const char *path, Buf *out) {
     buf_clear(out);
-    HANDLE h = open_w(path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING);
+    HANDLE h = open_w(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          OPEN_EXISTING);
     if (h == INVALID_HANDLE_VALUE) return 0;
     LARGE_INTEGER sz;
     if (!GetFileSizeEx(h, &sz)) { CloseHandle(h); return 0; }
@@ -317,7 +318,8 @@ int file_write(const char *path, const void *d, size_t n) {
 // 长度用 size_t：备份是边查边 append 的，int 形参在 2GB 以上会静默截断长度，
 // 写进去的只是前半截 —— 这不是理论问题，是「备份文件看着完整、还原少数据」的那类。
 int file_append(const char *path, const char *text, size_t n) {
-    HANDLE h = open_w(path, FILE_APPEND_DATA, FILE_SHARE_READ, OPEN_ALWAYS);
+    HANDLE h = open_w(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          OPEN_ALWAYS);
     if (h == INVALID_HANDLE_VALUE) return 0;
     const char *p = text;
     size_t done = 0;
@@ -541,7 +543,8 @@ void hash_md5(const void *d, size_t n, char out[33]) {
 // 只按内容取样、不看 mtime，所以把 PVF 复制到别处也能接着用缓存。
 int hash_file_fp(const char *path, char out[33]) {
     out[0] = 0;
-    HANDLE h = open_w(path, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING);
+    HANDLE h = open_w(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          OPEN_EXISTING);
     if (h == INVALID_HANDLE_VALUE) return 0;
     LARGE_INTEGER sz;
     if (!GetFileSizeEx(h, &sz)) { CloseHandle(h); return 0; }

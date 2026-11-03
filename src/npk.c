@@ -44,15 +44,24 @@ static void npk_list_files(Npk *p, const char *dir) {
 // 读文件里 [off, off+n) 一段。悬浮/扫描都只碰需要的字节，整个包最大上百 MB，不整读。
 static int read_at(const char *path, u32 off, size_t n, Buf *out) {
     buf_clear(out);
-    FILE *fp = fopen(path, "rb");
-    if (!fp) return 0;
+    WCHAR w[MAX_PATH];
+    utf16(path, w, COUNT_OF(w));
+    // 共享全部权限：读图标时别把包锁住，别人要重打包/覆盖照样能写能删
+    HANDLE h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
     int ok = 0;
-    if (!fseek(fp, (long)off, SEEK_SET)) {
+    LARGE_INTEGER li;
+    li.QuadPart = off;
+    if (SetFilePointerEx(h, li, NULL, FILE_BEGIN)) {
         buf_reserve(out, n + 1);
-        out->n = fread(out->p, 1, n, fp);
-        ok = out->n == n;
+        DWORD got = 0;
+        if (ReadFile(h, out->p, (DWORD)n, &got, NULL) && got == n) {
+            out->n = got;
+            ok = 1;
+        }
     }
-    fclose(fp);
+    CloseHandle(h);
     return ok;
 }
 

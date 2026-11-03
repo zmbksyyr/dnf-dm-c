@@ -589,7 +589,8 @@ static void lst_into_idtab(Pvf *p, const char *lst_path, const char *base_dir, I
 static int map_file(Pvf *p, Err err) {
     WCHAR w[MAX_PATH * 2];
     utf16(p->path, w, MAX_PATH * 2);
-    p->file = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    p->file = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (p->file == INVALID_HANDLE_VALUE) { p->file = NULL; snprintf(err, ERRBUF, "打开 PVF 失败"); return 0; }
     LARGE_INTEGER sz;
     if (!GetFileSizeEx(p->file, &sz)) { snprintf(err, ERRBUF, "读取文件大小失败"); return 0; }
