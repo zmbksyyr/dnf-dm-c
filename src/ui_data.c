@@ -817,6 +817,21 @@ enum { L_TEXT = PAGE_ID(PAGE_LOG, 1), L_REFRESH, L_CLR, L_INFO, L_CFGCLR };
 static HWND l_text, l_info;
 static HWND l_sep;
 
+// 构建时间取 exe 的写入时间：编译器宏 __DATE__ 会被 -Wdate-time 拦下，
+// 而且"最后一次链接的时间"本来就更接近用户手里的这份可执行文件。
+static void build_stamp(char *out, int cap) {
+    WCHAR path[MAX_PATH];
+    if (!GetModuleFileNameW(NULL, path, MAX_PATH)) { snprintf(out, (size_t)cap, "未知"); return; }
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fa)) { snprintf(out, (size_t)cap, "未知"); return; }
+    FILETIME ft;
+    FileTimeToLocalFileTime(&fa.ftLastWriteTime, &ft);
+    SYSTEMTIME st;
+    FileTimeToSystemTime(&ft, &st);
+    snprintf(out, (size_t)cap, "%04d-%02d-%02d %02d:%02d",
+             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+}
+
 static void log_load(void) {
     char path[MAX_PATH];
     app_log_flush();                 // 攒在内存里的先落盘，否则刚做的事看不到
@@ -859,12 +874,17 @@ static void log_load(void) {
     buf_free(&b);
     // 截断对用户是静默的：不说明他会以为自己看全了当天所有操作记录。
     const char *nm = strrchr(path, '\\');
-    char info[256];
+    char info[384], stamp[32];
+    build_stamp(stamp, sizeof(stamp));
+    // 「关于」页：构建时间 + 配置/日志位置 + 本次日志行数
     if (nlines > LOG_MAX_LINES)
-        snprintf(info, sizeof(info), "%s · 共 %d 行（显示最近 %d 行）",
-                 nm ? nm + 1 : path, nlines, LOG_MAX_LINES);
+        snprintf(info, sizeof(info),
+                 "构建 %s · 配置 config\\settings.ini · 日志 %s（共 %d 行，显示最近 %d 行）",
+                 stamp, nm ? nm + 1 : path, nlines, LOG_MAX_LINES);
     else
-        snprintf(info, sizeof(info), "%s · 共 %d 行", nm ? nm + 1 : path, (int)ln.n);
+        snprintf(info, sizeof(info),
+                 "构建 %s · 配置 config\\settings.ini · 日志 %s（共 %d 行）",
+                 stamp, nm ? nm + 1 : path, (int)ln.n);
     ui_text(l_info, info);
 }
 
@@ -916,8 +936,8 @@ static void log_layout(Page *p, int w, int h) {
     int pad = ui_scale(6), rowh = ui_scale(23);
     URow r;
     ui_row(&r, p->wnd, pad, pad, rowh);
-    ui_add(&r, ui_btn_at(p->wnd, L_REFRESH, "刷新"), ui_scale(60));
-    ui_add(&r, ui_btn_at(p->wnd, L_CLR, "清空"), ui_scale(60));
+    ui_add(&r, ui_btn_at(p->wnd, L_REFRESH, "刷新日志"), ui_scale(76));
+    ui_add(&r, ui_btn_at(p->wnd, L_CLR, "清空日志"), ui_scale(76));
     ui_add(&r, ui_btn_at(p->wnd, L_CFGCLR, "清除配置并退出"), ui_scale(130));
     ui_add(&r, l_info, -1);
     int ly = pad + rowh + ui_scale(4);
@@ -939,8 +959,8 @@ static void log_build(HWND parent) {
     SendMessageW(l_text, EM_LIMITTEXT, (WPARAM)4000000, 0);
     l_info = ui_label(parent, "", L_INFO);
     l_sep = ui_hline(parent);
-    ui_button(parent, "刷新", L_REFRESH);
-    ui_button(parent, "清空", L_CLR);
+    ui_button(parent, "刷新日志", L_REFRESH);
+    ui_button(parent, "清空日志", L_CLR);
     ui_button(parent, "清除配置并退出", L_CFGCLR);
 }
 

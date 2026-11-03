@@ -21,7 +21,7 @@ Page g_pages[PAGE_COUNT] = {
     [PAGE_PET]    = {.name = "宠物"}, [PAGE_AVATAR] = {.name = "时装"},
     [PAGE_QUEST]  = {.name = "任务"}, [PAGE_EVENT] = {.name = "活动"},
     [PAGE_GM]     = {.name = "GM"},   [PAGE_BUBBLE] = {.name = "泡点"},
-    [PAGE_BAN]    = {.name = "封停"}, [PAGE_LOG]   = {.name = "日志"},
+    [PAGE_BAN]    = {.name = "封停"}, [PAGE_LOG]   = {.name = "关于"},
 };
 
 void ui_pages_wire(void) {
