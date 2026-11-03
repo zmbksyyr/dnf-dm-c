@@ -210,6 +210,18 @@ static void left_layout(int x, int y0, int w, int h) {
     int gap = ui_scale(8);
 
     int g2h = th + CARD_N * crh + ui_scale(8);
+    // 卡片不能把列表挤没，也不能自身超出页面：放不下时按可用高度压缩行高，
+    // 否则最后几行（SP/TP/QP…）会被页面底边裁掉
+    int maxg2 = h - ui_scale(120);
+    if (maxg2 < th + ui_scale(12) * CARD_N + ui_scale(8))
+        maxg2 = th + ui_scale(12) * CARD_N + ui_scale(8);
+    if (g2h > maxg2) {
+        g2h = maxg2;
+        int inner = g2h - th - ui_scale(8);
+        crh = inner / CARD_N;
+        if (crh < ui_scale(12)) crh = ui_scale(12);
+        g2h = th + CARD_N * crh + ui_scale(8);
+    }
     int g2y = y0 + h - g2h;                   // 下卡贴底：两栏底边齐平
     int g1h = g2y - gap - y0;
     int listh = g1h - th - rowh - ui_scale(4) - ui_scale(8);

@@ -878,12 +878,17 @@ void ui_row(URow *r, HWND host, int x, int y, int h) {
 
 void ui_add(URow *r, HWND w, int width) {
     if (!w) return;
+    RECT rc;
+    GetClientRect(r->host ? r->host : GetParent(w), &rc);
     int cw = width;
     if (cw < 0) {
-        RECT rc;
-        GetClientRect(r->host ? r->host : GetParent(w), &rc);
         cw = rc.right - r->x - ui_scale(8);
         if (cw < ui_scale(40)) cw = ui_scale(40);
+    } else {
+        // 固定宽度也要收敛到剩余空间：放大/缩小后一行各项之和可能超过客户区，
+        // 不收就会顶出右边界被裁（贴图那行正是这么被切掉的）
+        int left = rc.right - r->x - ui_scale(4);
+        if (cw > left) cw = left > 0 ? left : 0;
     }
     MoveWindow(w, r->x, r->y, cw, r->h, TRUE);
     r->x += cw + r->gap;
