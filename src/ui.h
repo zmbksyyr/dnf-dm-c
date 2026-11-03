@@ -45,6 +45,10 @@ void      ui_init(HINSTANCE inst, int pt);
 void      ui_set_dpi(int dpi);
 int       ui_dpi(void);
 int       ui_scale(int px);
+void      ui_set_scale(int pct);      // 实时界面缩放（%，80~150）
+int       ui_scale_pct(void);
+void      ui_fonts_rescale(void);     // 按当前比例重建字体并推给所有子控件
+void      ui_cols_rescale_all(void);  // 列表列宽按当前比例重设
 HINSTANCE ui_inst(void);
 void      ui_font_reload(int pt);
 HFONT     ui_font(void);

@@ -617,6 +617,24 @@ static void tick(void) {
 }
 
 // ---------------------------------------------------------------- 布局
+// 窗口尺寸 → 界面比例：宽度决定比例，高度在 WM_SIZING 里已经锁死
+static void apply_scale(void) {
+    RECT rc;
+    GetClientRect(g_main, &rc);
+    if (rc.right < 200 || rc.bottom < 150) return;
+    int pct = MulDiv(rc.right, 100, 1240);
+    if (pct < 80) pct = 80;
+    if (pct > 150) pct = 150;
+    if (pct != ui_scale_pct()) {
+        ui_set_scale(pct);
+        ui_fonts_rescale();      // 字号跟着变，否则只是"框变松"
+        ui_cols_rescale_all();   // 列表列宽跟着变
+        s_kw = 0;                // 标签列宽按新比例重量
+    }
+    do_layout();
+    InvalidateRect(g_main, NULL, TRUE);
+}
+
 static void do_layout(void) {
     RECT rc;
     GetClientRect(g_main, &rc);
@@ -845,16 +863,48 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             return 0;
 
         case WM_SIZE:
-            if (wp != SIZE_MINIMIZED) do_layout();
+            if (wp != SIZE_MINIMIZED) apply_scale();
             return 0;
 
+        case WM_SIZING: {
+            // 宽高比锁死：拖动只改大小、不改形状。以宽为准，高度按 1240:800 反算；
+            // 拖的是左边/上边就固定对边，避免窗口"跳"。
+            RECT *r = (RECT *)lp;
+            RECT fr = {0, 0, 0, 0};
+            AdjustWindowRectEx(&fr, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), FALSE, 0);
+            int fw = fr.right - fr.left, fh = fr.bottom - fr.top;
+            int cw = (r->right - r->left) - fw;
+            int minw = MulDiv(1240, 80, 100), maxw = MulDiv(1240, 150, 100);
+            int sw = GetSystemMetrics(SM_CXSCREEN) - 32;
+            if (maxw > sw) maxw = sw;
+            if (cw < minw) cw = minw;
+            if (cw > maxw) cw = maxw;
+            int ch = MulDiv(cw, 800, 1240);
+            int nw = cw + fw, nh = ch + fh;
+            if (wp == WMSZ_LEFT || wp == WMSZ_TOPLEFT || wp == WMSZ_BOTTOMLEFT)
+                r->left = r->right - nw;
+            else
+                r->right = r->left + nw;
+            if (wp == WMSZ_TOP || wp == WMSZ_TOPLEFT || wp == WMSZ_TOPRIGHT)
+                r->top = r->bottom - nh;
+            else
+                r->bottom = r->top + nh;
+            return TRUE;
+        }
+
         case WM_GETMINMAXINFO: {
-            // 窗口固定：最大值与最小值都锁在创建时算出的尺寸上，边框拖不动、也最大化不了
+            // 可拖拽，但锁住比例的范围：80%~150%（上限还要放得进屏幕）
             MINMAXINFO *mm = (MINMAXINFO *)lp;
-            if (s_win_w > 0 && s_win_h > 0) {
-                mm->ptMinTrackSize.x = mm->ptMaxTrackSize.x = s_win_w;
-                mm->ptMinTrackSize.y = mm->ptMaxTrackSize.y = s_win_h;
-            }
+            RECT fr = {0, 0, 0, 0};
+            AdjustWindowRectEx(&fr, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), FALSE, 0);
+            int fw = fr.right - fr.left, fh = fr.bottom - fr.top;
+            int minw = MulDiv(1240, 80, 100), maxw = MulDiv(1240, 150, 100);
+            int sw = GetSystemMetrics(SM_CXSCREEN) - 32;
+            if (maxw > sw) maxw = sw;
+            mm->ptMinTrackSize.x = minw + fw;
+            mm->ptMinTrackSize.y = MulDiv(minw, 800, 1240) + fh;
+            mm->ptMaxTrackSize.x = maxw + fw;
+            mm->ptMaxTrackSize.y = MulDiv(maxw, 800, 1240) + fh;
             return 0;
         }
 
@@ -1072,7 +1122,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     if (cw > sw * 96 / 100) cw = sw * 96 / 100;
     if (ch > shh * 92 / 100) ch = shh * 92 / 100;
 
-    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME |
+                  WS_CLIPCHILDREN;
     RECT rc = {0, 0, cw, ch};
     AdjustWindowRectEx(&rc, style, FALSE, 0);
     s_win_w = rc.right - rc.left;

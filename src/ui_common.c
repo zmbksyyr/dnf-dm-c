@@ -3,6 +3,8 @@
 #include <commctrl.h>
 
 static int        g_dpi = 96;
+static int        g_pct = 100;      // 用户界面缩放（%）：窗口拖动时实时改
+static int        g_pt_base = 9;    // settings 里的原始字号，缩放时按它重算
 static int        g_pt = 9;
 static HINSTANCE  g_inst;
 static HFONT      g_f, g_fb;
@@ -41,7 +43,14 @@ void ui_pages_wire(void) {
 
 HINSTANCE ui_inst(void) { return g_inst; }
 int       ui_dpi(void) { return g_dpi; }
-int       ui_scale(int px) { return MulDiv(px, g_dpi, 96); }
+int       ui_scale(int px) { return MulDiv(MulDiv(px, g_pct, 100), g_dpi, 96); }
+
+void ui_set_scale(int pct) {
+    if (pct < 80) pct = 80;
+    if (pct > 150) pct = 150;
+    g_pct = pct;
+}
+int ui_scale_pct(void) { return g_pct; }
 HFONT     ui_font(void) { return g_f; }
 HFONT     ui_font_bold(void) { return g_fb ? g_fb : g_f; }
 
@@ -146,6 +155,23 @@ void ui_font_reload(int pt) {
     g_fb = mk_font(g_pt, 1);
 }
 
+static BOOL CALLBACK setfont_cb(HWND h, LPARAM lp);   // 下方定义
+
+// 拖动缩放时重算字号并推给所有子控件：只放大框不放大字，看起来像"框变松"
+void ui_fonts_rescale(void) {
+    int pt = MulDiv(g_pt_base, g_pct, 100);
+    if (pt < 6) pt = 6;
+    if (pt > 20) pt = 20;
+    if (pt == g_pt) return;
+    g_pt = pt;
+    if (g_f) { DeleteObject(g_f); g_f = NULL; }
+    if (g_fb) { DeleteObject(g_fb); g_fb = NULL; }
+    g_f = mk_font(g_pt, 0);
+    g_fb = mk_font(g_pt, 1);
+    if (g_main) SendMessageW(g_main, WM_SETFONT, (WPARAM)g_f, TRUE);
+    EnumChildWindows(g_main, setfont_cb, (LPARAM)g_f);
+}
+
 static BOOL CALLBACK setfont_cb(HWND h, LPARAM lp) {
     SendMessageW(h, WM_SETFONT, (WPARAM)lp, TRUE);
     return TRUE;
@@ -165,7 +191,8 @@ void ui_init(HINSTANCE inst, int pt) {
     g_dpi = GetDeviceCaps(dc, LOGPIXELSY);
     ReleaseDC(NULL, dc);
     if (g_dpi < 96) g_dpi = 96;
-    ui_font_reload(pt);
+    g_pt_base = pt;
+    ui_font_reload(MulDiv(pt, g_pct, 100) < 6 ? 6 : MulDiv(pt, g_pct, 100));
     ui_pages_wire();
 }
 
@@ -757,8 +784,31 @@ static void setcol(HWND lv, int i, const char *title, int width) {
     SendMessageW(lv, LVM_INSERTCOLUMNW, (WPARAM)i, (LPARAM)&c);
 }
 
+typedef struct { HWND lv; int n; int w[16]; } ColSpec;
+static ColSpec g_colspec[16];
+static int g_ncolspec;
+
 void ui_cols(HWND lv, const char *const *titles, const int *widths, int n) {
+    // 记住原始（未缩放）列宽：窗口拖动时按新比例重设
+    int slot = -1;
+    for (int i = 0; i < g_ncolspec; i++) if (g_colspec[i].lv == lv) { slot = i; break; }
+    if (slot < 0 && g_ncolspec < (int)COUNT_OF(g_colspec)) slot = g_ncolspec++;
+    if (slot >= 0 && n <= 16) {
+        g_colspec[slot].lv = lv;
+        g_colspec[slot].n = n;
+        for (int i = 0; i < n; i++) g_colspec[slot].w[i] = widths[i];
+    }
     for (int i = 0; i < n; i++) setcol(lv, i, titles[i], widths[i]);
+}
+
+void ui_cols_rescale_all(void) {
+    for (int k = 0; k < g_ncolspec; k++) {
+        ColSpec *c = &g_colspec[k];
+        if (!c->lv || !IsWindow(c->lv)) continue;
+        for (int i = 0; i < c->n; i++)
+            SendMessageW(c->lv, LVM_SETCOLUMNWIDTH, (WPARAM)i,
+                         (LPARAM)MAKELPARAM(ui_scale(c->w[i]), 0));
+    }
 }
 
 void ui_rows_clear(HWND lv) {
