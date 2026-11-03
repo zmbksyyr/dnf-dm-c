@@ -46,8 +46,8 @@ int       ui_dpi(void) { return g_dpi; }
 int       ui_scale(int px) { return MulDiv(MulDiv(px, g_pct, 100), g_dpi, 96); }
 
 void ui_set_scale(int pct) {
-    if (pct < 80) pct = 80;
-    if (pct > 150) pct = 150;
+    if (pct < 70) pct = 70;
+    if (pct > 100) pct = 100;
     g_pct = pct;
 }
 int ui_scale_pct(void) { return g_pct; }

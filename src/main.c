@@ -635,8 +635,8 @@ static void apply_scale(void) {
     GetClientRect(g_main, &rc);
     if (rc.right < 200 || rc.bottom < 150) return;
     int pct = MulDiv(rc.right, 100, 1240);
-    if (pct < 80) pct = 80;
-    if (pct > 150) pct = 150;
+    if (pct < 70) pct = 70;
+    if (pct > 100) pct = 100;
     if (pct != ui_scale_pct()) {
         ui_set_scale(pct);
         ui_fonts_rescale();      // 字号跟着变，否则只是"框变松"
@@ -886,9 +886,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             AdjustWindowRectEx(&fr, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), FALSE, 0);
             int fw = fr.right - fr.left, fh = fr.bottom - fr.top;
             int cw = (r->right - r->left) - fw;
-            int minw = MulDiv(1240, 80, 100), maxw = MulDiv(1240, 150, 100);
-            int sw = GetSystemMetrics(SM_CXSCREEN) - 32;
-            if (maxw > sw) maxw = sw;
+            int minw = MulDiv(1240, 70, 100), maxw = 1240;   // 只允许 70%~100%
             if (cw < minw) cw = minw;
             if (cw > maxw) cw = maxw;
             int ch = MulDiv(cw, 800, 1240);
@@ -905,14 +903,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
 
         case WM_GETMINMAXINFO: {
-            // 可拖拽，但锁住比例的范围：80%~150%（上限还要放得进屏幕）
+            // 可拖拽，范围 70%~100%：100% 就是设计尺寸（1240×800），不能拉得更大
             MINMAXINFO *mm = (MINMAXINFO *)lp;
             RECT fr = {0, 0, 0, 0};
             AdjustWindowRectEx(&fr, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), FALSE, 0);
             int fw = fr.right - fr.left, fh = fr.bottom - fr.top;
-            int minw = MulDiv(1240, 80, 100), maxw = MulDiv(1240, 150, 100);
-            int sw = GetSystemMetrics(SM_CXSCREEN) - 32;
-            if (maxw > sw) maxw = sw;
+            int minw = MulDiv(1240, 70, 100), maxw = 1240;
             mm->ptMinTrackSize.x = minw + fw;
             mm->ptMinTrackSize.y = MulDiv(minw, 800, 1240) + fh;
             mm->ptMaxTrackSize.x = maxw + fw;
