@@ -242,6 +242,35 @@ u32 db_count_chars(Db *d, const char *kw) {
     return n;
 }
 
+// 服务端当前真实在线人数（-1 = 查不到）。game_channel.gc_now 由每个通道每 ~15 秒
+// 刷一次，gc_up_time 是刷新时间：只有最近刷过的那几行才算数，否则会把其它服
+// 2015 年遗留的脏行（gc_now 非 0）也加进来。
+// 它的用途是兜住「关客户端没走登出流程」：此时 login_account_3.login_status 会一直
+// 停在 1（残留），但通道在线人数已经归零——按它判离线，才不会把人卡在"永远在线"。
+static int server_users(Db *d) {
+    if (!have_table(d, "taiwan_cain.game_channel")) return -1;
+    Str s = {0};
+    str_cat(&s, "SELECT COALESCE(SUM(gc_now),0) FROM taiwan_cain.game_channel "
+                "WHERE gc_up_time > DATE_SUB(NOW(), INTERVAL 120 SECOND)");
+    MyResult r = {0};
+    int n = -1;
+    if (select1(d, &s, &r)) n = (int)my_i64(&r, 0, 0, -1);
+    my_free(&r);
+    str_free(&s);
+    // 通道人数为 0 时别急着判离线：gc_now 最多滞后 15 秒，玩家刚登录的头十几秒
+    // 也可能读到 0。只有"最近 5 分钟内没人登录"才算残留标记。
+    if (n == 0) {
+        Str q = {0};
+        str_cat(&q, "SELECT COUNT(*) FROM taiwan_login.login_account_3 "
+                    "WHERE login_status=1 AND last_login_date > DATE_SUB(NOW(), INTERVAL 5 MINUTE)");
+        MyResult r2 = {0};
+        if (select1(d, &q, &r2) && my_u64(&r2, 0, 0, 0) > 0) n = 1;
+        my_free(&r2);
+        str_free(&q);
+    }
+    return n;
+}
+
 // 轮询专用：一条查询取回「角色列表 + 账号在线 + 当前在玩的角色」。
 // 原来这套要三条往返（列表 / 计数 / 在线刷新），每 poll_sec 跑一次太亏。
 // 在线判定与 db_refresh_online 一致：账号在线 且 正在玩该角色；
@@ -278,14 +307,18 @@ int db_poll_chars(Db *d, Vec *out, int limit, Err err) {
     }
     str_free(&s);
 
+    int users = server_users(d);        // 0 = 通道上没人（残留标记也按离线处理）
     vec_clear(out);
     for (int i = 0; i < r.nrow; i++) {
         Charac *c = VEC_ADD(out, Charac);
         charac_core(c, &r, i);
         cp_text(c->account, sizeof(c->account), &r, i, 6);   // 列序：6=accountname
         int acct = (int)my_i64(&r, i, 7, 0);                 // 7=login_status
+        // 「当前在玩的角色」只有「有这行」才是 1，没有这行是 NULL。当成 0 的话，
+        // 服务端不维护这张表（OpenDNF 的 taiwan_siroco.member_play_info 一直是空的）
+        // 就永远判成离线——闸门失效，改在线角色会被服务端存档覆盖。NULL 退回账号级。
         int playing = cur_tab ? (int)my_i64(&r, i, 8, 1) : 1;
-        c->online = acct == 1 && playing == 1;
+        c->online = acct == 1 && playing == 1 && users != 0;
     }
     my_free(&r);
     return 1;
@@ -328,10 +361,12 @@ int db_list_ban_chars(Db *d, Vec *out, int online_only, int limit, Err err) {
     str_free(&s);
 
     vec_clear(out);
+    int users = server_users(d);        // 同 db_poll_chars：通道没人时残留标记不算在线
     for (int i = 0; i < r.nrow; i++) {
         int acct = (int)my_i64(&r, i, 7, 0);
+        // 同 db_poll_chars：这张表没有该角色那一行时是 NULL，退回账号级判定。
         int playing = cur_tab ? (int)my_i64(&r, i, 8, 1) : 1;
-        int online = acct == 1 && playing == 1;
+        int online = acct == 1 && playing == 1 && users != 0;
         if (online_only && !online) continue;       // 过滤在填的时候做，SQL 少一层子查询
         Charac *c = VEC_ADD(out, Charac);
         charac_core(c, &r, i);
@@ -350,6 +385,8 @@ int db_is_online(Db *d, u32 mid) {
     if (select1(d, &s, &r)) on = my_i64(&r, 0, 0, 1) == 1;
     my_free(&r);
     str_free(&s);
+    // 通道在线人数为 0：账号标记是登出流程没走完留下的残留，按离线处理。
+    if (on && server_users(d) == 0) on = 0;
     return on;
 }
 
@@ -1272,9 +1309,10 @@ int db_set_fatigue(Db *d, const Charac *c, Err err) {
                  "UPDATE taiwan_cain.charac_info SET fatigue=max_fatigue WHERE charac_no=%u",
                  c->no))
         goto fail;
-    // 剩余疲劳 = 客户端上限 − charac_stat.fatigue（这一列存的是「已消耗」，
-    // 登录时只读它；charac_info.fatigue 服务端不读，完整的登录 SELECT 里只有
-    // max_fatigue）。只清 used_fatigue 不清 fatigue，游戏里疲劳一点都不会变。
+    // OpenDNF 的「当前剩余疲劳」= 客户端上限(本端 176) − charac_stat.fatigue，
+    // 也就是这一列存的是「已消耗」，登录时只读它（charac_info.fatigue 根本不被读取，
+    // 完整的登录 SELECT 里只有 max_fatigue）。只清 used_fatigue 不清 fatigue，
+    // 游戏里疲劳一点都不会变 —— 实测：fatigue=9 显示 167/176，写完 0 才变 176/176。
     if (!db_exec(d, "清疲劳消耗", "taiwan_cain.charac_stat", "charac_no", c->no, err,
                  "UPDATE taiwan_cain.charac_stat SET fatigue=0, used_fatigue=0 "
                  "WHERE charac_no=%u", c->no))
