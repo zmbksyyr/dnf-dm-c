@@ -284,7 +284,7 @@ int db_poll_chars(Db *d, Vec *out, int limit, Err err) {
         charac_core(c, &r, i);
         cp_text(c->account, sizeof(c->account), &r, i, 6);   // 列序：6=accountname
         int acct = (int)my_i64(&r, i, 7, 0);                 // 7=login_status
-        int playing = cur_tab ? (int)my_i64(&r, i, 8, 0) : 1;
+        int playing = cur_tab ? (int)my_i64(&r, i, 8, 1) : 1;
         c->online = acct == 1 && playing == 1;
     }
     my_free(&r);
@@ -330,7 +330,7 @@ int db_list_ban_chars(Db *d, Vec *out, int online_only, int limit, Err err) {
     vec_clear(out);
     for (int i = 0; i < r.nrow; i++) {
         int acct = (int)my_i64(&r, i, 7, 0);
-        int playing = cur_tab ? (int)my_i64(&r, i, 8, 0) : 1;
+        int playing = cur_tab ? (int)my_i64(&r, i, 8, 1) : 1;
         int online = acct == 1 && playing == 1;
         if (online_only && !online) continue;       // 过滤在填的时候做，SQL 少一层子查询
         Charac *c = VEC_ADD(out, Charac);
@@ -1272,8 +1272,12 @@ int db_set_fatigue(Db *d, const Charac *c, Err err) {
                  "UPDATE taiwan_cain.charac_info SET fatigue=max_fatigue WHERE charac_no=%u",
                  c->no))
         goto fail;
+    // 剩余疲劳 = 客户端上限 − charac_stat.fatigue（这一列存的是「已消耗」，
+    // 登录时只读它；charac_info.fatigue 服务端不读，完整的登录 SELECT 里只有
+    // max_fatigue）。只清 used_fatigue 不清 fatigue，游戏里疲劳一点都不会变。
     if (!db_exec(d, "清疲劳消耗", "taiwan_cain.charac_stat", "charac_no", c->no, err,
-                 "UPDATE taiwan_cain.charac_stat SET used_fatigue=0 WHERE charac_no=%u", c->no))
+                 "UPDATE taiwan_cain.charac_stat SET fatigue=0, used_fatigue=0 "
+                 "WHERE charac_no=%u", c->no))
         goto fail;
     return db_tx_commit(d, err);
 fail:
