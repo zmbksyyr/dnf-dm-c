@@ -2,7 +2,7 @@
 #include "pvf.h"
 
 #define XOR_KEY 0x81A79011u
-#define CACHE_MAGIC "PVFC7\0"   // 7：物品表多存一份 [stack limit]；旧缓存直接作废重建
+#define CACHE_MAGIC "PVFC8\0"   // 8：按 equipment type 区分宠物、宠物装备与时装
 #define CACHE_MAGIC_LEN 6
 
 // ---------------- 解密 ----------------
@@ -535,9 +535,7 @@ static int stk_ints(Pvf *p, const Buf *c, const char *want, u32 *out, int max) {
     return got;
 }
 
-// 物品分类只看文件落在哪个目录：PVF 没有「类型」字段，目录就是它唯一的分类依据。
-// 分界与游戏里的物品栏号段一一对应（装备 9-56 / 消耗品 57-104 / 材料 105-152 /
-// 任务材料 153-200），因此这里判错，发出去的物品格子就不合法。
+// 目录作为缺省分类；装备还需读取 equipment type，宠物也属于 equipment.lst。
 static u8 kind_of_equip(const char *path) {
     return strstr(path, "/avatar/") ? PK_AVATAR : PK_EQUIP;
 }
@@ -561,7 +559,7 @@ static void lst_into_idtab(Pvf *p, const char *lst_path, const char *base_dir, I
     parse_lst(p, &data, base_dir, &pairs);
     buf_free(&data);
 
-    Str name = {0};
+    Str name = {0}, eqtype = {0};
     Buf c = {0};
     for (int i = 0; i < pairs.n; i++) {
         LstPair *lp = VEC_AT(&pairs, LstPair, i);
@@ -577,10 +575,19 @@ static void lst_into_idtab(Pvf *p, const char *lst_path, const char *base_dir, I
             if (stk_ints(p, &c, "[stack limit]", v, 1)) stk = v[0];
         }
         ib->cur_kind = kof ? kof(lp->path) : 0;
+        if (kof == kind_of_equip) {
+            stk_field_any(p, &c, "[equipment type]", &eqtype);
+            if (!strcmp(str_c(&eqtype), "[creature]")) ib->cur_kind = PK_CREATURE;
+            else if (!strcmp(str_c(&eqtype), "[artifact red]") ||
+                     !strcmp(str_c(&eqtype), "[artifact blue]") ||
+                     !strcmp(str_c(&eqtype), "[artifact green]")) ib->cur_kind = PK_CREATURE_EQUIP;
+            else if (strstr(str_c(&eqtype), "avatar")) ib->cur_kind = PK_AVATAR;
+        }
         ib_add(ib, lp->id, name.n ? name.p : "", stk);
     }
     ib->cur_kind = 0;
     str_free(&name);
+    str_free(&eqtype);
     buf_free(&c);
     vec_free(&pairs);
 }
@@ -1095,9 +1102,7 @@ int pvf_item_kind(const Pvf *p, u32 id) {
         u8 k = p->kind ? p->kind[i] : 0;
         return k ? (int)k : PK_STACK;
     }
-    // 物品表里没有，再看是不是宠物：宠物编号自成一套，会和物品编号撞车
-    // （1 既是金币又是一种宠物），所以顺序不能反 —— 先认物品，认不出来才当宠物。
-    if (p->cre.n && key_index(&p->cre, id) >= 0) return PK_CREATURE;
+    // creature.lst 的编号是宠物定义 ID，不能拿它补作可发放的物品 ID。
     return PK_NONE;
 }
 
@@ -1117,6 +1122,7 @@ const char *pvf_kind_name(int kind) {
         case PK_QUEST: return "任务材料";
         case PK_AVATAR: return "时装";
         case PK_CREATURE: return "宠物";
+        case PK_CREATURE_EQUIP: return "宠物装备";
         default: return "未知";
     }
 }
@@ -1133,7 +1139,7 @@ const char *pvf_seal_name(const Pvf *p, int id) {
 
 int pvf_is_equip(const Pvf *p, u32 id) {
     int k = pvf_item_kind(p, id);
-    return k == PK_EQUIP || k == PK_AVATAR;
+    return k == PK_EQUIP || k == PK_AVATAR || k == PK_CREATURE_EQUIP;
 }
 
 int pvf_item_count(const Pvf *p) { return (p && p->opened) ? p->items.n : 0; }

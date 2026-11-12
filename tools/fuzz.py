@@ -66,14 +66,8 @@ def ini_scope(apply):
                 pass
 
 
-def with_ini(apply):
-    """不关心作用域的用法：改一下、跑完立刻还原。"""
-    with ini_scope(apply):
-        pass
-
-
 def set_ini(section, key, value):
-    """临时把 ini 的某一项改成 value（结束时由 with_ini 整体还原）。"""
+    """临时把 ini 的某一项改成 value（结束时由 ini_scope 整体还原）。"""
     def apply(raw):
         txt = raw.decode("utf-8", "replace")
         out, cur, found = [], None, False
@@ -140,8 +134,8 @@ def check_config(args):
     def apply(raw):
         open(INI, "wb").write(bytes(random.getrandbits(8) for _ in range(200)))
         ok_alive[0] = True
-    with_ini(apply)
-    alive, _ = boot_check("就绪", 8.0) if ok_alive[0] else (False, False)
+    with ini_scope(apply):
+        alive, _ = boot_check("就绪", 8.0) if ok_alive[0] else (False, False)
     print("      alive=%s" % alive)
     return alive
 

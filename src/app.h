@@ -24,7 +24,7 @@ typedef struct {
     int  bubble_on;
     int  bubble_sec;     // 结算间隔（秒）
     int  bubble_target;  // 0=仅在线 1=全服(含离线) 2=指定角色 3=指定账号
-    int  bubble_coin;    // 赠送点券 (inventory.coin)
+    int  bubble_coin;    // 复活币 (inventory.coin)
     int  bubble_dpoint;  // D点 (cash_cera.cera)
     int  bubble_dcoin;   // D币 (cash_cera_point.cera_point)
     u32  bubble_item;    // 物品 ID（0=不发）

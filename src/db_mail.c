@@ -58,64 +58,76 @@ int db_creature_ids(Db *d, Vec *out, Err err) {
 
 // 邮件本身只是软删（delete_flag=1）；但它附带的时装/宠物是真实行，
 // 不跟着清掉就成了占格的孤儿记录。add_info 就是那行的 ui_id。
-void mail_drop_attach(Db *d, u64 postal_id) {
+static int mail_drop_where(Db *d, const char *where, Err err) {
     Str s = {0};
     MyResult r = {0};
-    str_catf(&s,
-             "SELECT avata_flag,creature_flag,add_info FROM taiwan_cain_2nd.postal "
-             "WHERE postal_id=%llu",
-             (unsigned long long)postal_id);
-    if (!select1(d, &s, &r) || !r.nrow) { str_free(&s); return; }
-    int av = (int)my_i64(&r, 0, 0, 0);
-    int cr = (int)my_i64(&r, 0, 1, 0);
-    u64 add = my_u64(&r, 0, 2, 0);
+    // Hold the selected mails until both attachments and flags have changed.
+    str_catf(&s, "SELECT p.postal_id FROM taiwan_cain_2nd.postal p "
+                 "WHERE p.delete_flag=0 AND %s FOR UPDATE", where);
+    int ok = select1(d, &s, &r);
     my_free(&r);
-    if ((!av && !cr) || !add) { str_free(&s); return; }
-    str_clear(&s);
-    str_catf(&s, "DELETE FROM taiwan_cain_2nd.%s WHERE ui_id=%llu", av ? "user_items" : "creature_items",
-             (unsigned long long)add);
-    run(d, &s);
+    static const char *tables[] = {"user_items", "creature_items"};
+    static const char *flags[] = {"avata_flag", "creature_flag"};
+    for (int i = 0; ok && i < 2; i++) {
+        if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); ok = 0; break; }
+        str_clear(&s);
+        // Check ownership and item ID as well: a stale/malformed mail must not
+        // delete another character's item merely because add_info matches.
+        str_catf(&s, "DELETE taiwan_cain_2nd.%s FROM taiwan_cain_2nd.%s "
+                     "JOIN taiwan_cain_2nd.postal p ON taiwan_cain_2nd.%s.ui_id=p.add_info "
+                     "AND taiwan_cain_2nd.%s.charac_no=p.receive_charac_no "
+                     "AND taiwan_cain_2nd.%s.it_id=p.item_id "
+                     "WHERE p.delete_flag=0 AND p.%s=1 AND %s",
+                 tables[i], tables[i], tables[i], tables[i], tables[i], flags[i], where);
+        ok = run(d, &s);
+    }
+    if (!ok && !err[0]) snprintf(err, ERRBUF, "%s", d->err);
     str_free(&s);
+    return ok;
+}
+
+int mail_drop_attach(Db *d, u64 postal_id, Err err) {
+    if (!db_tx_begin(d, err)) return 0;
+    char where[80];
+    snprintf(where, sizeof(where), "p.postal_id=%llu", (unsigned long long)postal_id);
+    if (!mail_drop_where(d, where, err)) { db_tx_rollback(d); return 0; }
+    return db_tx_commit(d, err);
+}
+
+static int delete_mail_where(Db *d, const char *where, Err err) {
+    if (!db_tx_begin(d, err)) return 0;
+    if (!mail_drop_where(d, where, err)) { db_tx_rollback(d); return 0; }
+    Str s = {0};
+    str_catf(&s, "UPDATE taiwan_cain_2nd.postal p SET p.delete_flag=1 "
+                 "WHERE p.delete_flag=0 AND %s", where);
+    int ok = run(d, &s);
+    str_free(&s);
+    if (!ok) { snprintf(err, ERRBUF, "%s", d->err); db_tx_rollback(d); return 0; }
+    return db_tx_commit(d, err);
 }
 
 int db_delete_mail(Db *d, u64 postal_id, Err err) {
-    mail_drop_attach(d, postal_id);
-    Str s = {0};
-    str_catf(&s, "UPDATE taiwan_cain_2nd.postal SET delete_flag=1 WHERE postal_id=%llu",
-             (unsigned long long)postal_id);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+    char where[80];
+    snprintf(where, sizeof(where), "p.postal_id=%llu", (unsigned long long)postal_id);
+    return delete_mail_where(d, where, err);
 }
 
 int db_delete_all_mails(Db *d, const Charac *c, Err err) {
-    Str s = {0};
-    MyResult r = {0};
-    // 先把所有带附件的邮件 id 收出来逐个清，再统一软删
-    str_catf(&s,
-             "SELECT postal_id FROM taiwan_cain_2nd.postal WHERE receive_charac_no=%u "
-             "AND delete_flag=0 AND (avata_flag=1 OR creature_flag=1)",
-             c->no);
-    if (select1(d, &s, &r)) {
-        for (int i = 0; i < r.nrow; i++) mail_drop_attach(d, my_u64(&r, i, 0, 0));
-        my_free(&r);
-    }
-    str_clear(&s);
-    str_catf(&s, "UPDATE taiwan_cain_2nd.postal SET delete_flag=1 WHERE receive_charac_no=%u", c->no);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+    char where[80];
+    snprintf(where, sizeof(where), "p.receive_charac_no=%u", c->no);
+    return delete_mail_where(d, where, err);
 }
 
 int db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *text, Err err) {
     // 用配置的字符集写，别再手工切 latin1：letter.letter_text / send_charac_name 都是
     // utf8 列，latin1 会话会把 UTF-8 字节当成 latin1 再转存，落库即双重编码；
     // 且列上限按字符算，latin1 下一个汉字占 3 个字符，90 个汉字就被截到 255 个字符。
-    set_names(d, db_cs_name(d->charset));
-    char *es = mysql_escape(sender ? sender : "GM");
-    char *et = mysql_escape(text ? text : "");
+    if (!set_names(d, db_cs_name(d->charset))) {
+        snprintf(err, ERRBUF, "邮件字符集：%s", d->err);
+        return 0;
+    }
+    char *es = mysql_escape(&d->conn, sender ? sender : "GM");
+    char *et = mysql_escape(&d->conn, text ? text : "");
     Str s = {0};
     char ts[32];
     now_str(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S");
@@ -132,28 +144,32 @@ int db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *te
     return ok;
 }
 
+static int mail_insert_id(Db *d, u64 *id, Err err) {
+    Str s = {0};
+    MyResult r = {0};
+    str_cat(&s, "SELECT LAST_INSERT_ID()");
+    int ok = select1(d, &s, &r);
+    *id = ok ? my_u64(&r, 0, 0, 0) : 0;
+    if (!ok) snprintf(err, ERRBUF, "邮件插入编号：%s", d->err);
+    else if (!*id || *id > INT32_MAX) {
+        snprintf(err, ERRBUF, "邮件插入编号超出有效范围");
+        ok = 0;
+    }
+    my_free(&r);
+    str_free(&s);
+    return ok;
+}
+
 int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char *text,
                          const GrantItem *g, int avata_flag, int creature_flag, Err err) {
     // 正文、附件行、postal 必须同生共死：附件先落库而 postal 失败会留下占格的孤儿行
     if (!db_tx_begin(d, err)) return 0;
     if (!db_send_text_mail(d, c, sender, text, err)) goto fail;
-    // postal.send_charac_name 同样是 utf8 列，字符集必须跟上面那封正文一致
-    set_names(d, db_cs_name(d->charset));
-    char *es = mysql_escape(sender ? sender : "GM");
-    Str s = {0};
-    MyResult r = {0};
     u64 letter_id = 0;
-    str_cat(&s, "SELECT LAST_INSERT_ID()");
-    if (select1(d, &s, &r)) letter_id = my_u64(&r, 0, 0, 0);
-    my_free(&r);
-    if (!letter_id) {
-        // 回退：按 charac_no 找最新一封
-        str_clear(&s);
-        str_catf(&s, "SELECT MAX(letter_id) FROM taiwan_cain_2nd.letter WHERE charac_no=%u", c->no);
-        if (select1(d, &s, &r)) letter_id = my_u64(&r, 0, 0, 0);
-        my_free(&r);
-    }
-    str_clear(&s);
+    if (!mail_insert_id(d, &letter_id, err)) goto fail;
+    // 正文已经设置会话字符集；使用本连接的插入编号，不猜测“最新一封”。
+    char *es = mysql_escape(&d->conn, sender ? sender : "GM");
+    Str s = {0};
 
     // 附件落点：普通物品 add_info 存数量；时装/宠物要先建一行再取 ui_id 作为 add_info
     u64 add_info = (u64)g->num;
@@ -162,14 +178,11 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
         now_str(ts0, sizeof(ts0), "%Y-%m-%d %H:%M:%S");
         str_catf(&s,
                  "INSERT INTO taiwan_cain_2nd.user_items "
-                 "(charac_no,it_id,expire_date,obtain_from,reg_date,stat) "
-                 "VALUES (%u,%u,'9999-12-31 23:59:59',1,'%s',2)",
+                 "(charac_no,it_id,expire_date,obtain_from,reg_date,stat,jewel_socket) "
+                 "VALUES (%u,%u,'9999-12-31 23:59:59',1,'%s',2,X'')",
                  c->no, g->id, ts0);
         if (!run(d, &s)) { snprintf(err, ERRBUF, "建时装行：%s", d->err); str_free(&s); free(es); goto fail; }
-        str_clear(&s);
-        str_cat(&s, "SELECT LAST_INSERT_ID()");
-        if (select1(d, &s, &r)) add_info = my_u64(&r, 0, 0, 0);
-        my_free(&r);
+        if (!mail_insert_id(d, &add_info, err)) { str_free(&s); free(es); goto fail; }
         str_clear(&s);
     } else if (creature_flag) {
         char ts0[32];
@@ -180,10 +193,7 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
                  "VALUES (%u,%u,'9999-12-31 23:59:59','%s',0,0,0,100)",
                  c->no, g->id, ts0);
         if (!run(d, &s)) { snprintf(err, ERRBUF, "建宠物行：%s", d->err); str_free(&s); free(es); goto fail; }
-        str_clear(&s);
-        str_cat(&s, "SELECT LAST_INSERT_ID()");
-        if (select1(d, &s, &r)) add_info = my_u64(&r, 0, 0, 0);
-        my_free(&r);
+        if (!mail_insert_id(d, &add_info, err)) { str_free(&s); free(es); goto fail; }
         str_clear(&s);
     }
 
@@ -253,21 +263,7 @@ int db_send_mail_bulk(Db *d, int online_only, const char *sender, const char *te
 
 // 全服软删所有邮件（delete_flag=1），用于「清服」类维护。
 int db_delete_all_mails_global(Db *d, Err err) {
-    Str s = {0};
-    MyResult r = {0};
-    // 附件是真实行，软删邮件不会带走它们，先逐个清掉
-    str_cat(&s, "SELECT postal_id FROM taiwan_cain_2nd.postal WHERE delete_flag=0 "
-                "AND (avata_flag=1 OR creature_flag=1)");
-    if (select1(d, &s, &r)) {
-        for (int i = 0; i < r.nrow; i++) mail_drop_attach(d, my_u64(&r, i, 0, 0));
-        my_free(&r);
-    }
-    str_clear(&s);
-    str_cat(&s, "UPDATE taiwan_cain_2nd.postal SET delete_flag=1");
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+    return delete_mail_where(d, "1", err);
 }
 
 // ---------------- 宠物 / 时装 ----------------
@@ -304,7 +300,7 @@ int db_set_pet_name(Db *d, u32 ui_id, const char *name, Err err) {
             }
     set_names(d, db_cs_name(d->charset));
     if (!db_tx_begin(d, err)) return 0;
-    char *e = mysql_escape(name);
+    char *e = mysql_escape(&d->conn, name);
     Str s = {0};
     str_catf(&s, "UPDATE taiwan_cain_2nd.creature_items SET name='%s' WHERE ui_id=%u", e, ui_id);
     free(e);

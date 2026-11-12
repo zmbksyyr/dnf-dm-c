@@ -9,23 +9,7 @@
 #include <stdio.h>
 
 // 备份「成功」必须等于文件完整：磁盘满、路径被占、中途被杀都会留下半截文件，
-// 那种备份比没有更危险——用户以为有后路。写完统一验一次结尾标记。
-static int file_ends_with(const char *path, const char *tail) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return 0;
-    int ok = 0;
-    if (fseek(f, 0, SEEK_END) == 0) {
-        long n = ftell(f), m = (long)strlen(tail);
-        if (n >= m) {
-            char buf[128];
-            if (m < (long)sizeof(buf) && fseek(f, n - m, SEEK_SET) == 0 &&
-                fread(buf, 1, (size_t)m, f) == (size_t)m)
-                ok = memcmp(buf, tail, (size_t)m) == 0;
-        }
-    }
-    fclose(f);
-    return ok;
-}
+// 全部读取和写入成功后，才将临时文件原子发布；还原时检查结束标记。
 
 // 把「列名, 数据类型」两列读进两个 Str Vec（整库备份 / 单表导出两处共用）。
 static void read_col_pairs(const MyResult *r, Vec *names, Vec *types) {
@@ -104,8 +88,8 @@ int db_add_event(Db *d, u32 type, i64 p1, i64 p2, int days, Err err) {
 // 往活动字典（dnf_event_info）插一条：下拉里没有的活动，GM 自己补定义。
 // 表是 utf8，连接默认 utf8mb4 是其超集，直接插即可，不必切 charset。
 int db_add_event_info(Db *d, u32 id, const char *name, const char *explain, Err err) {
-    char *en = mysql_escape(name ? name : "");
-    char *ee = mysql_escape(explain ? explain : "");
+    char *en = mysql_escape(&d->conn, name ? name : "");
+    char *ee = mysql_escape(&d->conn, explain ? explain : "");
     Str s = {0};
     str_catf(&s,
              "INSERT INTO d_taiwan.dnf_event_info "
@@ -215,7 +199,7 @@ int db_ban(Db *d, u32 mid, int days, int type, int value, const char *reason, Er
     // 早先照搬 db_set_name 用了 latin1 连接，MySQL 会把送进去的 UTF-8 字节当成
     // latin1 再转一次码：库里存的是 C3A8C2BF… 这种二次编码，界面回读就是一坨乱码。
     // 角色名要 latin1 是因为服务端那条链路认的是原始字节，reason 没有这个包袱。
-    char *e = mysql_escape(reason ? reason : "");
+    char *e = mysql_escape(&d->conn, reason ? reason : "");
     Str s = {0};
     str_catf(&s,
              "REPLACE INTO d_taiwan.member_punish_info "
@@ -278,7 +262,7 @@ int db_get_vip(Db *d, u32 mid, char *out, int cap, Err err) {
 }
 
 int db_set_vip(Db *d, u32 mid, const char *vip, Err err) {
-    char *e = mysql_escape(vip ? vip : "0");
+    char *e = mysql_escape(&d->conn, vip ? vip : "0");
     Str s = {0};
     str_catf(&s, "UPDATE d_taiwan.accounts SET VIP='%s' WHERE UID=%u", e, mid);
     free(e);
@@ -313,12 +297,12 @@ static int db_list_tables(Db *d, Vec *out, Err err) {
 
 // ---------------- 整库备份 / 还原 ----------------
 int is_bin_type(const char *t) {
-    return str_istr(t, "blob") || str_istr(t, "binary") || strcmp(t, "geometry") == 0;
+    return str_istr(t, "blob") || str_istr(t, "binary") || strcmp(t, "geometry") == 0 || strcmp(t, "bit") == 0;
 }
 
 int is_num_type(const char *t) {
     static const char *k[] = {"tinyint", "smallint", "mediumint", "int", "bigint",
-                              "decimal", "float", "double", "bit"};
+                              "decimal", "float", "double"};
     for (int i = 0; i < COUNT_OF(k); i++)
         if (!strcmp(t, k[i])) return 1;
     return 0;
@@ -366,191 +350,189 @@ void db_dump_path(char *out, int cap) {
     art_path(out, cap, "backup", "db", "sql");
 }
 
-int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
-    Vec tabs;
-    vec_init(&tabs, sizeof(Str));
-    if (!db_list_tables(d, &tabs, err)) { vec_free(&tabs); return 0; }
-    set_names(d, db_cs_name(d->charset));
+// Shared by full and character backups. Every read/write must succeed before
+// the temporary file can replace the destination.
+static void dump_ident(Str *s, const char *name) {
+    str_catc(s, '`');
+    for (; *name; name++) { str_catc(s, *name); if (*name == '`') str_catc(s, '`'); }
+    str_catc(s, '`');
+}
 
-    Str out = {0};
-    char ts[32];
-    now_str(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S");
-    // 头里的 SET NAMES 必须跟连接实际用的字符集一致：还原时这条会被真的执行一遍，
-    // 写成别的等于把连接切走，后面的转义全对不上号。
-    str_catf(&out, "-- DNF GM 数据库备份 · %s\n-- %s\nSET NAMES %s;\nSET FOREIGN_KEY_CHECKS=0;\n\n",
-             ts, d->host, db_cs_name(d->charset));
-    if (!file_write(path, out.p, (size_t)out.n)) {
-        snprintf(err, ERRBUF, "无法写入 %s", path);
-        str_free(&out);
-        vec_free(&tabs);
+static void dump_name(Str *s, const char *schema, const char *table) {
+    dump_ident(s, schema); str_catc(s, '.'); dump_ident(s, table);
+}
+
+static int dump_append(const char *path, Str *text, Err err) {
+    if (text->n && !file_append(path, text->p, (size_t)text->n)) {
+        snprintf(err, ERRBUF, "写入备份失败：%s", path);
         return 0;
     }
-    str_clear(&out);
+    str_clear(text);
+    return 1;
+}
 
-    int nt = 0;
-    u64 nr = 0;
-    for (int ti = 0; ti < tabs.n; ti++) {
-        if (db_cancelled()) {
-            snprintf(err, ERRBUF, "已取消");
-            for (int k = 0; k < tabs.n; k++) str_free(VEC_AT(&tabs, Str, k));
-            vec_free(&tabs);
-            str_free(&out);
-            return 0;
-        }
-        if (db_progress_cb) db_progress_cb(tabs.n ? ti * 100 / tabs.n : 100);
-        Str *full = VEC_AT(&tabs, Str, ti);
+// READ locks cover InnoDB and MyISAM at the same point in time. Using a
+// transaction alone would leave the nontransactional tables inconsistent.
+static int dump_lock(Db *d, const Vec *tables, Err err) {
+    if (d->tx_depth || !tables->n) {
+        snprintf(err, ERRBUF, "当前事务未结束或没有可备份的表"); return 0;
+    }
+    Str q = {0};
+    str_cat(&q, "LOCK TABLES ");
+    for (int i = 0; i < tables->n; i++) {
         char sc[80], tb[128];
-        if (!split_tbl(str_c(full), sc, sizeof(sc), tb, sizeof(tb))) continue;
-
-        // 1) 建表语句（IF NOT EXISTS，还原时不会砸掉已有数据）
-        Str q = {0};
-        MyResult r = {0};
-        str_catf(&q, "SHOW CREATE TABLE `%s`.`%s`", sc, tb);
-        if (!select1(d, &q, &r)) { my_free(&r); str_free(&q); continue; }
-        const char *ddl = r.nrow ? my_text(&r, 0, 1) : NULL;
-        if (ddl && *ddl) {
-            str_catf(&out, "\n-- %s.%s\n", sc, tb);
-            if (strstr(ddl, "CREATE TABLE `")) {
-                // 表名必须带库名：连接没有默认库，`CREATE TABLE \`tb\`` 会报 1046
-                str_catf(&out, "CREATE TABLE IF NOT EXISTS `%s`.`%s`", sc, tb);
-                const char *p = strstr(ddl, "CREATE TABLE `");
-                p = p ? strchr(p + 14, '`') : NULL;    // 跳过表名，从 "(" 之前开始拼
-                str_cat(&out, p ? p + 1 : "");
-            } else {
-                str_cat(&out, ddl);
-            }
-            str_cat(&out, ";\n");
+        if (!split_tbl(str_c(VEC_AT(tables, Str, i)), sc, sizeof(sc), tb, sizeof(tb))) {
+            str_free(&q); snprintf(err, ERRBUF, "备份表名无效"); return 0;
         }
-        if (out.n) {                    // 建表语句要立刻落盘，不能攒到最后
-            file_append(path, out.p, (size_t)out.n);
-            str_clear(&out);
-        }
-        my_free(&r);
-        str_clear(&q);
-
-        // 2) 列名 / 类型
-        Vec names, types;
-        vec_init(&names, sizeof(Str));
-        vec_init(&types, sizeof(Str));
-        str_catf(&q, "SELECT COLUMN_NAME,DATA_TYPE FROM information_schema.COLUMNS "
-                     "WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' ORDER BY ORDINAL_POSITION",
-                 sc, tb);
-        if (select1(d, &q, &r)) {
-            read_col_pairs(&r, &names, &types);
-        }
-        my_free(&r);
-        str_clear(&q);
-        if (!names.n) {                 // 查不到列定义：这张表跳过（没有任何 Str 要逐个释放）
-            vec_free(&names); vec_free(&types); str_free(&q);
-            continue;
-        }
-
-        // 3) 先清空再灌数据：还原到仍有数据的库时，直接 INSERT 会撞主键
-        {
-            Str del = {0};
-            str_catf(&del, "DELETE FROM `%s`.`%s`;\n", sc, tb);
-            int w = file_append(path, del.p, (size_t)del.n);
-            str_free(&del);
-            if (!w) {
-                snprintf(err, ERRBUF, "写入失败：%s", path);
-                my_free(&r); str_free(&q);
-                for (int i = 0; i < names.n; i++) str_free(VEC_AT(&names, Str, i));
-                for (int i = 0; i < types.n; i++) str_free(VEC_AT(&types, Str, i));
-                vec_free(&names); vec_free(&types); str_free(&out);
-                return 0;
-            }
-        }
-
-        // 4) 数据
-        str_catf(&q, "SELECT * FROM `%s`.`%s`", sc, tb);
-        if (!select1(d, &q, &r)) {
-            my_free(&r); str_free(&q);
-            for (int i = 0; i < names.n; i++) str_free(VEC_AT(&names, Str, i));
-            for (int i = 0; i < types.n; i++) str_free(VEC_AT(&types, Str, i));
-            vec_free(&names); vec_free(&types);
-            continue;
-        }
-
-        Str ins = {0};
-        str_catf(&ins, "INSERT INTO `%s`.`%s` (", sc, tb);
-        for (int i = 0; i < names.n; i++) {
-            if (i) str_cat(&ins, ",");
-            str_catf(&ins, "`%s`", str_c(VEC_AT(&names, Str, i)));
-        }
-        str_cat(&ins, ") VALUES ");
-
-        int rows_in = 0;
-        for (int i = 0; i < r.nrow; i++) {
-            if (rows_in) str_catc(&ins, ',');
-            str_catc(&ins, '(');
-            for (int c = 0; c < names.n; c++) {
-                if (c) str_catc(&ins, ',');
-                const char *v = my_text(&r, i, c);
-                if (!v) { str_cat(&ins, "NULL"); continue; }
-                int len = my_len(&r, i, c);
-                const char *ty = str_c(VEC_AT(&types, Str, c));
-                if (is_num_type(ty) && len > 0) str_catn(&ins, v, len);
-                else sql_lit(&ins, v, len, is_bin_type(ty));
-            }
-            str_catc(&ins, ')');
-            rows_in++;
-            if (rows_in >= 64 || ins.n > (1 << 20)) {
-                str_cat(&ins, ";\n");
-                if (!file_append(path, ins.p, (size_t)ins.n)) {
-                    snprintf(err, ERRBUF, "写入失败：%s", path);
-                    my_free(&r); str_free(&q); str_free(&ins);
-                    nr += (u64)rows_in;
-                    for (int k = 0; k < names.n; k++) str_free(VEC_AT(&names, Str, k));
-                    for (int k = 0; k < types.n; k++) str_free(VEC_AT(&types, Str, k));
-                    vec_free(&names); vec_free(&types); vec_free(&tabs); str_free(&out);
-                    return 0;
-                }
-                nr += (u64)rows_in;
-                rows_in = 0;
-                str_clear(&ins);
-                str_catf(&ins, "INSERT INTO `%s`.`%s` (", sc, tb);
-                for (int k = 0; k < names.n; k++) {
-                    if (k) str_cat(&ins, ",");
-                    str_catf(&ins, "`%s`", str_c(VEC_AT(&names, Str, k)));
-                }
-                str_cat(&ins, ") VALUES ");
-            }
-        }
-        if (rows_in) {
-            str_cat(&ins, ";\n");
-            file_append(path, ins.p, (size_t)ins.n);
-            nr += (u64)rows_in;
-        }
-        str_free(&ins);
-        my_free(&r);
-        str_free(&q);
-        for (int k = 0; k < names.n; k++) str_free(VEC_AT(&names, Str, k));
-        for (int k = 0; k < types.n; k++) str_free(VEC_AT(&types, Str, k));
-        vec_free(&names);
-        vec_free(&types);
-        nt++;
+        if (i) str_catc(&q, ',');
+        dump_name(&q, sc, tb); str_cat(&q, " READ");
     }
+    int ok = run(d, &q);
+    if (!ok) snprintf(err, ERRBUF, "无法锁定备份表：%s", d->err);
+    str_free(&q);
+    return ok;
+}
 
-    str_clear(&out);
-    str_cat(&out, "\nSET FOREIGN_KEY_CHECKS=1;\n");
-    file_append(path, out.p, (size_t)out.n);
-    str_free(&out);
-    for (int i = 0; i < tabs.n; i++) str_free(VEC_AT(&tabs, Str, i));
-    vec_free(&tabs);
-    if (!file_ends_with(path, "SET FOREIGN_KEY_CHECKS=1;\n")) {
-        snprintf(err, ERRBUF, "备份文件不完整（写入失败或磁盘已满）：%s", path);
-        remove(path);
-        return 0;
+static int dump_finish(Db *d, const char *temp, const char *path, int ok, Err err) {
+    Str q = {0}; str_cat(&q, "UNLOCK TABLES");
+    if (!run(d, &q) && ok) { snprintf(err, ERRBUF, "释放备份读锁失败：%s", d->err); ok = 0; }
+    str_free(&q);
+    WCHAR wt[MAX_PATH * 2], wp[MAX_PATH * 2];
+    utf16(temp, wt, COUNT_OF(wt)); utf16(path, wp, COUNT_OF(wp));
+    if (ok && !MoveFileExW(wt, wp, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        snprintf(err, ERRBUF, "无法保存备份文件（Win32 %lu）：%s", GetLastError(), path); ok = 0;
     }
-    if (tables) *tables = nt;
-    if (rows) *rows = nr;
-    {   // 只留最近 5 份整库备份
-        char dir[MAX_PATH];
-        art_dir("backup", dir, sizeof(dir));
-        art_prune(dir, "db-", 5);
+    if (!ok) DeleteFileW(wt);
+    return ok;
+}
+
+static int dump_begin(Db *d, const Vec *tables, const char *path, char *temp, int cap,
+                      Str *header, Err err) {
+    int n = snprintf(temp, (size_t)cap, "%s.%lu.part", path, GetCurrentProcessId());
+    if (n < 0 || n >= cap) { snprintf(err, ERRBUF, "备份路径过长"); return 0; }
+    if (!set_names(d, db_cs_name(d->charset))) {
+        snprintf(err, ERRBUF, "设置备份字符集失败：%s", d->err); return 0;
+    }
+    if (!dump_lock(d, tables, err)) return 0;
+    if (!file_write(temp, header->p, (size_t)header->n)) {
+        snprintf(err, ERRBUF, "无法写入备份：%s", path);
+        dump_finish(d, temp, path, 0, err); return 0;
     }
     return 1;
 }
+
+static int dump_table(Db *d, const char *path, const char *schema, const char *table,
+                      const char *key, u32 value, int ddl, u64 *rows, Err err) {
+    Str q = {0}, out = {0}, insert = {0};
+    Vec names, types;
+    vec_init(&names, sizeof(Str)); vec_init(&types, sizeof(Str));
+    MyResult r = {0};
+    int ok = 0;
+    if (ddl) {
+        str_cat(&q, "SHOW CREATE TABLE "); dump_name(&q, schema, table);
+        if (!select1(d, &q, &r) || !r.nrow || !my_text(&r, 0, 1)) goto done;
+        const char *create = my_text(&r, 0, 1);
+        const char *body = strchr(create, '(');
+        if (!body) goto done;
+        str_catf(&out, "\n-- %s.%s\nCREATE TABLE IF NOT EXISTS ", schema, table);
+        dump_name(&out, schema, table); str_catc(&out, ' '); str_cat(&out, body); str_cat(&out, ";\n");
+        if (!dump_append(path, &out, err)) goto done;
+        my_free(&r); str_clear(&q);
+    }
+    char *sc = mysql_escape(&d->conn, schema), *tb = mysql_escape(&d->conn, table);
+    str_catf(&q, "SELECT COLUMN_NAME,DATA_TYPE FROM information_schema.COLUMNS "
+                 "WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' "
+                 "AND EXTRA NOT LIKE '%%VIRTUAL GENERATED%%' "
+                 "AND EXTRA NOT LIKE '%%STORED GENERATED%%' ORDER BY ORDINAL_POSITION", sc, tb);
+    free(sc); free(tb);
+    if (!select1(d, &q, &r) || !r.nrow) goto done;
+    read_col_pairs(&r, &names, &types);
+    my_free(&r); str_clear(&q);
+
+    str_cat(&insert, "INSERT INTO "); dump_name(&insert, schema, table); str_cat(&insert, " (");
+    str_cat(&q, "SELECT ");
+    for (int i = 0; i < names.n; i++) {
+        if (i) { str_catc(&q, ','); str_catc(&insert, ','); }
+        dump_ident(&q, str_c(VEC_AT(&names, Str, i)));
+        dump_ident(&insert, str_c(VEC_AT(&names, Str, i)));
+    }
+    str_cat(&insert, ") VALUES "); str_cat(&q, " FROM "); dump_name(&q, schema, table);
+    if (key) { str_cat(&q, " WHERE "); dump_ident(&q, key); str_catf(&q, "=%u", value); }
+    if (!select1(d, &q, &r)) goto done;
+    str_cat(&out, "DELETE FROM "); dump_name(&out, schema, table);
+    if (key) { str_cat(&out, " WHERE "); dump_ident(&out, key); str_catf(&out, "=%u", value); }
+    str_cat(&out, ";\n");
+    if (!dump_append(path, &out, err)) goto done;
+
+    int batch = 0;
+    for (int i = 0; i < r.nrow; i++) {
+        if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); goto done; }
+        if (!batch) str_cat(&out, str_c(&insert));
+        else str_catc(&out, ',');
+        str_catc(&out, '(');
+        for (int k = 0; k < names.n; k++) {
+            if (k) str_catc(&out, ',');
+            const char *v = my_text(&r, i, k);
+            if (!v) { str_cat(&out, "NULL"); continue; }
+            int len = my_len(&r, i, k);
+            const char *type = str_c(VEC_AT(&types, Str, k));
+            if (is_num_type(type) && len) str_catn(&out, v, len);
+            else sql_lit(&out, v, len, is_bin_type(type));
+        }
+        str_catc(&out, ')'); batch++;
+        if (batch >= 64 || out.n >= (1 << 20)) {
+            str_cat(&out, ";\n");
+            if (!dump_append(path, &out, err)) goto done;
+            batch = 0;
+        }
+    }
+    if (batch) { str_cat(&out, ";\n"); if (!dump_append(path, &out, err)) goto done; }
+    *rows += (u64)r.nrow;
+    ok = 1;
+done:
+    if (!ok && !err[0]) snprintf(err, ERRBUF, "备份 %s.%s 失败：%s", schema, table, d->err);
+    my_free(&r); str_free(&q); str_free(&out); str_free(&insert);
+    for (int i = 0; i < names.n; i++) str_free(VEC_AT(&names, Str, i));
+    for (int i = 0; i < types.n; i++) str_free(VEC_AT(&types, Str, i));
+    vec_free(&names); vec_free(&types);
+    return ok;
+}
+
+int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
+    err[0] = 0;
+    if (tables) *tables = 0;
+    if (rows) *rows = 0;
+    Vec tabs; vec_init(&tabs, sizeof(Str));
+    if (!db_list_tables(d, &tabs, err)) { vec_free(&tabs); return 0; }
+    Str header = {0};
+    char temp[MAX_PATH * 2], ts[32];
+    now_str(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S");
+    str_catf(&header, "-- DNF GM 数据库备份 · %s\nSET NAMES %s;\n"
+                     "SET SQL_MODE='NO_AUTO_VALUE_ON_ZERO';\nSET FOREIGN_KEY_CHECKS=0;\n", ts, db_cs_name(d->charset));
+    int started = dump_begin(d, &tabs, path, temp, sizeof(temp), &header, err);
+    str_free(&header);
+    int ok = started, nt = 0;
+    u64 nr = 0;
+    for (int i = 0; ok && i < tabs.n; i++) {
+        if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); ok = 0; break; }
+        if (db_progress_cb) db_progress_cb(i * 100 / tabs.n);
+        char sc[80], tb[128];
+        ok = split_tbl(str_c(VEC_AT(&tabs, Str, i)), sc, sizeof(sc), tb, sizeof(tb)) &&
+             dump_table(d, temp, sc, tb, NULL, 0, 1, &nr, err);
+        if (ok) nt++;
+    }
+    if (ok) { str_cat(&header, "\nSET FOREIGN_KEY_CHECKS=1;\n"); ok = dump_append(temp, &header, err); }
+    str_free(&header);
+    for (int i = 0; i < tabs.n; i++) str_free(VEC_AT(&tabs, Str, i));
+    vec_free(&tabs);
+    if (started) ok = dump_finish(d, temp, path, ok, err);
+    if (!ok) return 0;
+    if (tables) *tables = nt;
+    if (rows) *rows = nr;
+    char dir[MAX_PATH]; art_dir("backup", dir, sizeof(dir)); art_prune(dir, "db-", 5);
+    return 1;
+}
+
 
 // 逐条执行 SQL 文本（识别引号/注释，按 ';' 切）
 //
@@ -561,161 +543,136 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
 // 一个诚实的限制：MySQL 里 CREATE / DROP / ALTER 会隐式提交事务，所以整库备份
 // （带建表语句）做不到端到端原子，只能保证两个 DDL 之间的 DML 段是原子的。角色
 // 备份是纯 DML，能完整回滚 —— 而它恰恰是最需要回滚的那一种。
-static int view_sync_char(Db *d, u32 mid, u32 cno, Err err);
+static int view_sync_char(Db *d, u32 mid, u32 cno, u32 template_no, Err err);
 int db_sql_file_complete(const char *path, int *is_full, Err err) {
     Buf f = {0};
     if (!file_read(path, &f)) { snprintf(err, ERRBUF, "读不到 %s", path); return 0; }
     buf_reserve(&f, f.n + 1);
     f.p[f.n] = 0;
     int full = strstr((const char *)f.p, "-- DNF GM 数据库备份") != NULL;
-    int ok = !full ||
-             strstr((const char *)f.p + (f.n > 64 ? f.n - 64 : 0), "SET FOREIGN_KEY_CHECKS=1;") != NULL;
+    int character = strstr((const char *)f.p, "-- DNF GM 角色备份") != NULL;
+    const char *tail = (const char *)f.p + (f.n > 64 ? f.n - 64 : 0);
+    int ok = (!full || strstr(tail, "SET FOREIGN_KEY_CHECKS=1;") != NULL) &&
+             (!character || strstr(tail, "-- 备份结束") != NULL);
     if (is_full) *is_full = full;
     if (!ok) snprintf(err, ERRBUF, "备份文件不完整（缺少结尾标记），已拒绝还原：%s", path);
     buf_free(&f);
     return ok;
 }
 
+static int restore_session(Db *d, u64 autocommit, u64 foreign_keys, const char *mode, Err err) {
+    Str q = {0};
+    int ok = 1;
+    // Clear a failed transaction before changing autocommit (which can commit).
+    const char *commands[] = {"ROLLBACK", NULL, NULL, NULL};
+    char fk[80], ac[80];
+    snprintf(fk, sizeof(fk), "SET FOREIGN_KEY_CHECKS=%llu", (unsigned long long)foreign_keys);
+    snprintf(ac, sizeof(ac), "SET autocommit=%llu", (unsigned long long)autocommit);
+    char *escaped = mysql_escape(&d->conn, mode);
+    str_catf(&q, "SET SESSION sql_mode='%s'", escaped); free(escaped);
+    commands[1] = str_c(&q); commands[2] = fk; commands[3] = ac;
+    for (int i = 0; i < COUNT_OF(commands); i++) {
+        MyResult r = {0};
+        if (!mysql_query(&d->conn, commands[i], &r)) ok = 0;
+        my_free(&r);
+    }
+    if (!set_names(d, db_cs_name(d->charset))) ok = 0;
+    str_free(&q);
+    if (!ok) {
+        Err previous; snprintf(previous, ERRBUF, "%s", err);
+        snprintf(err, ERRBUF, "%s%s恢复连接会话失败", previous, previous[0] ? "；" : "");
+        db_close(d);    // A session with unknown constraints/mode must not be reused.
+    }
+    return ok;
+}
+
 int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
-    // 先验完整性再动手：宁可什么都不做，也不拿半截备份去清库
+    err[0] = 0;
+    if (stmts) *stmts = 0;
+    if (d->tx_depth) { snprintf(err, ERRBUF, "当前事务未结束，无法还原"); return 0; }
     if (!db_sql_file_complete(path, NULL, err)) return 0;
     Buf f = {0};
     if (!file_read(path, &f)) { snprintf(err, ERRBUF, "读不到 %s", path); return 0; }
-    set_names(d, db_cs_name(d->charset));
-
-    // 角色备份头部带「视图」标记：还原完要把槽位补回 charac_view，
-    // 否则角色在 charac_info 里有行、客户端列表里却没有
+    if (f.n && memchr(f.p, 0, f.n)) {
+        snprintf(err, ERRBUF, "SQL 文件包含 NUL 字节，无法完整执行");
+        buf_free(&f); return 0;
+    }
+    buf_putc(&f, 0); f.n--;
     u32 vmid = 0, vcno = 0;
-    {
-        buf_reserve(&f, f.n + 1);
-        f.p[f.n] = 0;
-        const char *mk = strstr((const char *)f.p, "-- 视图 m_id=");
-        if (mk) {
-            unsigned a = 0, b = 0;
-            if (sscanf(mk, "-- 视图 m_id=%u charac_no=%u", &a, &b) == 2) {
-                vmid = a;
-                vcno = b;
-            }
-        }
-        // 整库备份必须带结尾标记：没有就是写到一半（磁盘满/被杀）。
-        // 这种文件里 DELETE 已经全了而 INSERT 只有一部分，执行等于清空。
-        int is_full = strstr((const char *)f.p, "-- DNF GM 数据库备份") != NULL;
-        if (is_full && !strstr((const char *)f.p + (f.n > 64 ? f.n - 64 : 0),
-                               "SET FOREIGN_KEY_CHECKS=1;")) {
-            snprintf(err, ERRBUF, "备份文件不完整（缺少结尾标记），已拒绝还原：%s", path);
-            buf_free(&f);
-            return 0;
-        }
+    const char *mk = strstr((const char *)f.p, "-- 视图 m_id=");
+    if (mk) {
+        unsigned a = 0, b = 0;
+        if (sscanf(mk, "-- 视图 m_id=%u charac_no=%u", &a, &b) == 2) { vmid = a; vcno = b; }
     }
 
-    // 关自动提交，把后面所有语句收进同一个事务。
-    // 这一步失败就不继续：下面每一步都假定自己在事务里，事实不是那样的话，
-    // 出错时的表现会比不包事务更让人困惑。
-    Str t = {0};
-    str_cat(&t, "SET autocommit=0");
-    if (!run(d, &t)) {
-        snprintf(err, ERRBUF, "无法关闭自动提交：%s", d->err);
-        str_free(&t);
-        buf_free(&f);
-        return 0;
+    Str q = {0}, cur = {0}, saved_mode = {0};
+    MyResult state = {0};
+    str_cat(&q, "SELECT @@autocommit,@@foreign_key_checks,@@sql_mode");
+    if (!select1(d, &q, &state) || !state.nrow) {
+        snprintf(err, ERRBUF, "读取连接会话失败：%s", d->err);
+        my_free(&state); str_free(&q); buf_free(&f); return 0;
     }
-    str_clear(&t);
-    str_cat(&t, "START TRANSACTION");
-    if (!run(d, &t)) {
-        snprintf(err, ERRBUF, "无法开启事务：%s", d->err);
-        str_clear(&t);
-        str_cat(&t, "SET autocommit=1");
-        run(d, &t);
-        str_free(&t);
-        buf_free(&f);
-        return 0;
-    }
-    str_free(&t);
+    u64 saved_ac = my_u64(&state, 0, 0, 1), saved_fk = my_u64(&state, 0, 1, 1);
+    str_set(&saved_mode, my_text(&state, 0, 2)); my_free(&state);
+    int ok = 0, n = 0, quote = 0;
+    if (!set_names(d, db_cs_name(d->charset))) goto done;
+    str_set(&q, "SET autocommit=0"); if (!run(d, &q)) goto done;
+    str_set(&q, "START TRANSACTION"); if (!run(d, &q)) goto done;
 
-    Str cur = {0};
-    int quote = 0, n = 0;
     for (size_t i = 0; i < f.n; i++) {
         char c = (char)f.p[i];
         if (quote) {
             str_catc(&cur, c);
-            if (c == '\\' && i + 1 < f.n) { str_catc(&cur, (char)f.p[++i]); continue; }
+            if (c == '\\' && quote != '`' && !(d->conn.status & 0x0200u) && i + 1 < f.n) {
+                str_catc(&cur, (char)f.p[++i]); continue;
+            }
             if (c == quote) quote = 0;
             continue;
         }
         if (c == '\'' || c == '"' || c == '`') { quote = c; str_catc(&cur, c); continue; }
-        if (c == '-' && i + 1 < f.n && f.p[i + 1] == '-') {
+        if (c == '#' || (c == '-' && i + 1 < f.n && f.p[i + 1] == '-' &&
+                         (i + 2 == f.n || f.p[i + 2] <= ' '))) {
             while (i < f.n && f.p[i] != '\n') i++;
-            str_catc(&cur, '\n');
-            continue;
-        }
-        if (c == '#') {
-            while (i < f.n && f.p[i] != '\n') i++;
-            str_catc(&cur, '\n');
-            continue;
+            str_catc(&cur, '\n'); continue;
         }
         if (c == '/' && i + 1 < f.n && f.p[i + 1] == '*') {
             i += 2;
             while (i + 1 < f.n && !(f.p[i] == '*' && f.p[i + 1] == '/')) i++;
-            i++;
-            continue;
+            if (i + 1 >= f.n) { snprintf(err, ERRBUF, "SQL 注释没有结束"); goto done; }
+            i++; str_catc(&cur, ' '); continue;
         }
         if (c == ';') {
-            if (cur.n) {
-                if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); goto fail; }
-                if (!run(d, &cur)) { snprintf(err, ERRBUF, "第 %d 条：%s", n + 1, d->err); goto fail; }
+            if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); goto done; }
+            if (cur.p) str_trim(cur.p);
+            if (cur.p && cur.p[0]) {
+                if (!run(d, &cur)) { snprintf(err, ERRBUF, "第 %d 条：%s", n + 1, d->err); goto done; }
                 n++;
-                str_clear(&cur);
             }
-            continue;
+            str_clear(&cur); continue;
         }
         str_catc(&cur, c);
     }
-    if (cur.n) {
-        int only_ws = 1;
-        for (int i = 0; i < cur.n; i++)
-            if (cur.p[i] > ' ') { only_ws = 0; break; }
-        if (!only_ws && db_cancelled()) { snprintf(err, ERRBUF, "已取消"); goto fail; }
-        if (!only_ws && !run(d, &cur)) { snprintf(err, ERRBUF, "第 %d 条：%s", n + 1, d->err); goto fail; }
-        if (!only_ws) n++;
+    if (quote) { snprintf(err, ERRBUF, "SQL 引号没有结束"); goto done; }
+    if (cur.p) str_trim(cur.p);
+    if (cur.p && cur.p[0]) {
+        if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); goto done; }
+        if (!run(d, &cur)) { snprintf(err, ERRBUF, "第 %d 条：%s", n + 1, d->err); goto done; }
+        n++;
     }
-    str_free(&cur);
-    buf_free(&f);
-    {
-        Str s = {0};
-        str_cat(&s, "COMMIT");
-        int ok = run(d, &s);
-        if (!ok) snprintf(err, ERRBUF, "提交失败：%s（前 %d 条已回滚或处于未知状态）", d->err, n);
-        str_clear(&s);
-        str_cat(&s, "SET autocommit=1");
-        run(d, &s);
-        str_free(&s);
-        // 文件里可能自带 SET NAMES（备份头就有一条），执行时已经把连接切走了，
-        // 收尾时切回本连接该用的，免得后续转义对不上号。
-        set_names(d, db_cs_name(d->charset));
-        if (!ok) return 0;
+    if (vmid && vcno && !view_sync_char(d, vmid, vcno, vcno, err)) goto done;
+    str_set(&q, "COMMIT");
+    if (!run(d, &q)) {
+        snprintf(err, ERRBUF, "提交失败，结果需核实：%s", d->err); goto done;
     }
-    // 角色备份：把槽位补回账号视图（失败要报出来，数据行已经还原，只差这一步）
-    if (vmid && vcno && !view_sync_char(d, vmid, vcno, err)) return 0;
-    if (stmts) *stmts = n;
-    return 1;
-
-fail:
-    str_free(&cur);
-    buf_free(&f);
-    {
-        // 已经执行的语句全部作废。err 里是原始错误，回滚本身失败也得喊一声，
-        // 否则用户会以为没写进去。
-        Str s = {0};
-        str_cat(&s, "ROLLBACK");
-        if (!run(d, &s)) snprintf(err, ERRBUF, "%s（且回滚失败：%s）", err, d->err);
-        str_clear(&s);
-        str_cat(&s, "SET autocommit=1");
-        run(d, &s);
-        str_free(&s);
-        set_names(d, db_cs_name(d->charset));
-    }
-    return 0;
+    ok = 1;
+done:
+    if (!ok && !err[0]) snprintf(err, ERRBUF, "%s", d->err);
+    if (!restore_session(d, saved_ac, saved_fk, str_c(&saved_mode), err)) ok = 0;
+    str_free(&saved_mode); str_free(&q); str_free(&cur); buf_free(&f);
+    if (ok && stmts) *stmts = n;
+    return ok;
 }
+
 
 static void vec_free_strs(Vec *v) {
     for (int i = 0; i < v->n; i++) str_free(VEC_AT(v, Str, i));
@@ -739,12 +696,15 @@ typedef struct {
 
 // 把某个角色补回账号的槽位视图。缺槽的角色在 charac_info 里明明有行，
 // 客户端也画不出来（charac_count 还是旧的）——角色备份还原后必须补这一步。
-static int view_sync_char(Db *d, u32 mid, u32 cno, Err err) {
+static int view_sync_char(Db *d, u32 mid, u32 cno, u32 template_no, Err err) {
     Str s = {0};
     MyResult r = {0};
     str_catf(&s, "SELECT charac_name,job,grow_type,lev FROM taiwan_cain.charac_info "
-                 "WHERE charac_no=%u", cno);
-    if (!select1(d, &s, &r) || !r.nrow) { my_free(&r); str_free(&s); return 1; }
+                 "WHERE charac_no=%u FOR UPDATE", cno);
+    if (!select1(d, &s, &r) || !r.nrow) {
+        snprintf(err, ERRBUF, "无法读取角色 %u 的槽位信息：%s", cno, d->err);
+        my_free(&r); str_free(&s); return 0;
+    }
     char name[64] = "";
     cp_text(name, sizeof(name), &r, 0, 0);
     int job = (int)my_i64(&r, 0, 1, 0);
@@ -754,7 +714,7 @@ static int view_sync_char(Db *d, u32 mid, u32 cno, Err err) {
     str_clear(&s);
 
     // 现有视图（可能没有这一行）
-    str_catf(&s, "SELECT info FROM taiwan_cain.charac_view WHERE m_id=%u", mid);
+    str_catf(&s, "SELECT info FROM taiwan_cain.charac_view WHERE m_id=%u FOR UPDATE", mid);
     Buf plain = {0};
     u8 prefix[4] = {0};
     int have = 0;
@@ -770,15 +730,21 @@ static int view_sync_char(Db *d, u32 mid, u32 cno, Err err) {
     my_free(&r);
     str_free(&s);
 
-    if (!have || plain.n < CV_SLOT) {
-        buf_clear(&plain);
-        u8 zero[CV_SLOT];
-        memset(zero, 0, sizeof(zero));
-        buf_put(&plain, zero, CV_SLOT);
+    if (!have || plain.n < CV_SLOT || plain.n % CV_SLOT) {
+        buf_free(&plain);
+        snprintf(err, ERRBUF, "账号 %u 的角色槽位缺失或损坏，无法写回角色 %u", mid, cno);
+        return 0;
     }
 
     int nslot = (int)(plain.n / CV_SLOT);
-    int t = -1, existing = 0;
+    int t = -1, existing = 0, source = -1;
+    for (int k = 0; k < nslot; k++)
+        if (rd32(plain.p + k * CV_SLOT) == template_no) { source = k; break; }
+    if (template_no != cno && source < 0) {
+        buf_free(&plain);
+        snprintf(err, ERRBUF, "账号 %u 的列表中缺少源角色 %u，无法复制槽位", mid, template_no);
+        return 0;
+    }
     for (int k = 0; k < nslot && t < 0; k++)
         if (rd32(plain.p + k * CV_SLOT) == cno) { t = k; existing = 1; }  // 已有槽：原地更新
     for (int k = 0; k < nslot && t < 0; k++) {
@@ -795,11 +761,18 @@ static int view_sync_char(Db *d, u32 mid, u32 cno, Err err) {
 
     u8 *slot = plain.p + t * CV_SLOT;
     // 已有槽只改已知字段：其余字节是客户端/服务端填的，别抹掉
-    if (!existing) memset(slot, 0, CV_SLOT);
+    if (!existing) {
+        if (source >= 0) memcpy(slot, plain.p + source * CV_SLOT, CV_SLOT);
+        else memset(slot, 0, CV_SLOT);
+    }
     wr32(slot + 0, cno);
     memset(slot + 4, 0, CV_NAME);
     size_t nl = strlen(name);
-    memcpy(slot + 4, name, nl < CV_NAME - 1 ? nl : CV_NAME - 1);
+    if (nl >= CV_NAME) {
+        nl = CV_NAME - 1;
+        while (nl && ((u8)name[nl] & 0xC0) == 0x80) nl--;
+    }
+    memcpy(slot + 4, name, nl);
     slot[24] = (u8)job;
     slot[25] = (u8)grow;
     slot[26] = (u8)lev;
@@ -869,10 +842,12 @@ static int char_tabs(Db *d, Vec *out, Err err) {
 
     Str s = {0};
     MyResult r = {0};
-    str_cat(&s, "SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.COLUMNS "
-                "WHERE COLUMN_NAME='charac_no' "
-                "  AND TABLE_SCHEMA IN ('taiwan_cain','taiwan_cain_2nd') "
-                "ORDER BY TABLE_SCHEMA,TABLE_NAME");
+    str_cat(&s, "SELECT c.TABLE_SCHEMA,c.TABLE_NAME FROM information_schema.COLUMNS c "
+                "JOIN information_schema.TABLES t ON t.TABLE_SCHEMA=c.TABLE_SCHEMA "
+                "AND t.TABLE_NAME=c.TABLE_NAME WHERE c.COLUMN_NAME='charac_no' "
+                "AND t.TABLE_TYPE='BASE TABLE' "
+                "AND c.TABLE_SCHEMA IN ('taiwan_cain','taiwan_cain_2nd') "
+                "ORDER BY c.TABLE_SCHEMA,c.TABLE_NAME");
     int ok = select1(d, &s, &r);
     str_free(&s);
     if (!ok) {
@@ -908,164 +883,49 @@ void db_backup_char_path(char *out, int cap, const Charac *c) {
 }
 
 int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *rows, Err err) {
-    // 连接字符集和文件头的 SET NAMES 必须是同一个来源。
-    // 以前这里一边 set_names("utf8")、一边把文件头写死成 utf8mb4，两者对不上；
-    // 默认配置（45）下内容其实是按 mb3 读出来的，头里却声明 mb4。
-    const char *cs = db_cs_name(d->charset);
-    set_names(d, cs);
-    Str out = {0};
-    char ts[32];
+    err[0] = 0;
+    if (tables) *tables = 0;
+    if (rows) *rows = 0;
+    Vec tabs, locks;
+    vec_init(&tabs, sizeof(CharTab)); vec_init(&locks, sizeof(Str));
+    if (!char_tabs(d, &tabs, err)) { vec_free(&tabs); vec_free(&locks); return 0; }
+    for (int i = 0; i < tabs.n; i++) {
+        const CharTab *ct = VEC_AT(&tabs, CharTab, i);
+        Str *t = VEC_ADD(&locks, Str); str_catf(t, "%s.%s", ct->db, ct->tb);
+    }
+    Str header = {0};
+    char temp[MAX_PATH * 2], ts[32];
     now_str(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S");
-    str_catf(&out,
-             "-- DNF GM 角色备份 · %s\n-- charac_no=%u  %s  (m_id=%u)\n"
-             "-- 视图 m_id=%u charac_no=%u\n"
-             "-- 还原会先删掉该角色在这些表里的现有行，再按备份写回\n"
-             "SET NAMES %s;\nSET FOREIGN_KEY_CHECKS=0;\n\n",
-             ts, c->no, c->name, c->mid,
-             c->mid, c->no, cs);
-    if (!file_write(path, out.p, (size_t)out.n)) {
-        snprintf(err, ERRBUF, "无法写入 %s", path);
-        str_free(&out);
-        return 0;
-    }
-    str_clear(&out);
-
-    int nt = 0;
+    str_catf(&header, "-- DNF GM 角色备份 · %s\n-- 视图 m_id=%u charac_no=%u\n"
+                     "SET NAMES %s;\nSET SQL_MODE='NO_AUTO_VALUE_ON_ZERO';\n"
+                     "SET FOREIGN_KEY_CHECKS=0;\n", ts, c->mid, c->no, db_cs_name(d->charset));
+    int started = dump_begin(d, &locks, path, temp, sizeof(temp), &header, err);
+    str_free(&header);
+    int ok = started, nt = 0;
     u64 nr = 0;
-
-    // 表集运行时发现，不写死：库里凡带 charac_no 的表（日志类除外）都要跟着
-    // 角色走。以前写死 15 张、实际有 26 张，漏掉的 11 张让克隆出来的角色是
-    // 残的 —— 工具里看不出问题，游戏服务端一校验就把人踢了。
-    Vec tabs;
-    vec_init(&tabs, sizeof(CharTab));
-    if (!char_tabs(d, &tabs, err)) { str_free(&out); vec_free(&tabs); return 0; }
-    for (int ti = 0; ti < tabs.n; ti++) {
-        if (db_cancelled()) {
-            snprintf(err, ERRBUF, "已取消");
-            str_free(&out);
-            vec_free(&tabs);
-            remove(path);           // 半截备份不留给用户
-            return 0;
-        }
-        if (db_progress_cb) db_progress_cb(tabs.n ? ti * 100 / tabs.n : 100);
-        const CharTab *ct = VEC_AT(&tabs, CharTab, ti);
-        Str q = {0};
-        MyResult r = {0};
-
-        // 列名与类型，用来决定值是裸数字、字符串还是十六进制
-        Vec names, types;
-        vec_init(&names, sizeof(Str));
-        vec_init(&types, sizeof(Str));
-        str_catf(&q, "SELECT COLUMN_NAME,DATA_TYPE FROM information_schema.COLUMNS "
-                     "WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' ORDER BY ORDINAL_POSITION",
-                 ct->db, ct->tb);
-        if (select1(d, &q, &r)) {
-            read_col_pairs(&r, &names, &types);
-        }
-        my_free(&r);
-        str_clear(&q);
-        if (!names.n) { vec_free_strs(&names); vec_free_strs(&types); continue; }
-
-        // 主列名可能不叫 charac_no（skill 那类），先看它在不在
-        const char *key = ct->by_mid ? "m_id" : "charac_no";
-        int have_key = 0;
-        for (int i = 0; i < names.n; i++)
-            if (!strcmp(str_c(VEC_AT(&names, Str, i)), key)) { have_key = 1; break; }
-        if (!have_key) { vec_free_strs(&names); vec_free_strs(&types); continue; }
-
-        u32 kv = ct->by_mid ? c->mid : c->no;
-        str_catf(&q, "SELECT * FROM `%s`.`%s` WHERE `%s`=%u", ct->db, ct->tb, key, kv);
-        if (!select1(d, &q, &r)) {
-            my_free(&r);
-            str_free(&q);
-            vec_free_strs(&names);
-            vec_free_strs(&types);
-            continue;
-        }
-        str_free(&q);
-
-        // 注释和 DELETE 必须先落盘：数据是边查边 append 的，
-        // 攒到最后写会让「插入」跑到「删除」前面，还原等于清空。
-        // DELETE 无条件输出：备份时该表没有行，不代表还原时也没有
-        //（account_cargo / charac_quest_shop 这类行是懒建的）。
-        str_catf(&out, "-- %s.%s (%d 行)%s\n", ct->db, ct->tb, r.nrow,
-                 ct->by_mid ? " · 账号共享" : "");
-        str_catf(&out, "DELETE FROM `%s`.`%s` WHERE `%s`=%u;\n", ct->db, ct->tb, key, kv);
-        file_append(path, out.p, (size_t)out.n);
-        str_clear(&out);
-
-        Str ins = {0};
-        str_catf(&ins, "INSERT INTO `%s`.`%s` (", ct->db, ct->tb);
-        for (int i = 0; i < names.n; i++) {
-            if (i) str_cat(&ins, ",");
-            str_catf(&ins, "`%s`", str_c(VEC_AT(&names, Str, i)));
-        }
-        str_cat(&ins, ") VALUES ");
-
-        int rows_in = 0;
-        for (int i = 0; i < r.nrow; i++) {
-            if (rows_in) str_catc(&ins, ',');
-            str_catc(&ins, '(');
-            for (int k = 0; k < names.n; k++) {
-                if (k) str_catc(&ins, ',');
-                const char *v = my_text(&r, i, k);
-                if (!v) { str_cat(&ins, "NULL"); continue; }
-                int len = my_len(&r, i, k);
-                const char *ty = str_c(VEC_AT(&types, Str, k));
-                if (is_num_type(ty) && len > 0) str_catn(&ins, v, len);
-                else sql_lit(&ins, v, len, is_bin_type(ty));
-            }
-            str_catc(&ins, ')');
-            rows_in++;
-            nr++;
-            if (rows_in >= 64 || ins.n > (1 << 20)) {
-                str_cat(&ins, ";\n");
-                file_append(path, ins.p, (size_t)ins.n);
-                str_clear(&ins);
-                str_catf(&ins, "INSERT INTO `%s`.`%s` (", ct->db, ct->tb);
-                for (int k = 0; k < names.n; k++) {
-                    if (k) str_cat(&ins, ",");
-                    str_catf(&ins, "`%s`", str_c(VEC_AT(&names, Str, k)));
-                }
-                str_cat(&ins, ") VALUES ");
-                rows_in = 0;
-            }
-        }
-        if (rows_in) {
-            str_cat(&ins, ";\n");
-            file_append(path, ins.p, (size_t)ins.n);
-        }
-        str_free(&ins);
-        str_catc(&out, '\n');
-        file_append(path, out.p, (size_t)out.n);
-        str_clear(&out);
-
-        nt++;
-        my_free(&r);
-        vec_free_strs(&names);
-        vec_free_strs(&types);
+    for (int i = 0; ok && i < tabs.n; i++) {
+        if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); ok = 0; break; }
+        if (db_progress_cb) db_progress_cb(i * 100 / tabs.n);
+        const CharTab *ct = VEC_AT(&tabs, CharTab, i);
+        ok = dump_table(d, temp, ct->db, ct->tb, ct->by_mid ? "m_id" : "charac_no",
+                        ct->by_mid ? c->mid : c->no, 0, &nr, err);
+        if (ok) nt++;
     }
-    vec_free(&tabs);
-    {   // 结尾标记：还原端/用户都能据此判断文件是不是完整的
-        Str fin = {0};
-        str_cat(&fin, "-- 备份结束\n");
-        file_append(path, fin.p, (size_t)fin.n);
-        str_free(&fin);
+    if (ok) {
+        str_cat(&header, "\nSET FOREIGN_KEY_CHECKS=1;\n-- 备份结束\n");
+        ok = dump_append(temp, &header, err);
     }
-    if (!file_ends_with(path, "-- 备份结束\n")) {
-        snprintf(err, ERRBUF, "角色备份文件不完整（写入失败或磁盘已满）：%s", path);
-        remove(path);
-        return 0;
-    }
+    str_free(&header); vec_free(&tabs);
+    for (int i = 0; i < locks.n; i++) str_free(VEC_AT(&locks, Str, i));
+    vec_free(&locks);
+    if (started) ok = dump_finish(d, temp, path, ok, err);
+    if (!ok) return 0;
     if (tables) *tables = nt;
     if (rows) *rows = nr;
-    {   // 角色备份只留最近 6 份
-        char dir[MAX_PATH];
-        art_dir("backup", dir, sizeof(dir));
-        art_prune(dir, "char-", 6);
-    }
+    char dir[MAX_PATH]; art_dir("backup", dir, sizeof(dir)); art_prune(dir, "char-", 6);
     return 1;
 }
+
 
 // ---------------- 角色克隆 ----------------
 // 和「备份 → 还原」不是一回事：不生成 SQL 文件，直接在库里把整份数据复制一份。
@@ -1354,7 +1214,7 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
         // 在 latin1 会话下被当成「UTF-8 字节 = latin1 字符」再转存成 utf8，落库就是
         // 双重编码；column 上限还按字符算，5 个汉字就超 varchar(20)。
         set_names(d, db_cs_name(d->charset));
-        char *e = mysql_escape(cand);
+        char *e = mysql_escape(&d->conn, cand);
         char expr[160];
         snprintf(expr, sizeof(expr), "'%s'", e ? e : "");
         free(e);
@@ -1430,73 +1290,9 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
         vec_free(&tabs);
     }
 
-    // 4) 账号的角色槽位视图：客户端的角色列表就是照着这张表画的。
-    //    克隆出的角色不在这儿占一格，界面上就永远看不见 —— charac_info 里
-    //    老老实实写着两行也没用，登录时 charac_count 照旧是 1。
-    //    它按 m_id 归属，进不了上面那份 charac_no 清单，所以只能单独处理。
-    //    槽定长 296 字节：+0 charac_no(u32)、+4 名字(20)、+24 job、
-    //    +25 grow_type、+26 lev。新槽拿源角色那格当模板，改掉这三项即可。
-    if (ok) {
-        MyResult rv = {0};
-        u32 nlev = 0;
-        str_clear(&s);
-        str_catf(&s, "SELECT `lev` FROM taiwan_cain.charac_info WHERE `charac_no`=%u", new_no);
-        if (select1(d, &s, &rv) && rv.nrow) nlev = (u32)my_u64(&rv, 0, 0, 0);
-        my_free(&rv);
-
-        str_clear(&s);
-        str_catf(&s, "SELECT `info` FROM taiwan_cain.charac_view WHERE `m_id`=%u", c->mid);
-        if (select1(d, &s, &rv) && rv.nrow) {
-            const char *bp = my_text(&rv, 0, 0);
-            int bn = my_len(&rv, 0, 0);
-            Buf plain = {0};
-            if (bp && bn > 4 &&
-                zlib_unpack((const u8 *)bp + 4, (size_t)(bn - 4), &plain,
-                            (size_t)CV_SLOT * 4096)) {
-                int nslot = (int)(plain.n / CV_SLOT);
-                int t = -1;
-                for (int k = 1; k < nslot; k++) {          // 0 号槽是源角色，从 1 开始找空位
-                    int z = 1;
-                    for (int j = 0; j < CV_SLOT; j++)
-                        if (plain.p[k * CV_SLOT + j]) { z = 0; break; }
-                    if (z) { t = k; break; }
-                }
-                if (t >= 0) {
-                    u8 *slot = plain.p + t * CV_SLOT;
-                    memcpy(slot, plain.p, CV_SLOT);        // 以源角色那一格为模板
-                    wr32(slot + 0, new_no);
-                    memset(slot + 4, 0, 20);
-                    memcpy(slot + 4, cand, strlen(cand) < 20 ? strlen(cand) : 19);
-                    slot[26] = (u8)nlev;
-
-                    Buf pk = {0};
-                    zlib_pack(plain.p, plain.n, &pk);
-                    // info 的格式是 [4 字节前缀][zlib 流]，跟容器 blob 一样。读的
-                    // 时候剥了前缀，写回去就得原样补上 —— zlib_pack 只产 zlib 流
-                    // 本身（0x78 0x01 起），它不知道前缀这回事。漏补的话槽位
-                    // 整体错位，服务端读出来是空槽，克隆的角色照样不显示。
-                    Buf out = {0};
-                    buf_put(&out, bp, 4);
-                    buf_put(&out, pk.p, pk.n);
-                    Str u = {0};
-                    str_cat(&u, "UPDATE taiwan_cain.charac_view SET `info`=");
-                    sql_lit(&u, (const char *)out.p, (int)out.n, 1);
-                    str_catf(&u, ", `charac_count`=(SELECT COUNT(*) FROM taiwan_cain.charac_info"
-                                 " WHERE `m_id`=%u AND `delete_flag`=0) WHERE `m_id`=%u",
-                             c->mid, c->mid);
-                    if (!run(d, &u)) {
-                        snprintf(err, ERRBUF, "更新 charac_view 失败：%s", d->err);
-                        ok = 0;
-                    }
-                    str_free(&u);
-                    buf_free(&out);
-                    buf_free(&pk);
-                }
-                buf_free(&plain);
-            }
-            my_free(&rv);
-        }
-    }
+    // The selected source can occupy any slot. Use the same validated writer
+    // as character restore; a missing, corrupt or full view must abort cloning.
+    if (ok) ok = view_sync_char(d, c->mid, new_no, c->no, err);
 
     str_clear(&s);
     if (ok) {
@@ -2091,13 +1887,18 @@ int db_purge_bad(Db *d, Vec *rows, int *done, Err err) {
             str_free(&s);
             handled[i] = 1;
         } else if (r->kind == 3) {                  // 邮件：清附件，金币留下
-            mail_drop_attach(d, r->key);
+            if (!db_tx_begin(d, err)) { handled[i] = 1; continue; }
+            if (!mail_drop_attach(d, r->key, err)) {
+                db_tx_rollback(d); handled[i] = 1; continue;
+            }
             Str s = {0};
             str_catf(&s, "UPDATE taiwan_cain_2nd.postal SET item_id=0,add_info=0,"
                          "avata_flag=0,creature_flag=0 WHERE postal_id=%llu",
                      (unsigned long long)r->key);
-            if (run(d, &s)) ok_n++;
-            else snprintf(err, ERRBUF, "%s", d->err);
+            if (!run(d, &s)) {
+                snprintf(err, ERRBUF, "%s", d->err);
+                db_tx_rollback(d);
+            } else if (db_tx_commit(d, err)) ok_n++;
             str_free(&s);
             handled[i] = 1;
         } else {

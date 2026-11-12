@@ -10,7 +10,13 @@ static void npk_key_lower(char *s) {
 }
 
 static int ent_cmp(const void *a, const void *b) {
-    return strcmp(((const NpkEnt *)a)->key, ((const NpkEnt *)b)->key);
+    const NpkEnt *x = (const NpkEnt *)a, *y = (const NpkEnt *)b;
+    int cmp = strcmp(x->key, y->key);
+    if (cmp) return cmp;
+    // qsort is not stable: encode load order explicitly so upper_bound really
+    // chooses the last loaded package when two entries share a name.
+    if (x->file != y->file) return x->file < y->file ? -1 : 1;
+    return x->off < y->off ? -1 : x->off > y->off;
 }
 
 // 密钥流：36 字节短语 + "DNF" 循环。整段应用于 256 字节的文件名字段。
@@ -114,7 +120,7 @@ int npk_build(Npk *p, const char *dir, int *pct, char *stage, int stage_cap) {
     if (stage) snprintf(stage, (size_t)stage_cap, "贴图包索引排序");
     if (pct) *pct = 95;
     qsort(p->ents, (size_t)p->nents, sizeof(NpkEnt), ent_cmp);
-    // 同名条目：后面的补丁包应该盖过前面的 —— 查找时取最后一个即可（排序稳定查找用上界）
+    // 同名条目按加载顺序排序；上界查找选择后加载的包。
     p->ok = 1;
     if (pct) *pct = 100;
     return 1;

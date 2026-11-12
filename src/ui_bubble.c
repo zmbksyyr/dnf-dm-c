@@ -175,7 +175,7 @@ static void bub_layout(Page *p, int w, int h) {
 
     // 右组：奖励三行两列
     BubRow rw[3] = {
-        {"赠送点券（每角色）", b_coin, NULL, "D点（每账号）", b_dp, NULL},
+        {"复活币（每角色）", b_coin, NULL, "D点（每账号）", b_dp, NULL},
         {"D币（每账号）", b_dc, NULL, "物品 ID（0=不发）", b_item, NULL},
         {"物品数量", b_num, NULL, NULL, NULL, NULL},
     };
@@ -227,9 +227,9 @@ static void bub_build(HWND parent) {
     // 看上去像「设置生效了但数值不对」，比直接拒绝输入更难查。
     ui_num(b_sec, 5, 86400);                 // 间隔下限 5 秒（结算线程的最小步长）
     ui_num(b_tno, 0, 4294967295LL);          // charac_no / m_id
-    ui_num(b_coin, 0, 4294967295LL);
-    ui_num(b_dp, 0, 4294967295LL);
-    ui_num(b_dc, 0, 4294967295LL);
+    ui_num(b_coin, 0, 2147483647);
+    ui_num(b_dp, 0, 2147483647);
+    ui_num(b_dc, 0, 2147483647);
     ui_num(b_item, 0, 4294967295LL);
     ui_num(b_num, 1, 200);                   // 一次邮件最多 200 个
     // 「生效时长」是可编辑下拉，输入区是 combo 内部的 EDIT，同样套一层
@@ -245,14 +245,15 @@ static void bub_build(HWND parent) {
 
     ui_tip(parent, b_on, "开启后按间隔给目标人群发放奖励；只在工具开着时结算，关掉不补算");
     ui_tip(parent, b_sec, "结算间隔，单位秒，下限 5");
-    ui_tip(parent, b_target, "仅在线：登录中的账号；全服：含离线（不发物品）；指定角色/账号：在右边填 ID");
+    ui_tip(parent, b_target, "仅在线：在线账号下全部未删除角色；账号奖励每账号一次。"
+                              "全服：含离线（不支持物品）；指定角色/账号：在右边填 ID");
     ui_tip(parent, b_tno, "目标选「指定角色」填角色号 charac_no；选「指定账号」填账号 m_id。"
                           "选其它目标时这个框不用填，会置灰");
     ui_tip(parent, b_hours, "生效时长（小时），从点「应用」那一刻起算，可自己填数字；"
                             "0 = 持续（不自动停）。到时长后自动停止结算，重开工具也不会重新续时");
-    ui_tip(parent, b_coin, "每次给每个目标角色加的赠送点券（inventory.coin），0 表示不加");
+    ui_tip(parent, b_coin, "每次给每个目标角色加的复活币，0 表示不加");
     ui_tip(parent, b_dp, "每次给每个目标账号加的 D点（cash_cera.cera），0 表示不加");
-    ui_tip(parent, b_dc, "每次给每个目标账号加的 D币（cash_cera.cera_point），0 表示不加");
+    ui_tip(parent, b_dc, "每次给每个目标账号加的 D币（cash_cera_point.cera_point），0 表示不加");
     ui_tip(parent, b_item, "随邮件发放的物品 ID，0 表示不发物品（全服目标不支持发物品）");
     ui_tip(parent, b_num, "物品数量（指定/在线目标最多 200）");
     ui_tip(parent, GetDlgItem(parent, BUB_APPLY), "把以上设置写进 settings.ini，立即生效并重新计时");
@@ -320,7 +321,7 @@ static LRESULT bub_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         int target = ui_combo_sel(b_target);          // 0仅在线 1全服 2指定角色 3指定账号
         if (target < 0) target = 0;
         u32 tno = (target >= 2) ? (u32)ui_i64(b_tno) : 0;
-        if (target >= 2 && !tno) {
+        if (on && target >= 2 && !tno) {
             app_info(target == 2 ? "请填写要发到哪个角色（角色号 charac_no）。"
                                  : "请填写要发到哪个账号（m_id）。");
             return 0;
@@ -328,6 +329,10 @@ static LRESULT bub_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         int hours = bub_read_hours();
         if (hours < 0) {
             app_info("生效时长只能填 0~8760 的整数（小时）。\n\n0 = 持续，不自动停。");
+            return 0;
+        }
+        if (on && target == 1 && ui_i64(b_item)) {
+            app_info("全服泡点不支持物品，请清空物品 ID 或选择其它目标。");
             return 0;
         }
         app_bubble_apply(on, (int)ui_i64(b_sec), target,

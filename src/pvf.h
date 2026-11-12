@@ -63,7 +63,7 @@ typedef struct {
     u8    *kind;         // 与 items.key 平行：物品在 PVF 里属于哪类（PK_*）
     u32   *stk;          // 与 items.key 平行：[stack limit] 堆叠上限，0 = 这条没声明
     int   *ileaf;         // 与 items.key 平行：物品文件在 leafs 里的下标（懒建，-1=没有）
-    IdTab  cre;          // creature/pet 表：宠物编号（只用来认「这个编号是宠物」）
+    IdTab  cre;          // creature/pet 定义编号，独立于物品 ID 空间
 
     unsigned str_cp;     // stringtable 解码代码页（936/950）
     int      opened;
@@ -86,7 +86,7 @@ typedef struct {
     int  lev_min, lev_max;
 } QuestInfo;
 
-// 物品类别：不是界面选的，是从 PVF 目录推出来的。
+// 物品类别：依据 PVF 目录和 equipment type 元数据，界面只读。
 // 装备 / 时装 / 宠物在库里是不同的表（inventory / user_items / creature_items），
 // 类型字节填错就是把一件东西当成另一件发出去，所以这一列只读、且以 PVF 为准。
 enum {
@@ -95,8 +95,9 @@ enum {
     PK_STACK,        // stackable/                          → 消耗品
     PK_MATERIAL,     // stackable/material                  → 材料
     PK_QUEST,        // stackable/quest                     → 任务材料
-    PK_AVATAR,       // equipment/character/*/avatar/       → 时装
-    PK_CREATURE,     // creature/ 或 pet/ 表里的            → 宠物
+    PK_AVATAR,       // avatar 目录或 equipment type 含 avatar → 时装
+    PK_CREATURE,     // equipment type = [creature]        → 宠物物品
+    PK_CREATURE_EQUIP,// equipment type = [artifact ...]    → 宠物装备
 };
 int         pvf_item_kind(const Pvf *p, u32 id);
 u32         pvf_item_stack_limit(const Pvf *p, u32 id);   // 0 = 没声明上限（装备多如此）

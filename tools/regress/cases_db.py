@@ -1006,6 +1006,7 @@ def charset_clone(ctx):
     clone_no = None
 
     try:
+        core.seed_test_char_slot(ctx.cur, mid, base)
         if not ctx.ok("角色可选中", _select_char(ctx)):
             return
         ctx.page(PAGE_GM)
@@ -1030,6 +1031,8 @@ def charset_clone(ctx):
             if r:
                 clone = r[0]
                 clone_no = clone[0]
+                break
+            if "克隆角色 失败" in _status(ctx):
                 break
             if _boxes(ctx.main):
                 for h in _boxes(ctx.main):
@@ -1221,7 +1224,7 @@ def _bubble_stop(ctx, hs):
 
 def _bubble_snapshot(ctx, cno, mid):
     acc = str(mid)
-    return {
+    snap = {
         "dp": ctx.q1("SELECT cera FROM taiwan_billing.cash_cera WHERE account=%s", (acc,)),
         "dc": ctx.q1("SELECT cera_point FROM taiwan_billing.cash_cera_point WHERE account=%s",
                      (acc,)),
@@ -1229,28 +1232,38 @@ def _bubble_snapshot(ctx, cno, mid):
         "mails": ctx.q1("SELECT COUNT(*) FROM taiwan_cain_2nd.postal "
                         "WHERE receive_charac_no=%s AND send_charac_name='泡点'", (cno,)),
         "max_pid": ctx.q1("SELECT IFNULL(MAX(postal_id),0) FROM taiwan_cain_2nd.postal"),
+        "max_lid": ctx.q1("SELECT IFNULL(MAX(letter_id),0) FROM taiwan_cain_2nd.letter"),
     }
-
-
-def _cash_restore(ctx, table, col, acc, val):
-    if val is None:
-        ctx.cur.execute("DELETE FROM %s WHERE account=%%s" % table, (acc,))
-        return
-    ctx.cur.execute("INSERT INTO %s (account,%s) VALUES (%%s,%%s) "
-                    "ON DUPLICATE KEY UPDATE %s=VALUES(%s)" % (table, col, col, col),
-                    (acc, val))
+    snap["cash_rows"] = {}
+    for table in ("cash_cera", "cash_cera_point"):
+        ctx.cur.execute("SELECT * FROM taiwan_billing." + table + " WHERE account=%s", (acc,))
+        snap["cash_rows"][table] = ([c[0] for c in ctx.cur.description], ctx.cur.fetchone())
+    snap["counters"] = {table: ctx.q1("SELECT AUTO_INCREMENT FROM information_schema.TABLES "
+                                     "WHERE TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME=%s", (table,))
+                        for table in ("postal", "letter")}
+    return snap
 
 
 def _bubble_restore(ctx, snap, cno, mid):
     acc = str(mid)
-    _cash_restore(ctx, "taiwan_billing.cash_cera", "cera", acc, snap["dp"])
-    _cash_restore(ctx, "taiwan_billing.cash_cera_point", "cera_point", acc, snap["dc"])
+    for table, (cols, row) in snap["cash_rows"].items():
+        full = "taiwan_billing." + table
+        ctx.cur.execute("DELETE FROM " + full + " WHERE account=%s", (acc,))
+        if row is not None:
+            ctx.cur.execute("INSERT INTO " + full + " (" + ','.join('`' + c + '`' for c in cols) +
+                            ") VALUES (" + ','.join(['%s'] * len(cols)) + ")", row)
     if snap["coin"] is not None:
         ctx.cur.execute("UPDATE taiwan_cain_2nd.inventory SET coin=%s WHERE charac_no=%s",
                         (snap["coin"], cno))
     ctx.cur.execute("DELETE FROM taiwan_cain_2nd.postal "
                     "WHERE postal_id>%s AND receive_charac_no=%s AND send_charac_name='泡点'",
                     (snap["max_pid"], cno))
+    ctx.cur.execute("DELETE FROM taiwan_cain_2nd.letter "
+                    "WHERE letter_id>%s AND charac_no=%s AND send_charac_name='泡点'",
+                    (snap["max_lid"], cno))
+    for table, counter in snap["counters"].items():
+        if counter:
+            ctx.cur.execute("ALTER TABLE taiwan_cain_2nd." + table + " AUTO_INCREMENT=%s", (counter,))
 
 
 def _bubble_prepare(ctx):
@@ -1273,7 +1286,7 @@ def _bubble_prepare(ctx):
 
 
 @core.case("db.bubble_rewards", needs=("gui", "db"), group="manual",
-           desc="泡点按间隔给指定账号加 D点/D币、给指定角色加点券与物品邮件")
+           desc="泡点按间隔给指定账号加 D点/D币、给指定角色加复活币与物品邮件")
 def bubble_rewards(ctx):
     ini = _ini_snapshot()
     cno = mid = hs = snap = None
@@ -1297,14 +1310,14 @@ def bubble_rewards(ctx):
         ctx.ok("指定账号：D币按间隔增加（14 秒内至少 2 次）", dc1 - dc0 >= 2,
                "D币 %s → %s" % (dc0, dc1))
 
-        # 指定角色：角色级赠送点券 + 物品随邮件发放
+        # 指定角色：角色级复活币 + 物品随邮件发放
         _bubble_apply(ctx, hs, target=2, tno=cno, coin=1, dp=0, dc=0, item=1001, num=1)
         time.sleep(14.0)
         cn1 = ctx.q1("SELECT coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%s", (cno,)) or 0
         ml1 = ctx.q1("SELECT COUNT(*) FROM taiwan_cain_2nd.postal "
                      "WHERE receive_charac_no=%s AND send_charac_name='泡点'", (cno,)) or 0
-        ctx.ok("指定角色：赠送点券按间隔增加（至少 2 次）", cn1 - (snap["coin"] or 0) >= 2,
-               "点券 %s → %s" % (snap["coin"] or 0, cn1))
+        ctx.ok("指定角色：复活币按间隔增加（至少 2 次）", cn1 - (snap["coin"] or 0) >= 2,
+               "复活币 %s → %s" % (snap["coin"] or 0, cn1))
         ctx.ok("指定角色：泡点物品邮件按间隔插入（至少 2 封）", ml1 - (snap["mails"] or 0) >= 2,
                "邮件 %s → %s" % (snap["mails"] or 0, ml1))
     finally:
@@ -1351,6 +1364,42 @@ def bubble_stop(ctx):
             time.sleep(1.5)               # 等在飞的结算收尾，再回写快照
             _bubble_restore(ctx, snap, cno, mid)
         _bubble_ini_restore(ini)
+
+@core.case("db.bubble_frozen_config", needs=("gui", "db"), group="manual",
+           desc="结算阻塞时修改配置：当前发放及日志仍使用启动时目标和奖励")
+def bubble_frozen_config(ctx):
+    ini = _ini_snapshot()
+    hs = snap = None
+    lock = _TableLock(["taiwan_cain_2nd.inventory"])
+    try:
+        prep = _bubble_prepare(ctx)
+        if not prep:
+            return
+        cno, mid, hs = prep
+        snap = _bubble_snapshot(ctx, cno, mid)
+        mark = _log_mark()
+        lock.lock()
+        _bubble_apply(ctx, hs, target=2, tno=cno, coin=3, dp=0, dc=0, item=0, num=1)
+        blocked, state = _wait_blocked(ctx, "UPDATE taiwan_cain_2nd.inventory", 15)
+        if not ctx.ok("本轮角色奖励确实在等待写锁", blocked, state):
+            return
+        _bubble_apply(ctx, hs, target=3, tno=mid, coin=0, dp=11, dc=0,
+                      item=0, num=1, sec=86400)
+        lock.unlock()
+        ctx.ok("本轮仍按指定角色记录完成", core.wait_until(
+            lambda: "泡点结算：指定角色" in _log_since(mark), 12))
+        ctx.check("本轮角色奖励保持 3", ctx.q1(
+            "SELECT coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%s", (cno,)), snap["coin"] + 3)
+        ctx.check("新账号奖励留待下轮", ctx.q1(
+            "SELECT cera FROM taiwan_billing.cash_cera WHERE account=%s", (str(mid),)), snap["dp"])
+    finally:
+        lock.unlock()
+        if hs and snap is not None:
+            _bubble_stop(ctx, hs)
+            time.sleep(1.5)
+            _bubble_restore(ctx, snap, cno, mid)
+        _bubble_ini_restore(ini)
+
 
 # ================================================================ 异常路径
 G_RESTORE = 1824

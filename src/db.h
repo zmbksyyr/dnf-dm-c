@@ -78,6 +78,7 @@ typedef struct {
     MySql conn;
     char  host[64], user[48], pwd[64];
     int   port, charset;
+    int   tx_depth;       // Nested data-layer calls share the outer transaction.
     Err   err;
 } Db;
 
@@ -88,7 +89,7 @@ int  db_alive(const Db *d);
 // 表/列自检：拿 information_schema 对一遍本工具需要的表与列，结果写进 out。
 // 返回问题条数（0 = 就位）。报告是多行文本，每条以 \r\n 结尾。
 int  db_selfcheck(Db *d, char *out, int cap, Err err);
-// 事务：一个动作写多张表时用，失败整体回滚
+// 事务：嵌套 begin/commit 共用最外层事务；任一 rollback 撤销整个动作。
 int  db_tx_begin(Db *d, Err err);
 int  db_tx_commit(Db *d, Err err);
 void db_tx_rollback(Db *d);
@@ -124,18 +125,22 @@ int  db_set_coin(Db *d, const Charac *c, u64 coin, Err err);
 int  db_set_account_money(Db *d, const Charac *c, u64 money, Err err);
 int  db_set_cera(Db *d, const Charac *c, u64 cera, u64 point, Err err);
 
-// 泡点结算：给每个在线账号的赠送点券加 val，paid 带回命中账号数。
-// 0 行是正常结果（没人在线），不是失败。
+// 泡点结算：固定本次名单，角色奖励逐角色、账号奖励去重，全部成功才报到账人数。
+// 在线范围为在线账号下未删除角色；空名单成功，缺失的指定目标报错。
 typedef struct {
     int  target;      // 0=仅在线 1=全服(含离线) 2=指定角色 3=指定账号
-    int  coin;        // 赠送点券 (inventory.coin)
+    int  coin;        // 复活币 (inventory.coin)
     int  dpoint;      // D点 (cash_cera.cera)
     int  dcoin;       // D币 (cash_cera_point.cera_point)
     u32  item;        // 物品 ID（0=不发）
     int  itemnum;     // 物品数量
     u32  tno;         // 指定角色 charac_no / 指定账号 m_id
+    int  avatar, creature;  // 物品邮件附件类型，由调用方判定
 } BubbleCfg;
-int  db_bubble_tick(Db *d, const BubbleCfg *cfg, u32 *paid, Err err);
+typedef struct {
+    u32 chars, accounts;  // 收到角色奖励 / 账号奖励的去重人数，失败时均为 0
+} BubblePaid;
+int  db_bubble_tick(Db *d, const BubbleCfg *cfg, BubblePaid *paid, Err err);
 // GM 一键
 int  db_set_sp(Db *d, const Charac *c, int sp, int sp2, int tp, int tp2, Err err);
 int  db_set_qp(Db *d, const Charac *c, int qp, Err err);

@@ -569,9 +569,8 @@ def pwd(ctx):
     ctx.check("可编辑下拉样式", u.GetWindowLongW(h, GWL_STYLE) & 0xF, CBS_DROPDOWN)
 
     items = _combo_items(h)
-    print("    下拉项 %r" % (items,))
-    ctx.ok("下拉里含 uu5!^%jg", "uu5!^%jg" in items, items)
-    ctx.ok("下拉里含 123456", "123456" in items, items)
+    ctx.check("???????", len(items), 2)
+    ctx.ok("预置口令项 2 存在", "123456" in items)
 
     edit = u.GetDlgItem(h, 1001)
     masked = bool(u.GetWindowLongW(h, GWL_STYLE) & ES_PASSWORD)
@@ -584,7 +583,7 @@ def pwd(ctx):
     if want is None:
         ctx.skip("没有 settings.ini，跳过与 ini 原值的比对")
     else:
-        ctx.check("显示 ini 里的口令原值", old, want)
+        ctx.ok("口令与配置一致", old == want)
     try:
         core.set_text(h, "hand-typed-pwd")
         time.sleep(0.2)

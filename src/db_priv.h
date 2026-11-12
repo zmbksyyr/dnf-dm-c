@@ -20,4 +20,4 @@ void sql_lit(Str *o, const char *p, int n, int binary);
 int  split_tbl(const char *full, char *sc, int sccap, char *tb, int tbcap);
 
 // 邮件附件清理（db_mail.c 定义，db_admin.c 的 purgue_quest_items 也用）
-void mail_drop_attach(Db *d, u64 postal_id);
+int mail_drop_attach(Db *d, u64 postal_id, Err err);

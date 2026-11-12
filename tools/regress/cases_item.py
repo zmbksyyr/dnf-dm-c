@@ -67,12 +67,12 @@ IDOK, IDCANCEL = 1, 2
 # 类型文字（与 app_item_type_text 同一套叫法）
 TYPE_EMPTY, TYPE_UNKNOWN = "消耗品(默认)", "消耗品(未知编号)"
 # 这两类的类型字节是装备（时装同样占装备格），数量位不是堆叠数，所以看耐久
-TYPE_GEAR = ("装备", "时装")
+TYPE_GEAR = ("装备", "时装", "宠物装备")
 
 # 旧脚本的编号样本：期望类型取自 app_item_type_text。换一份 PVF 可能没有这些编号，
 # 那时按 ctx.skip 处理，不当失败。
 SAMPLE_TYPES = (("10000", "装备"), ("1232", "消耗品"), ("3012", "材料"),
-                ("4066", "任务材料"), ("11907", "时装"))
+                ("4066", "任务材料"), ("11907", "时装"), ("63000", "宠物"), ("63501", "宠物装备"))
 UNKNOWN_ID = "123456789"
 AVATAR_ID = "11907"
 
@@ -691,7 +691,7 @@ def browse_filter(ctx):
 
 
 @core.case("item.browse_add", needs=("gui", "db", "pvf"), group="manual",
-           desc="装备浏览窗筛「剑」→ 全选 → 加入所选：入队项数与选中行数一致，队列跟着涨")
+           desc="装备浏览窗筛选到单批上限内后全选入队：队列项数与选中行数一致")
 def browse_add(ctx):
     """验：全选真的选中全部可见行；「加入所选」把每一项都加到队列里，一项不丢。"""
     if not ctx.ok("选中第一个角色", _select_char(ctx)):   # 发放页要有目标角色才填说明
@@ -720,9 +720,14 @@ def browse_add(ctx):
         if n <= 0:
             ctx.skip("这份 PVF 里「剑」没有命中（%s），无从验证入队" % text)
             return
-        if n > 3000:
-            ctx.skip("「剑」命中 %d 行，超过一次加入上限 3000，先缩小关键词再验" % n)
-            return
+        if n > 256:
+            # 大型真实 PVF 的「剑」会命中数千条，继续验证实际允许的一批。
+            core.set_text(e_kw, "10000")
+            core.wait_until(lambda: core.rows(lv) <= 256, 10.0, 0.2)
+            n = core.rows(lv)
+            if n <= 0 or n > 256:
+                ctx.skip("缩小编号筛选后仍没有 1~256 条可入队结果")
+                return
 
         core.press(u.GetDlgItem(d, B_SEL), 0.8)
         msg = core.txt(u.GetDlgItem(d, B_MSG), 256)
@@ -771,6 +776,127 @@ def _pick_grant_row(ctx, idx, want_id=None, timeout=10.0):
         if time.time() - t0 > timeout:
             break
     return False
+
+
+def _special_queue(ctx, rows):
+    """通过真实 TSV 导入创建多件特殊附件；类型仍由程序的 PVF 解析决定。"""
+    path = os.path.join(core.BUILD, "config", "regress-special.tsv")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(TSV_HEAD)
+            for no, num in rows:
+                f.write("%d\tresource audit\t%d\t\t0\t\t0\t0\t否\t0\t0\n" % (no, num))
+        _page(ctx, PAGE_GRANT)
+        core.press(ctx.ctl(G_IMPORT), 0)
+        return _file_dialog(ctx, path) is not None and core.wait_until(
+            lambda: core.rows(ctx.ctl(G_LIST)) == len(rows), 15)
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+@contextmanager
+def _special_mail_fixture(ctx, cno):
+    snapshots = {}
+    for table, key in (("postal", "receive_charac_no"), ("letter", "charac_no"),
+                       ("user_items", "charac_no"), ("creature_items", "charac_no")):
+        ctx.cur.execute("SELECT * FROM taiwan_cain_2nd." + table + " WHERE " + key + "=%s", (cno,))
+        cols, rows = [d[0] for d in ctx.cur.description], ctx.cur.fetchall()
+        counter = ctx.q1("SELECT AUTO_INCREMENT FROM information_schema.TABLES "
+                         "WHERE TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME=%s", (table,))
+        snapshots[table] = (key, cols, rows, counter)
+    try:
+        yield
+    finally:
+        for table, (key, cols, rows, counter) in snapshots.items():
+            full = "taiwan_cain_2nd." + table
+            ctx.cur.execute("DELETE FROM " + full + " WHERE " + key + "=%s", (cno,))
+            if rows:
+                ctx.cur.executemany("INSERT INTO " + full + " (" + ','.join('`'+c+'`' for c in cols) +
+                                    ") VALUES (" + ','.join(['%s'] * len(cols)) + ")", rows)
+            if counter:
+                ctx.cur.execute("ALTER TABLE " + full + " AUTO_INCREMENT=%s", (counter,))
+
+
+def _send_special_mail(ctx):
+    from .cases_db import _wait_box, _close_box
+    core.press(ctx.ctl(1215), 0)
+    box, text = _wait_box(ctx.main, 8)
+    if not ctx.ok("邮件发放出现确认框", bool(box), text):
+        return False
+    _close_box(ctx.main, box, 1)
+    return True
+
+
+@core.case("item.special_direct_guard", needs=("gui", "db", "pvf"), group="manual",
+           desc="真实 PVF 时装/宠物/宠物装备直接入包被拒绝，库存原始字节不变")
+def special_direct_guard(ctx):
+    from .cases_db import _wait_box, _close_box
+    if not ctx.ok("选中角色", _select_char(ctx)):
+        return
+    cno = ctx.char_no()
+    before = ctx.q("SELECT * FROM " + INVENTORY + " WHERE charac_no=%s", (cno,))
+    if not ctx.ok("特殊物品队列已导入", _special_queue(ctx, [(11907, 1), (63000, 1), (63501, 1)])):
+        return
+    core.press(ctx.ctl(1216), 0)
+    box, text = _wait_box(ctx.main, 8)
+    ctx.ok("明确要求使用邮件", bool(box) and "请使用邮件发放" in text, text)
+    if box:
+        _close_box(ctx.main, box, 1)
+    ctx.check("库存整行保持原样", ctx.q("SELECT * FROM " + INVENTORY + " WHERE charac_no=%s", (cno,)), before)
+
+
+@core.case("item.special_mail_copies", needs=("gui", "db", "pvf"), group="manual",
+           desc="真实时装两件、宠物三件分别生成附件和正文，普通物品保留数量")
+def special_mail_copies(ctx):
+    if not ctx.ok("选中角色", _select_char(ctx)):
+        return
+    cno = ctx.char_no()
+    with _special_mail_fixture(ctx, cno):
+        start = ctx.q1("SELECT IFNULL(MAX(postal_id),0) FROM taiwan_cain_2nd.postal")
+        if not ctx.ok("多件附件队列已导入", _special_queue(ctx, [(11907, 2), (63000, 3), (1001, 7)])):
+            return
+        mark = _log_mark()
+        if not _send_special_mail(ctx):
+            return
+        ctx.ok("整批邮件发放完成", bool(_wait_log(mark, ["邮件发放", "完成"])))
+        postal = "p.postal_id>%s AND p.receive_charac_no=%s"
+        args = (start, cno)
+        ctx.check("两件时装和三件宠物各有一封，普通物品一封", ctx.q1(
+            "SELECT COUNT(*) FROM taiwan_cain_2nd.postal p WHERE " + postal, args), 6)
+        for table, flag, want in [("user_items", "avata_flag", 2), ("creature_items", "creature_flag", 3)]:
+            ctx.check(table + " 附件编号、物品和归属正确", ctx.q1(
+                "SELECT COUNT(*) FROM taiwan_cain_2nd.postal p JOIN taiwan_cain_2nd." + table +
+                " a ON a.ui_id=p.add_info AND a.charac_no=p.receive_charac_no AND a.it_id=p.item_id "
+                "WHERE p." + flag + "=1 AND " + postal, args), want)
+        ctx.check("普通物品数量仍为 7", ctx.q1("SELECT p.add_info FROM taiwan_cain_2nd.postal p WHERE p.item_id=1001 AND " + postal, args), 7)
+        ctx.check("每封邮件都关联本角色正文", ctx.q1(
+            "SELECT COUNT(*) FROM taiwan_cain_2nd.postal p JOIN taiwan_cain_2nd.letter l "
+            "ON l.letter_id=p.letter_id AND l.charac_no=p.receive_charac_no WHERE " + postal, args), 6)
+
+
+@core.case("item.special_mail_rollback", needs=("gui", "db", "pvf"), group="manual",
+           desc="后一种真实附件插入失败，前面的时装、宠物、正文和邮寄全部回滚")
+def special_mail_rollback(ctx):
+    from db_integration import DataTests
+    if not ctx.ok("选中角色", _select_char(ctx)):
+        return
+    cno = ctx.char_no()
+    tables = ("postal", "letter", "user_items", "creature_items")
+    before = {t: ctx.q("SELECT * FROM taiwan_cain_2nd." + t + " ORDER BY 1") for t in tables}
+    with _special_mail_fixture(ctx, cno):
+        if not ctx.ok("回滚队列已导入", _special_queue(ctx, [(11907, 2), (63000, 3)])):
+            return
+        test = DataTests()
+        test.cur = ctx.cur
+        mark = _log_mark()
+        with test.trigger("taiwan_cain_2nd.postal", "INSERT", "BEGIN IF NEW.creature_flag=1 THEN "
+                          "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit blocked creature'; END IF; END"):
+            if not _send_special_mail(ctx):
+                return
+            ctx.ok("邮件发放明确失败", bool(_wait_log(mark, ["邮件发放", "失败"])))
+        for table in tables:
+            ctx.check(table + " 整表无部分发放", ctx.q("SELECT * FROM taiwan_cain_2nd." + table + " ORDER BY 1"), before[table])
 
 
 @core.case("item.tsv_clamp", needs=("gui", "db"), group="always",
@@ -999,6 +1125,7 @@ def scan_gate(ctx):
     d, _t = _open_scan(ctx)
     if not ctx.ok("B：扫描结果窗再次出现", d is not None):
         return
+    mark = _log_mark()
     with _lock([INVENTORY]):
         u.PostMessageW(u.GetDlgItem(d, S_RESCAN), BM_CLICK, 0, 0)   # 重新扫描（同步）
         blocked, st = _wait_blocked(ctx, INVENTORY)
@@ -1016,6 +1143,8 @@ def scan_gate(ctx):
         core.progress_bg(ctx.proc.pid)
     # 放锁：作业收尾，闸由作业自己放下
     core.progress_bg(ctx.proc.pid)
+    if not ctx.ok("B：放锁后扫描作业确实收尾", bool(_wait_log(mark, ["全服扫描 完成"], 20.0))):
+        return
     started, why, d = _try_scan(ctx)
     ctx.ok("B：作业收尾后能正常再扫", started and d is not None, why)
     if d:

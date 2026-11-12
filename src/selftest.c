@@ -26,6 +26,27 @@ static void test_utf(void) {
     const u8 bad[] = {0xE4, 0xB8};                 // 截断的三字节序列
     ok("utf8_valid 拒绝截断序列", !utf8_valid(bad, 2));
     ok("utf8_valid 接受合法序列", utf8_valid((const u8 *)src, (int)strlen(src)));
+    const u8 invalid[][4] = {
+        {0xC0, 0x80}, {0xE0, 0x80, 0x80}, {0xED, 0xA0, 0x80},
+        {0xF0, 0x80, 0x80, 0x80}, {0xF4, 0x90, 0x80, 0x80}, {0xF5, 0x80, 0x80, 0x80}
+    };
+    const int lengths[] = {2, 3, 3, 4, 4, 4};
+    int rejected = 1;
+    for (int i = 0; i < COUNT_OF(lengths); i++)
+        if (utf8_valid(invalid[i], lengths[i])) rejected = 0;
+    ok("utf8_valid 拒绝过长编码、代理项和越界码点", rejected);
+    const u8 edges[] = {0xC2,0x80,0xE0,0xA0,0x80,0xED,0x9F,0xBF,
+                        0xF0,0x90,0x80,0x80,0xF4,0x8F,0xBF,0xBF};
+    ok("utf8_valid 接受合法边界", utf8_valid(edges, sizeof(edges)));
+    WCHAR tinyw[2] = {7, 9};
+    char tiny[2] = {7, 9};
+    ok("编码转换零容量不写入", !u16_from_u8(src, -1, tinyw, 0) &&
+       !u8_from_u16(w, -1, tiny, 0) && tinyw[0] == 7 && tiny[0] == 7);
+    ok("编码转换单字符容量不越界", !u16_from_u8(src, -1, tinyw, 1) &&
+       !u8_from_u16(w, -1, tiny, 1) && tinyw[0] == 0 && tiny[0] == 0 &&
+       tinyw[1] == 9 && tiny[1] == 9);
+    ok("编码转换拒绝空指针", !u16_from_u8(src, -1, NULL, 10) &&
+       !u8_from_u16(w, -1, NULL, 10));
 }
 
 static void test_hash(void) {
@@ -55,6 +76,38 @@ static void test_zlib(void) {
     buf_free(&bad);
     buf_free(&back);
     buf_free(&z);
+
+    // Python zlib 生成的固定 / 动态 Huffman 流，独立于本项目的 stored 编码器。
+    const u8 fixed[] = "\x78\x01\xcb\x48\xcd\xc9\xc9\x57\x48\xcb\xac\x48\x4d\x51\xf0\x28"
+                       "\x4d\x4b\xcb\x4d\xcc\x53\x54\xc8\xa0\x4c\x10\x00\xff\x74\x1d\xa9";
+    const char expected[] = "hello fixed Huffman! hello fixed Huffman! "
+                            "hello fixed Huffman! hello fixed Huffman! ";
+    ok("解压固定 Huffman 流", zlib_unpack(fixed, sizeof(fixed)-1, &back, 0) &&
+       back.n == sizeof(expected)-1 && !memcmp(back.p, expected, sizeof(expected)-1));
+    buf_free(&back);
+    const u8 dynamic[] =
+        "\x78\x9c\xb5\xc1\x85\x01\xc2\x40\x10\x04\xc0\x56\x82\x3b\x04\x77"
+        "\x0b\xee\xee\xd6\x7f\x17\x94\xf0\x27\x7b\x33\x9e\xe7\x10\x72\x0a"
+        "\xbb\x45\x08\xa2\x14\x31\x92\x38\x4d\x82\x28\x49\x95\x22\x4b\xd3"
+        "\x65\x18\xb2\x1c\x39\x96\x3c\x4f\x81\xc9\xe7\x2a\xb2\x95\xf8\xca"
+        "\x02\x15\x89\xaa\x48\x4d\xa6\x2e\xd4\x90\x6a\x8a\xb5\xe4\xda\x0a"
+        "\x1d\x8d\xae\x4a\x4f\xa7\xaf\x34\xd0\x1a\xaa\x05\x7a\x23\x80\x31"
+        "\xc2\x04\x62\x8a\x31\x03\x99\xa3\x2c\x60\x96\x38\x2b\xa0\x35\xd2"
+        "\x06\x6a\x8b\xb5\x03\xdb\xa3\x1d\xe0\x8e\x78\x27\x03\x67\x0b\x17"
+        "\x13\x57\x1b\x37\x23\x77\x2b\x0f\x33\x4f\x3b\x2f\x43\x6f\x4b\x1f"
+        "\x53\x5f\x5b\x3f\x63\x7f\x28\xb3\x55\x7d";
+    Buf plain = {0};
+    for (int i = 32; i < 96; i++)
+        for (int j = 0; j <= i; j++) buf_putc(&plain, (u8)i);
+    ok("解压动态 Huffman 流", zlib_unpack(dynamic, sizeof(dynamic)-1, &back, 0) &&
+       back.n == plain.n && !memcmp(back.p, plain.p, plain.n));
+    buf_free(&back);
+    ok("解压输出上限有效", !zlib_unpack(dynamic, sizeof(dynamic)-1, &back, 100));
+    buf_free(&back);
+    const u8 dictionary[] = {0x78,0x20,0,0,0,1,3,0,0,0,0,1};
+    ok("拒绝不支持的预置字典", !zlib_unpack(dictionary, sizeof(dictionary), &back, 0));
+    buf_free(&back);
+    buf_free(&plain);
 }
 
 static void test_item(void) {

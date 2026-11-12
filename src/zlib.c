@@ -124,9 +124,8 @@ static int stored(Inf *s) {
 }
 
 static int fixed(Inf *s) {
-    static int built = 0;
-    static Huff lencode, distcode;
-    if (!built) {
+    Huff lencode, distcode;
+    {
         short lengths[FIXLCODES];
         int sym = 0;
         for (; sym < 144; sym++) lengths[sym] = 8;
@@ -136,7 +135,6 @@ static int fixed(Inf *s) {
         construct(&lencode, lengths, FIXLCODES);
         for (sym = 0; sym < MAXDCODES; sym++) lengths[sym] = 5;
         construct(&distcode, lengths, MAXDCODES);
-        built = 1;
     }
     return codes(s, &lencode, &distcode);
 }
@@ -191,9 +189,9 @@ int zlib_unpack(const void *src, size_t n, Buf *out, size_t max_out) {
     if (n < 6) return 0;
     int cmf = p[0], flg = p[1];
     if ((cmf & 0x0f) != 8) return 0;                      // 必须 deflate
+    if ((cmf >> 4) > 7 || (flg & 0x20)) return 0;          // No preset-dictionary support.
     if (((cmf << 8) | flg) % 31) return 0;                 // 头校验
     size_t off = 2;
-    if (flg & 0x20) off += 4;                              // 预置字典，跳过 DICTID
     // 尾部还有 4 字节 adler32，输入必须比 off+4 长。
     // 只写 off >= n 是不够的：n=6 时 off+4 > n，n-off-4 会按 size_t 回绕成天文数字，
     // 于是 inlen 变成「无边」，解压器就会一路读过缓冲区。

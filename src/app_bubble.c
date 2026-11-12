@@ -1,4 +1,4 @@
-// app_bubble：泡点（按间隔给目标人群发点券 / D点 / D币 / 物品）。
+// app_bubble：泡点（按间隔给目标人群发复活币 / D点 / D币 / 物品）。
 //
 // 只算本工具开着的时间：关掉就停、重开从零计时，不补算——补算要给每个账号
 // 记上次结算时刻，等于把服务端的账本搬到 GM 台上。
@@ -6,7 +6,9 @@
 #include <time.h>
 
 static u64 s_bubble_next;      // 下次结算时刻（0 = 还没开始计时）
-static u32 s_bubble_paid;      // 上次命中的对象数
+static BubblePaid s_bubble_paid;  // UI 线程发布的上次到账人数
+static BubbleCfg s_bubble_run;    // 启动前在 UI 线程固定，本次结算期间只读
+static BubblePaid s_bubble_result;// 后台结果，job_poll 收尾后交给 UI
 static u32 s_bubble_runs;      // 已结算次数
 static int s_bub_live;         // 上一 tick 是否在结算中，用来抓「刚刚到期」这个边沿
 
@@ -45,15 +47,7 @@ int app_bubble_plan_ver(void) { return s_plan_ver; }
 
 static int w_bubble(void *ctx, Err err) {
     (void)ctx;
-    u32 n = 0;
-    BubbleCfg bc = {
-        g.cfg.bubble_target, g.cfg.bubble_coin, g.cfg.bubble_dpoint, g.cfg.bubble_dcoin,
-        g.cfg.bubble_item, g.cfg.bubble_itemnum, g.cfg.bubble_tno
-    };
-    if (!db_bubble_tick(&g.db, &bc, &n, err)) return 0;
-    s_bubble_paid = n;
-    s_bubble_runs++;
-    return 1;
+    return db_bubble_tick(&g.db, &s_bubble_run, &s_bubble_result, err);
 }
 
 void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dcoin,
@@ -85,7 +79,7 @@ void app_bubble_apply(int on, int sec, int target, int coin, int dpoint, int dco
 
     const char *tg = bub_target_name(target);
     char rw[128] = "";
-    if (coin)   snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "点券+%d ", coin);
+    if (coin)   snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "复活币+%d ", coin);
     if (dpoint) snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "D点+%d ", dpoint);
     if (dcoin)  snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "D币+%d ", dcoin);
     if (item)   snprintf(rw + strlen(rw), sizeof(rw) - strlen(rw), "物品%d×%d ", item,
@@ -144,16 +138,16 @@ void app_bubble_status(char *out, int cap) {
     const char *tg = bub_target_name(g.cfg.bubble_target);
     if (!s_bubble_runs)
         fmt(out, cap, "已启用 · %s · %d 秒后首次结算%s", tg, left, tw);
-    else if (s_bubble_paid)
-        fmt(out, cap, "已启用 · %s · 上次 %u 个对象已加奖励 · %d 秒后下次%s",
-                 tg, s_bubble_paid, left, tw);
+    else if (s_bubble_paid.chars || s_bubble_paid.accounts)
+        fmt(out, cap, "已启用 · %s · 上次 %u 个角色 / %u 个账号到账 · %d 秒后下次%s",
+                 tg, s_bubble_paid.chars, s_bubble_paid.accounts, left, tw);
     else
         fmt(out, cap, "已启用 · %s · 上次没有符合条件的对象 · %d 秒后下次%s", tg, left, tw);
 }
 
 // ---------------- 周期结算 ----------------
 // 每 bubble_sec 秒按目标人群 + 多奖励给账号/角色加点。账在账号维度（D点/D币）
-// 或角色维度（点券/物品），一个账号挂多个角色也只发一份。
+// 或角色维度（复活币/物品），账号奖励去重，角色奖励逐角色发。
 void app_bubble_tick(void) {
     Err err;
     // 必须连接空闲、队列里也没人的操作 —— 不跟人抢那条连接
@@ -165,30 +159,44 @@ void app_bubble_tick(void) {
 
     if (!live) {
         s_bubble_next = 0;
-    } else if (app_act_idle()) {
+    } else if (app_act_idle() && g.job_bubble.state == 0) {
         u64 now = now_ms();
         u64 step = (u64)g.cfg.bubble_sec * 1000;
         if (!s_bubble_next) {
             s_bubble_next = now + step;
         } else if (now >= s_bubble_next) {
             s_bubble_next = now + step;
-            job_start(&g.job_bubble, w_bubble, NULL);
+            s_bubble_run = (BubbleCfg){
+                .target = g.cfg.bubble_target, .coin = g.cfg.bubble_coin,
+                .dpoint = g.cfg.bubble_dpoint, .dcoin = g.cfg.bubble_dcoin,
+                .item = g.cfg.bubble_item, .itemnum = g.cfg.bubble_itemnum,
+                .tno = g.cfg.bubble_tno
+            };
+            int kind = app_attach_kind(s_bubble_run.item);
+            s_bubble_run.avatar = kind == ACK_AVATAR;
+            s_bubble_run.creature = kind == ACK_CREATURE;
+            db_cancel_clear();  // 新一轮独立任务，不沿用上次手动取消的标志
+            if (!job_start(&g.job_bubble, w_bubble, NULL)) app_err("无法启动泡点结算");
         }
     }
     if (job_poll(&g.job_bubble, err)) {
-        const char *tg = bub_target_name(g.cfg.bubble_target);
+        const char *tg = bub_target_name(s_bubble_run.target);
         char d[88];
         if (err[0]) {
             app_err("泡点结算失败：%s", err);
             snprintf(d, sizeof(d), "%s", err);
             bub_plan_add(tg, d, "发放失败");
-        } else if (s_bubble_paid) {
-            app_log("泡点结算：%s · %u 个对象已加奖励", tg, s_bubble_paid);
-            snprintf(d, sizeof(d), "%u 个对象已加奖励", s_bubble_paid);
-            bub_plan_add(tg, d, "完成发放");
         } else {
-            // 一个都没命中也要记：否则界面上看不出「到底跑了没有」
-            bub_plan_add(tg, "没有符合条件的对象", "无人可发");
+            s_bubble_paid = s_bubble_result;
+            s_bubble_runs++;
+            if (s_bubble_paid.chars || s_bubble_paid.accounts) {
+                snprintf(d, sizeof(d), "%u 个角色 / %u 个账号到账",
+                         s_bubble_paid.chars, s_bubble_paid.accounts);
+                app_log("泡点结算：%s · %s", tg, d);
+                bub_plan_add(tg, d, "完成发放");
+            } else {
+                bub_plan_add(tg, "没有符合条件的对象", "无人可发");
+            }
         }
     }
 }

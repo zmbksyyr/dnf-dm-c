@@ -770,7 +770,7 @@ def gm_form_fields(ctx):
         _take_soft(ctx, snap, "taiwan_cain_2nd.inventory", "charac_no", cno, ("money", "coin"))
         _take_soft(ctx, snap, "taiwan_billing.cash_cera", "account", mid, ("cera",))
         _take_soft(ctx, snap, "taiwan_billing.cash_cera_point", "account", mid, ("cera_point",))
-        _take_soft(ctx, snap, "taiwan_cain.account_cargo", "m_id", mid, ("money",))
+        _take_soft(ctx, snap, "taiwan_cain.account_cargo", "m_id", mid, ("money", "occ_time"))
         if not ctx.ok("选中第一个角色", _select_char(ctx, cno)):
             return
         for label, cid, table, keycol, col, val in (

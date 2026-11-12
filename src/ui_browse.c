@@ -121,10 +121,9 @@ static void br_fill(BrCtx *c) {
         const char *nm = "";
         u32 id = pvf_item_at(&g.pvf, i, &nm);
         if (!*nm) continue;
-        // 宠物不能按 PVF 目录认：63000（佛拉斯）在 PVF 里躺在 equipment/ 下，
-        // 看着就是件装备。只有库里的 dnf_creature_info 说得清哪个编号是宠物，
-        // 连库时收了一份 it_id 清单在这里比对。
-        int hit = (c->cat == BR_PET) ? id_in_creids(id) : (pvf_item_kind(&g.pvf, id) == want);
+        int kind = pvf_item_kind(&g.pvf, id);
+        int hit = (c->cat == BR_PET) ? (kind == PK_CREATURE || id_in_creids(id)) :
+                  (kind == want || (c->cat == BR_EQUIP && kind == PK_CREATURE_EQUIP));
         if (!hit) continue;
         c->total++;
         if (kw[0] && !nm_match(nm, kw) && !id_match(id, kw)) continue;
@@ -136,11 +135,6 @@ static void br_fill(BrCtx *c) {
     SendMessageW(c->lv, LVM_SETITEMCOUNT, (WPARAM)c->rows.n,
                  LVSICF_NOINVALIDATEALL);
 
-    if (c->cat == BR_PET && !g.cre_ids.n) {
-        ui_text(c->cnt, "宠物 0 条");
-        ui_text(c->msg, "宠物清单来自数据库（dnf_creature_info），先连上服再说。");
-        return;
-    }
     if (kw[0] && !c->rows.n) {
         ui_text(c->cnt, fmt_new("%s · 共 %d 条 · 命中 0 条", cat_name(c->cat), c->total));
         ui_text(c->msg, "没有命中。换个关键词，或者留空看全量。");

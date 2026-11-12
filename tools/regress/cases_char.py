@@ -890,6 +890,8 @@ def _wait_new_char(ctx, above, timeout=180.0):
                   "ORDER BY charac_no DESC LIMIT 1", (above,))
         if r:
             return r[0]
+        if "克隆角色 失败" in _status(ctx):
+            return None
         _dismiss(ctx)                    # 中途弹出来的提示框会挡住作业收尾
         time.sleep(0.5)
     return None
@@ -978,6 +980,7 @@ def clone_char(ctx):
         ctx.skip("前置不满足：造不出一个没被占用的中文名作为克隆源")
         return
     try:
+        core.seed_test_char_slot(ctx.cur, mid, cno)
         _delivery_seed(ctx, cno, ids)
         ctx.check("占位投递记录已建（整表跳过的判据要有行）",
                   _delivery_rows(ctx, cno), len(ids))
@@ -1141,6 +1144,7 @@ def clone_nopk(ctx):
     new_no = None
     seeded = False
     try:
+        core.seed_test_char_slot(ctx.cur, mid, cno)
         seeded = True                    # 下面无论插成几行，收尾都要按测试标识清一遍
         ctx.check("测试数据已插：user_items_work / test_sooya 各 2 行",
                   _seed_nopk(ctx, cno, mid), (2, 2))

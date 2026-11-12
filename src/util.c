@@ -160,19 +160,27 @@ void *vec_at(const Vec *v, int i) { return (u8 *)v->p + (size_t)i * (size_t)v->e
 
 // ---------------- 编码 ----------------
 int u16_from_u8(const char *src, int n, WCHAR *out, int cap) {
+    if (!out || cap <= 0) return 0;
+    out[0] = 0;
+    if (!src) return 0;
     if (n < 0) n = (int)strlen(src);
     if (!n) { if (cap > 0) out[0] = 0; return 1; }
+    if (cap < 2) return 0;
     int r = MultiByteToWideChar(CP_UTF8, 0, src, n, out, cap - 1);
-    if (r < 0) r = 0;
+    if (r <= 0) { out[0] = 0; return 0; }
     out[r] = 0;
     return r + 1;
 }
 
 int u8_from_u16(const WCHAR *src, int n, char *out, int cap) {
+    if (!out || cap <= 0) return 0;
+    out[0] = 0;
+    if (!src) return 0;
     if (n < 0) n = (int)wcslen(src);
     if (!n) { if (cap > 0) out[0] = 0; return 1; }
+    if (cap < 2) return 0;
     int r = WideCharToMultiByte(CP_UTF8, 0, src, n, out, cap - 1, NULL, NULL);
-    if (r < 0) r = 0;
+    if (r <= 0) { out[0] = 0; return 0; }
     out[r] = 0;
     return r + 1;
 }
@@ -188,14 +196,22 @@ void utf8(const WCHAR *s, char *out, int cap) {
 }
 
 int utf8_valid(const u8 *p, int n) {
+    if (n < 0 || (!p && n)) return 0;
     int i = 0;
     while (i < n) {
         u8 c = p[i];
-        int need = c < 0x80 ? 0 : (c >> 5) == 6 ? 1 : (c >> 4) == 14 ? 2 : (c >> 3) == 30 ? 3 : -1;
+        int need = c < 0x80 ? 0 : c >= 0xC2 && c <= 0xDF ? 1 :
+                   c >= 0xE0 && c <= 0xEF ? 2 : c >= 0xF0 && c <= 0xF4 ? 3 : -1;
         if (need < 0) return 0;
         if (i + need >= n && need) return 0;
         for (int k = 1; k <= need; k++)
             if ((p[i + k] >> 6) != 2) return 0;
+        // Reject overlong encodings, UTF-16 surrogate code points and values
+        // above U+10FFFF; continuation-byte checks alone accept all of them.
+        if (need && ((c == 0xE0 && p[i + 1] < 0xA0) ||
+                     (c == 0xED && p[i + 1] >= 0xA0) ||
+                     (c == 0xF0 && p[i + 1] < 0x90) ||
+                     (c == 0xF4 && p[i + 1] >= 0x90))) return 0;
         i += need + 1;
     }
     return 1;

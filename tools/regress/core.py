@@ -401,6 +401,33 @@ def boot(connect=True, page=None, wait=4.5):
 CASE_TIMEOUT = [420]        # 秒；由 --timeout 覆盖。用例卡死时由看门狗杀进程
 
 
+def seed_test_char_slot(cur, mid, cno):
+    """为正常克隆测试补齐源槽位；调用者必须在 finally 还原整行 charac_view。"""
+    import struct
+    import zlib
+
+    cur.execute("SELECT info FROM taiwan_cain.charac_view WHERE m_id=%s", (mid,))
+    raw = bytes(cur.fetchone()[0])
+    plain = bytearray(zlib.decompress(raw[4:]))
+    if not plain or len(plain) % 296:
+        raise ValueError("test fixture requires a valid 296-byte character view")
+    for offset in range(0, len(plain), 296):
+        if struct.unpack_from('<I', plain, offset)[0] == cno:
+            return
+    offset = next((i for i in range(0, len(plain), 296) if not any(plain[i:i+296])), None)
+    if offset is None:
+        raise ValueError("test fixture requires a free character slot")
+    cur.execute("SELECT charac_name,job,grow_type,lev FROM taiwan_cain.charac_info WHERE charac_no=%s", (cno,))
+    name, job, grow, lev = cur.fetchone()
+    struct.pack_into('<I', plain, offset, cno)
+    encoded = name.encode('utf-8')[:19].decode('utf-8', 'ignore').encode('utf-8')
+    plain[offset+4:offset+4+len(encoded)] = encoded
+    plain[offset+24:offset+27] = bytes((job, grow, lev))
+    plain[offset+100] = 93
+    cur.execute("UPDATE taiwan_cain.charac_view SET info=%s WHERE m_id=%s",
+                (raw[:4] + zlib.compress(plain), mid))
+
+
 def run_case(c, cur, needs_ok):
     """执行一个用例，返回 (状态, 说明)。"""
     missing = [n for n in c["needs"] if not needs_ok(n)]
@@ -443,6 +470,8 @@ def run_case(c, cur, needs_ok):
         return "fail", "超时 %ds，已终止" % CASE_TIMEOUT[0]
     if ctx.fails:
         return "fail", "失败 %d 项：%s" % (len(ctx.fails), ", ".join(ctx.fails[:6]))
+    if ctx.skips:
+        return "skip", "; ".join(ctx.skips)
     return "pass", ""
 
 

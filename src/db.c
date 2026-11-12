@@ -79,25 +79,33 @@ static int db_exec(Db *d, const char *what, const char *table, const char *keyco
 // 点券扣了没加，或者等级变了经验没变。这类不一致写后校验只能「发现」，
 // 没法「抵消」，所以交给库自己回滚。
 int db_tx_begin(Db *d, Err err) {
+    if (d->tx_depth) { d->tx_depth++; return 1; }
     Str s = {0};
     str_cat(&s, "START TRANSACTION");
     int ok = run(d, &s);
     str_free(&s);
     if (!ok) snprintf(err, ERRBUF, "开事务失败：%s", d->err);
+    else d->tx_depth = 1;
     return ok;
 }
 
 int db_tx_commit(Db *d, Err err) {
+    if (d->tx_depth > 1) { d->tx_depth--; return 1; }
+    if (!d->tx_depth) { snprintf(err, ERRBUF, "事务已回滚，无法提交"); return 0; }
     Str s = {0};
     str_cat(&s, "COMMIT");
     int ok = run(d, &s);
     str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "提交失败：%s", d->err);
+    if (!ok) {
+        snprintf(err, ERRBUF, "提交失败，结果需核实：%s", d->err);
+        db_tx_rollback(d);
+    } else d->tx_depth = 0;
     return ok;
 }
 
 // 回滚本身失败没有补救手段（连接多半已经断了），不往上抛
 void db_tx_rollback(Db *d) {
+    d->tx_depth = 0;
     Str s = {0};
     str_cat(&s, "ROLLBACK");
     run(d, &s);
@@ -169,7 +177,7 @@ int db_open(Db *d, const char *host, int port, const char *user, const char *pwd
     return 1;
 }
 
-void db_close(Db *d) { mysql_close(&d->conn); }
+void db_close(Db *d) { mysql_close(&d->conn); d->tx_depth = 0; }
 int  db_alive(const Db *d) { return mysql_alive(&d->conn); }
 
 // 角色列表三处查询（db_list_chars / db_poll_chars / db_list_ban_chars）共用的
@@ -196,7 +204,7 @@ int db_list_chars(Db *d, Vec *out, int limit, const char *kw, Err err) {
              " LEFT JOIN d_taiwan.accounts a ON a.UID=c.m_id"
              " WHERE c.delete_flag=0");
     if (kw && *kw) {
-        char *e = mysql_escape(kw);
+        char *e = mysql_escape(&d->conn, kw);
         // 前导通配 LIKE 全表扫：角色表量小可接受；大表改前缀匹配/全文索引
         str_catf(&s, " AND (c.charac_name LIKE '%%%s%%' OR a.accountname LIKE '%%%s%%'"
                      " OR c.charac_no='%s')", e, e, e);
@@ -228,7 +236,7 @@ u32 db_count_chars(Db *d, const char *kw) {
     str_cat(&s, "SELECT COUNT(*) FROM taiwan_cain.charac_info c"
                 " LEFT JOIN d_taiwan.accounts a ON a.UID=c.m_id WHERE c.delete_flag=0");
     if (kw && *kw) {
-        char *e = mysql_escape(kw);
+        char *e = mysql_escape(&d->conn, kw);
         // 前导通配 LIKE 全表扫：角色表量小可接受；大表改前缀匹配/全文索引
         str_catf(&s, " AND (c.charac_name LIKE '%%%s%%' OR a.accountname LIKE '%%%s%%'"
                      " OR c.charac_no='%s')", e, e, e);
@@ -934,18 +942,21 @@ int db_save_blob(Db *d, const Charac *c, const char *table, const char *field,
     const char *key_col = by_mid ? "m_id" : "charac_no";
     u32 key = by_mid ? c->mid : c->no;
 
-    // 1) 取原值（先记录到本会话快照，不落单文件）
+    // 1) 在同一事务内锁定原值，避免撤销快照与实际被覆盖的版本错开。
+    if (!db_tx_begin(d, err)) return 0;
     Str s = {0};
     MyResult r = {0};
-    str_catf(&s, "SELECT %s FROM %s WHERE %s=%u", field, table, key_col, key);
-    if (!select1(d, &s, &r)) { snprintf(err, ERRBUF, "%s", d->err); str_free(&s); return 0; }
+    str_catf(&s, "SELECT %s FROM %s WHERE %s=%u FOR UPDATE", field, table, key_col, key);
+    if (!select1(d, &s, &r) || !r.nrow) {
+        snprintf(err, ERRBUF, "读取原值失败或记录不存在：%s", d->err);
+        str_free(&s); my_free(&r); db_tx_rollback(d); return 0;
+    }
     if (r.nrow && my_text(&r, 0, 0))
         undo_note(table, field, key, my_text(&r, 0, 0), (size_t)my_len(&r, 0, 0));
     my_free(&r);
 
     // 2) 用十六进制字面量写入，绕开一切字符集/转义。写和校验放在一个事务里：
     //    列比数据短时 MySQL 会静默截断，校验不过必须整条撤回，不能留下半截 blob。
-    if (!db_tx_begin(d, err)) return 0;
     str_clear(&s);
     str_catf(&s, "UPDATE %s SET %s=0x", table, field);
     hex_str(raw, n, &s);
@@ -989,8 +1000,8 @@ int db_name_taken(Db *d, const char *name, u32 except_no) {
     // 写按 latin1、读按 utf8mb4，两边不可能同时成立：库里正确存着「测试角色」时
     // 这条查询恒不命中，重名检查形同虚设。
     // 每次都显式设一遍：邮件/管理员那几条路径会把会话停在 latin1 或 utf8mb3。
-    set_names(d, db_cs_name(s_cs));
-    char *e = mysql_escape(name);
+    if (!set_names(d, db_cs_name(d->charset))) return 0;
+    char *e = mysql_escape(&d->conn, name);
     Str s = {0};
     MyResult r = {0};
     str_catf(&s, "SELECT charac_no FROM taiwan_cain.charac_info WHERE charac_name='%s'", e);
@@ -1023,12 +1034,15 @@ int db_set_name(Db *d, const Charac *c, const char *name, Err err) {
     // 截成 20 个字符、末字切一半。用配置的字符集，21 字节只是 7 个字符，不会被截。
     // 显式设一遍而不是「假定会话是对的」：邮件/管理员那几条路径会把会话停在
     // latin1 或 utf8mb3，不设就会按上一个动作的字符集转义，同样写出乱码。
-    set_names(d, db_cs_name(s_cs));
+    if (!set_names(d, db_cs_name(d->charset))) {
+        snprintf(err, ERRBUF, "设置连接字符集：%s", d->err);
+        return 0;
+    }
     // 写和回读放在一个事务里。非严格模式下，超长（列上限按字符算，20 个字符）
     // 和库不支持的字符都是静默处理，客户端从返回值上看不出任何异常 ——
     // 只有读回来比对才知道库里到底是什么。不一致就整条回滚，名字保持原样。
     if (!db_tx_begin(d, err)) return 0;
-    char *e = mysql_escape(name);
+    char *e = mysql_escape(&d->conn, name);
     int ok = db_exec(d, "改角色名", "taiwan_cain.charac_info", "charac_no", c->no, err,
                      "UPDATE taiwan_cain.charac_info SET charac_name='%s' WHERE charac_no=%u",
                      e ? e : "", c->no);
@@ -1080,8 +1094,9 @@ int db_set_lev(Db *d, const Charac *c, int lev, i64 exp, Err err) {
     // 惩罚记录可能本来就没有（DELETE 影响 0 行是正常的），所以不走 db_exec
     Str s = {0};
     str_catf(&s, "DELETE FROM d_taiwan.member_punish_info WHERE m_id=%u", c->mid);
-    run(d, &s);
+    int ok = run(d, &s);
     str_free(&s);
+    if (!ok) { snprintf(err, ERRBUF, "清除处罚失败：%s", d->err); goto fail; }
     return db_tx_commit(d, err);
 fail:
     db_tx_rollback(d);
@@ -1147,88 +1162,6 @@ int db_set_cera(Db *d, const Charac *c, u64 cera, u64 point, Err err) {
         return 0;
     }
     return db_tx_commit(d, err);
-}
-
-// 泡点结算：按目标人群 + 多奖励（赠送点券 / D点 / D币 / 物品）给账号或角色加点。
-// 每条奖励是一条 UPDATE ... JOIN（或 INSERT ... SELECT），要么全加要么不加。
-// 不走 db_exec：那里把「命中 0 行」当失败，而这里没人符合条件本是正常结果。
-int db_bubble_tick(Db *d, const BubbleCfg *cfg, u32 *paid, Err err) {
-    if (paid) *paid = 0;
-    if (cfg->coin <= 0 && cfg->dpoint <= 0 && cfg->dcoin <= 0 && cfg->item == 0) {
-        return 1;   // 没设任何奖励
-    }
-    // 目标集合子查询：chars = 角色号集合，mids = 账号 m_id 集合（账号级奖励用）
-    Str chs = {0}, mids = {0};
-    if (cfg->target == 0) {          // 仅在线
-        str_cat(&chs, "SELECT charac_no FROM taiwan_cain.charac_info WHERE m_id IN "
-                      "(SELECT m_id FROM taiwan_login.login_account_3 WHERE login_status>=1)");
-        str_cat(&mids, "SELECT DISTINCT m_id FROM taiwan_login.login_account_3 WHERE login_status>=1");
-    } else if (cfg->target == 1) {   // 全服（含离线）
-        str_cat(&chs, "SELECT charac_no FROM taiwan_cain.charac_info WHERE delete_flag=0");
-        str_cat(&mids, "SELECT DISTINCT m_id FROM taiwan_cain.charac_info WHERE delete_flag=0");
-    } else if (cfg->target == 2) {   // 指定角色
-        str_catf(&chs, "SELECT charac_no FROM taiwan_cain.charac_info WHERE charac_no=%u", cfg->tno);
-        str_catf(&mids, "SELECT m_id FROM taiwan_cain.charac_info WHERE charac_no=%u", cfg->tno);
-    } else {                         // 指定账号
-        str_catf(&chs, "SELECT charac_no FROM taiwan_cain.charac_info WHERE m_id=%u", cfg->tno);
-        str_catf(&mids, "SELECT %u AS m_id", cfg->tno);
-    }
-
-    // 四段奖励同生共死：只发出一半（比如点券已加、D币失败）比整体不发更糟
-    if (!db_tx_begin(d, err)) { str_free(&chs); str_free(&mids); return 0; }
-    int ok = 1;
-    u64 aff = 0, paid_rows = 0;
-    // 赠送点券（角色级，inventory.coin）
-    if (cfg->coin > 0) {
-        Str s = {0};
-        str_catf(&s, "UPDATE taiwan_cain_2nd.inventory i JOIN (%s) t ON i.charac_no=t.charac_no "
-                     "SET i.coin=i.coin+%d", chs.p, cfg->coin);
-        if (!run_aff(d, &s, &aff)) { ok = 0; snprintf(err, ERRBUF, "泡点·点券：%s", d->err); }
-        else paid_rows = aff;
-        str_free(&s);
-    }
-    // D点（账号级，cash_cera.cera）
-    if (cfg->dpoint > 0) {
-        Str s = {0};
-        str_catf(&s, "UPDATE taiwan_billing.cash_cera c JOIN (%s) t ON c.account=CAST(t.m_id AS CHAR) "
-                     "SET c.cera=c.cera+%d", mids.p, cfg->dpoint);
-        if (!run_aff(d, &s, &aff)) { ok = 0; snprintf(err, ERRBUF, "泡点·D点：%s", d->err); }
-        else if (paid_rows == 0) paid_rows = aff;
-        str_free(&s);
-    }
-    // D币（账号级，cash_cera_point.cera_point）
-    if (cfg->dcoin > 0) {
-        Str s = {0};
-        str_catf(&s, "UPDATE taiwan_billing.cash_cera_point p JOIN (%s) t ON p.account=CAST(t.m_id AS CHAR) "
-                     "SET p.cera_point=p.cera_point+%d", mids.p, cfg->dcoin);
-        if (!run_aff(d, &s, &aff)) { ok = 0; snprintf(err, ERRBUF, "泡点·D币：%s", d->err); }
-        else if (paid_rows == 0) paid_rows = aff;
-        str_free(&s);
-    }
-    // 物品：逐收件人插一封（全服目标跳过，避免海量插入卡死）
-    if (cfg->item != 0 && cfg->itemnum > 0 && cfg->target != 1) {
-        int n = cfg->itemnum > 0 ? cfg->itemnum : 1;
-        if (n > 200) n = 200;
-        for (int k = 0; k < n; k++) {
-            Str s = {0};
-            str_catf(&s, "INSERT INTO taiwan_cain_2nd.postal "
-                         "(occ_time,send_charac_name,receive_charac_no,item_id,gold,letter_id,"
-                         "avata_flag,creature_flag,unlimit_flag) "
-                         "SELECT NOW(),'泡点',charac_no,%u,0,0,0,0,1 FROM (%s) t",
-                         cfg->item, chs.p);
-            if (!run_aff(d, &s, &aff)) { ok = 0; snprintf(err, ERRBUF, "泡点·物品：%s", d->err); }
-            else if (paid_rows == 0) paid_rows = aff;
-            str_free(&s);
-        }
-    }
-    str_free(&chs); str_free(&mids);
-    if (!ok) {
-        db_tx_rollback(d);
-        return 0;
-    }
-    if (!db_tx_commit(d, err)) return 0;
-    if (paid) *paid = (u32)paid_rows;
-    return 1;
 }
 
 // ---------------- GM 一键 ----------------

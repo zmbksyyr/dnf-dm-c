@@ -26,6 +26,62 @@ python tools\regress.py --only gm.       # 名字前缀过滤
 前置：Python 3 + `pip install pillow pymysql`；一个能连上的测试库；已编译的 exe。
 数据库参数读产物目录下的 `config/settings.ini`（程序自己写的），读不到用内置默认值。
 
+### 数据层故障注入与参考项目对照
+
+```
+python tools\db_integration.py --build
+python tools\compare_item.py --build
+```
+
+前者编译无窗口探针，直接调用生产数据层，验证事务中途失败、附件归属、克隆槽位、
+备份取消与特殊列、还原会话恢复、SQL 模式及 MySQL 分包边界，以及泡点缺行建账、
+重复结算、目标冻结、溢出保护和跨收件人/跨批次故障回滚。需要测试库的建表、
+建触发器权限；用例在 finally 中清理临时记录、触发器与自增计数。
+只在测试库执行，并与 GUI 回归、游戏服务和其他写入者错开。
+
+连接参数读同一份 settings.ini，或用 `DNF_GM_TEST_HOST`、`DNF_GM_TEST_PORT`、
+`DNF_GM_TEST_USER`、`DNF_GM_TEST_PWD` 覆盖；不在命令行参数或日志中输出密码。
+探针产物位于 `..\_build\audit\`，`DNF_GM_BUILD` 可指定读取配置的构建目录。
+
+后者不连接数据库，只抽取两个本地 Python 参考项目的 `DnfItemSlot` 类，用固定种子的
+160 个物品槽逐字段比较解析结果，再逐字节比较修改后的 61 字节。默认从相邻目录查找
+参考项目；可重复传 `--reference 路径/sqlManager2.py` 指定其他副本。
+
+真实 PVF 与贴图对照：
+
+```
+python -m pip install --target ..\_build\audit\pydeps zhconv setuptools
+python tools\compare_resources.py --build --pvf "路径\Script.pvf" --images "路径\ImagePacks2"
+```
+
+此工具通过 `resource_probe.c` 调用生产解析器，只读游戏资源，不连接数据库。
+逐项比较文件树元数据，抽样比较解密字节、物品名称、堆叠上限和装备类型，
+核对经验表的原始 32 位值，并验证初次与缓存加载结果一致。提供 `--images` 时还会
+建立 NPK 索引、解码各类图标并生成物品详情；它不验证游戏内显示与领取。
+参考类直接从两个 Python 项目抽取，保留其真实 `zhconv` 简繁转换；C 名称在比较时
+转为简体，原文差异单独记录。可重复传 `--reference 路径/pvfReader.py` 指定参考。
+报告写入 `..\_build\audit\resources-check.json`，初次加载可能使用已有缓存；
+耗时仅供本机观察，不代表跨机器基准。
+
+特殊道具发放的界面回归：
+
+```
+python tools\regress.py --group all --only item.special_
+```
+
+需要已配置真实 PVF 的测试环境。覆盖时装/宠物/宠物装备拒绝直接入普通背包、
+多件时装宠物逐件建立附件，以及后续邮件失败时整批回滚；测试完成后还原数据与自增计数。
+
+泡点的界面回归可单独运行：`python tools\regress.py --group manual --only db.bubble_`，
+覆盖定时发放、停用，以及结算等待写锁期间修改配置。仅在线模式保持在线账号下全部
+未删除角色的范围；账号奖励去重，界面分别显示到账角色数和账号数。
+
+备份现使用全部目标表的 READ 锁获得跨 InnoDB/MyISAM 的一致数据，期间会阻塞这些表的
+写入；任一读写失败或取消都不会覆盖已有目标文件。完整备份和角色备份都检查结束标记。
+结束标记用于检测中断，不提供内容真实性或每行完整性的校验。
+还原会恢复会话的 autocommit、foreign_key_checks 与 sql_mode；DDL 会隐式提交，
+MyISAM 不支持事务，因此含这些操作的还原仍需依靠事前备份恢复。
+
 用例会真的启动程序、投递消息、读控件文本与矩形，或直连库断言。写库的用例自己快照、自己在
 `finally` 里还原，不依赖执行顺序。
 
@@ -59,6 +115,8 @@ python tools\regress.py --only gm.       # 名字前缀过滤
 - 一个用例一个函数：`@core.case("域.名字", needs=("gui", "db"), group="always", desc="一句话")`。
 - 断言用 `ctx.check(tag, got, want)` / `ctx.ok(tag, cond)`；失败自动计入该用例。
 - 写库前快照、`finally` 里还原；角色编号用 `ctx.char_no()`，不要写死。
+- 正常克隆用例须有有效源角色槽位；可在原始视图快照保护下调用 `core.seed_test_char_slot`，
+  并在 finally 还原整行视图。缺槽位的错误路径由数据层用例单独验证。
 - 用例之间不共享状态，也不假设库的初始行数。
 - 控件编号是 `1000 + page*100 + n`（`core.PID`），界面改了要同步。
 - 跨进程读文本只用 `WM_GETTEXT`（Edit/Static/ListBox）；列表只读行数，不读单元格文本。
@@ -92,6 +150,7 @@ DNF_GM.exe --selftest
 ```
 
 不建窗口、不连库，只跑纯函数：编码、MD5/SHA1、zlib 往返与校验、物品 blob 打包解包、
-PVF 解密互逆。结果同时写 `config/selftest.txt`，退出码非 0 表示有失败项；CI 每次构建都会跑。
+PVF 解密互逆，以及 UTF-8 边界、转换缓冲区边界、固定/动态 Huffman 流和解压上限。
+结果同时写 `config/selftest.txt`，退出码非 0 表示有失败项；CI 每次构建都会跑。
 
 

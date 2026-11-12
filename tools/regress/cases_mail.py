@@ -982,6 +982,7 @@ def online_gate(ctx):
     if not ctx.ok("login_account_3 有 login_status 列", "login_status" in cols):
         return
     idx = cols.index("login_status")
+    date_idx = cols.index("last_login_date")
     play_before = ctx.q1("SELECT COUNT(*) FROM " + PLAY_EVENT)
     pair_before = ctx.q1("SELECT COUNT(*) FROM " + PLAY_EVENT +
                          " WHERE m_id=%s AND charac_no=%s", (mid, cno))
@@ -989,7 +990,8 @@ def online_gate(ctx):
     inv_n = len(inv_rows)
     inserted = False
     try:
-        ctx.cur.execute("UPDATE " + LOGIN + " SET login_status=1 WHERE m_id=%s", (mid,))
+        # 在线判定会过滤没有近期登录/通道心跳的残留状态，夹具必须模拟一次新登录。
+        ctx.cur.execute("UPDATE " + LOGIN + " SET login_status=1,last_login_date=NOW() WHERE m_id=%s", (mid,))
         ctx.ok("账号已是在线（login_status=1）",
                rows_before[0][idx] == 1
                or _sha(ctx.q("SELECT * FROM " + LOGIN + " WHERE m_id=%s", (mid,))) != login_sha)
@@ -1046,8 +1048,8 @@ def online_gate(ctx):
         ctx.ok("全程进程没崩", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
     finally:
         try:
-            ctx.cur.execute("UPDATE " + LOGIN + " SET login_status=%s WHERE m_id=%s",
-                            (rows_before[0][idx], mid))
+            ctx.cur.execute("UPDATE " + LOGIN + " SET login_status=%s,last_login_date=%s WHERE m_id=%s",
+                            (rows_before[0][idx], rows_before[0][date_idx], mid))
         except Exception:
             pass
         if inserted:

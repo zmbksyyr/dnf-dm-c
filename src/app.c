@@ -374,8 +374,8 @@ static int w_write(void *argv, Err err) {
     memset(&who, 0, sizeof(who));
     who.no = c->cno;
     who.mid = c->mid;
-    int ok = 1;
-    for (int p = 0; p < 6; p++) {
+    int ok = db_tx_begin(&g.db, err);
+    for (int p = 0; ok && p < 6; p++) {
         if (!(c->mask & (1u << p)) || !c->has[p]) continue;
         if (!db_save_blob(&g.db, &who, app_page_table(p), app_page_field(p), c->snap[p].p,
                           c->snap[p].n, err)) {
@@ -385,7 +385,8 @@ static int w_write(void *argv, Err err) {
     }
     u32 mask = c->mask;
     w_ctx_free(c);                       // 快照归作业所有，成败都在这里收
-    if (!ok) return 0;
+    if (!ok) { db_tx_rollback(&g.db); return 0; }
+    if (!db_tx_commit(&g.db, err)) return 0;
     g.write_done = mask;
     return 1;
 }
@@ -443,8 +444,7 @@ const char *app_item_name(u32 id, char *buf, int cap) {
 }
 
 // 类型字节：以 PVF 为准，界面上不可选。
-// PK_AVATAR 归到 IT_EQUIP —— 时装在游戏里同样占装备格子，真正分开发的是邮件附件
-// （avata_flag 那一列），由 ui_mail 按 pvf_item_kind 直接判。
+// PK_AVATAR 归到 IT_EQUIP 供属性编辑；发放时走 user_items 邮件附件，拒绝直接入普通背包。
 // 兜底类型是消耗品（IT_STACK）：绝大多数要发的东西（药水、材料盒、礼盒、兑换券）
 // 都是这一类。没有 PVF、或者 PVF 里查不到这个编号时按它走，至少东西能发得出去、
 // 也能叠起来 —— 比留个 0 让物品格子整个失效要好。
@@ -456,6 +456,7 @@ u8 app_item_type(u32 id) {
         case PK_MATERIAL: return IT_MATERIAL;
         case PK_QUEST:    return IT_QUEST;
         case PK_CREATURE: return IT_CREATURE;
+        case PK_CREATURE_EQUIP: return IT_CREATURE_EQUIP;
         case PK_STACK:    return IT_STACK;
         default:          return IT_STACK;
     }
@@ -471,6 +472,7 @@ const char *app_item_type_text(u32 id) {
         case PK_MATERIAL: return "材料";
         case PK_QUEST:    return "任务材料";
         case PK_CREATURE: return "宠物";
+        case PK_CREATURE_EQUIP: return "宠物装备";
         case PK_STACK:    return "消耗品";
         default:          return "消耗品(未知编号)";
     }
@@ -485,8 +487,7 @@ u32 app_item_stack_limit(u32 id) {
 }
 
 // 邮件附件该走哪张表。以 PVF 的种类为准；没 PVF 时退到库里的宠物清单
-// （dnf_creature_info 的 it_id 列）—— 宠物编号在 PVF 里长得和装备一样，
-// 光看目录分不出来。两者都判不出来就按普通物品发，至少东西能发出去。
+// （dnf_creature_info 的 it_id 列）。PVF 按 equipment type 判定；两者都未知时按普通物品。
 int app_attach_kind(u32 id) {
     if (!id) return ACK_ITEM;
     if (g.pvf_ok) {
@@ -1103,28 +1104,35 @@ static int w_grant(void *ctx, Err err) {
         return 0;
     }
     if (c->by_mail) {
+        if (!db_tx_begin(&g.db, err)) return 0;
         for (int i = 0; i < s_grant_snap_n; i++) {
             NamedId *n = &s_grant_snap[i];
             // 类型按当前 PVF 现派，不信任入队那一刻算的值：先加队列、后加载 PVF
             // 会留下过时的 IT_STACK，照它写会落错背包区段。
             u8 ty = app_item_type(n->id);
+            int attach = app_attach_kind(n->id);
+            int separate = attach != ACK_ITEM;
             int stackable = (ty != IT_EQUIP && ty != IT_CREATURE_EQUIP);
             u32 lim = stackable ? app_item_stack_limit(n->id) : 0;
             u32 total = stackable ? (n->num ? n->num : 1) : n->num;
             // 一个附件装不下就按上限拆成几封，跟游戏里叠满换一格是一回事。
             // 不拆的话附件里躺着个超上限的数量，客户端取出来就报错。
-            int pieces = (lim && total > lim) ? (int)((total + lim - 1) / lim) : 1;
-            if (pieces > GRANT_MAIL_MAX) {
+            u64 count = separate ? (n->num ? n->num : 1) :
+                        (lim && total > lim) ? ((u64)total + lim - 1) / lim : 1;
+            if (count > GRANT_MAIL_MAX) {
                 snprintf(err, ERRBUF,
-                         "%s 一件最多叠 %u 个，%u 个要拆成 %d 封邮件（上限 %d 封），请减少数量",
-                         n->name[0] ? n->name : "该物品", lim, total, pieces, GRANT_MAIL_MAX);
-                return 0;
+                         "%s 需要 %llu 封邮件（上限 %d 封），请减少数量",
+                         n->name[0] ? n->name : "该物品", (unsigned long long)count, GRANT_MAIL_MAX);
+                goto mail_fail;
             }
+            int pieces = (int)count;
             for (int p = 0; p < pieces; p++) {
+                if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); goto mail_fail; }
                 GrantItem gi;
                 memset(&gi, 0, sizeof(gi));
                 gi.id = n->id;
-                gi.num = lim ? (total - (u32)p * lim < lim ? total - (u32)p * lim : lim) : total;
+                gi.num = separate ? 1 : lim ?
+                         (total - (u32)p * lim < lim ? total - (u32)p * lim : lim) : total;
                 gi.type = app_item_type(n->id);
                 gi.enhance = n->enhance;
                 gi.forge = n->forge;
@@ -1136,13 +1144,15 @@ static int w_grant(void *ctx, Err err) {
                 // 附件种类得照着 PVF 判，不能一律当普通物品：时装和宠物要先在
                 // user_items / creature_items 建一行，拿 ui_id 当 add_info；直接把数量
                 // 写进 add_info 又置 flag=0，客户端取附件时拿到的就是错的东西。
-                int k = app_attach_kind(n->id);
                 if (!db_send_item_mail_ex(&g.db, &g.cur, "GM", "系统发放", &gi,
-                                          k == ACK_AVATAR ? 1 : 0,
-                                          k == ACK_CREATURE ? 1 : 0, err)) return 0;
+                                          attach == ACK_AVATAR ? 1 : 0,
+                                          attach == ACK_CREATURE ? 1 : 0, err)) goto mail_fail;
             }
         }
-        return 1;
+        return db_tx_commit(&g.db, err);
+mail_fail:
+        db_tx_rollback(&g.db);
+        return 0;
     }
     Blob *b = &g.data.inv;
     if (!b->ok) { snprintf(err, ERRBUF, "背包未载入"); return 0; }
@@ -1157,6 +1167,10 @@ static int w_grant(void *ctx, Err err) {
         // 过时的 IT_STACK）。类型字节决定落哪个背包区段，写错区段服务端直接拒绝加载、
         // 角色登不进去。
         u8 ty = app_item_type(n->id);
+        if (app_attach_kind(n->id) != ACK_ITEM || ty == IT_CREATURE_EQUIP) {
+            snprintf(err, ERRBUF, "时装、宠物和宠物装备请使用邮件发放");
+            goto done;
+        }
         // 按类型落对应区段。放错区不是"位置不好看"，是服务端直接拒绝加载、
         // 角色登不进去。
         int lo, hi;
@@ -1265,6 +1279,15 @@ int app_grant_send(int by_mail) {
     if (g.grant.n > GRANT_SNAP_MAX) {
         app_info(fmt_new("队列超过 %d 项，请分批发放", GRANT_SNAP_MAX));
         return 0;
+    }
+    if (!by_mail) {
+        for (int i = 0; i < g.grant.n; i++) {
+            u32 id = VEC_AT(&g.grant, NamedId, i)->id;
+            if (app_attach_kind(id) != ACK_ITEM || app_item_type(id) == IT_CREATURE_EQUIP) {
+                app_info("时装、宠物和宠物装备请使用邮件发放。");
+                return 0;
+            }
+        }
     }
     // 排队中也算"在进行"——否则第二次点击会覆盖 s_grant_snap，
     // 先排队的那次发的是后一次的物品清单（发错物品）

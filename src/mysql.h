@@ -19,6 +19,7 @@ typedef struct {
 typedef struct {
     uintptr_t sock;
     u32       seq;
+    u16       status;     // Server status, including NO_BACKSLASH_ESCAPES.
     char      err[ERRBUF];
 
     // 收包用的读缓冲：一次 recv 尽量多收，避免每个包头/包体各来一次系统调用。
@@ -40,4 +41,4 @@ const char *my_text(const MyResult *r, int row, int col);   // NULL 表示越界
 int         my_len(const MyResult *r, int row, int col);
 u64         my_u64(const MyResult *r, int row, int col, u64 def);
 i64         my_i64(const MyResult *r, int row, int col, i64 def);
-char *mysql_escape(const char *s);   // malloc，调用方 free
+char *mysql_escape(const MySql *m, const char *s);   // malloc，调用方 free

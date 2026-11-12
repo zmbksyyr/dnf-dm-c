@@ -13,6 +13,8 @@
 
 // ---------------- 结果集 ----------------
 #define MY_MAX_COL 1024                // 列数白名单：恶意服务器可造 2^64 列数
+#define MY_MAX_PACKET ((size_t)1024 * 1024 * 1024)
+#define SERVER_NO_BACKSLASH_ESCAPES 0x0200u
 
 static void row_reserve(MyResult *r, int n) {
     if (n <= r->cap) return;
@@ -114,16 +116,19 @@ static void native_scramble(const char *pwd, const u8 nonce[20], u8 out[20]) {
     for (int i = 0; i < 20; i++) out[i] = (u8)(s3[i] ^ s1[i]);
 }
 
-char *mysql_escape(const char *s) {
+char *mysql_escape(const MySql *m, const char *s) {
     size_t n = strlen(s);
     char *o = (char *)xalloc(n * 2 + 1);
     size_t k = 0;
     for (size_t i = 0; i < n; i++) {
+        // Quote doubling works in both modes. Backslashes are literal when the
+        // server advertises NO_BACKSLASH_ESCAPES in its status flags.
+        if (s[i] == '\'') { o[k++] = '\''; o[k++] = '\''; continue; }
+        if (m->status & SERVER_NO_BACKSLASH_ESCAPES) { o[k++] = s[i]; continue; }
         switch (s[i]) {
             case '\n': o[k++] = '\\'; o[k++] = 'n'; break;
             case '\r': o[k++] = '\\'; o[k++] = 'r'; break;
             case '\\': o[k++] = '\\'; o[k++] = '\\'; break;
-            case '\'': o[k++] = '\\'; o[k++] = '\''; break;
             case '"': o[k++] = '\\'; o[k++] = '"'; break;
             case 0x1a: o[k++] = '\\'; o[k++] = 'Z'; break;
             default: o[k++] = s[i];
@@ -249,8 +254,9 @@ static int take(MySql *m, void *dst, size_t n) {
 // 包头与载荷合成一次 send：两次 send 在 Nagle 下会和延迟 ACK 撞出 ~40ms 停顿
 static int send_packet(MySql *m, const void *data, size_t n) {
     const u8 *p = (const u8 *)data;
+    size_t chunk;
     do {
-        size_t chunk = n > 0xFFFFFF ? 0xFFFFFF : n;
+        chunk = n > 0xFFFFFF ? 0xFFFFFF : n;
         Buf one = {0};
         buf_reserve(&one, chunk + 4);
         buf_putc(&one, (u8)chunk);
@@ -263,7 +269,7 @@ static int send_packet(MySql *m, const void *data, size_t n) {
         if (!ok) return 0;
         p += chunk;
         n -= chunk;
-    } while (n > 0);
+    } while (chunk == 0xFFFFFF);   // An exact multiple needs a final empty packet.
     return 1;
 }
 
@@ -273,6 +279,10 @@ static int recv_packet(MySql *m, Buf *out) {
         u8 hdr[4];
         if (!take(m, hdr, 4)) return 0;
         size_t len = (size_t)hdr[0] | (size_t)hdr[1] << 8 | (size_t)hdr[2] << 16;
+        if (hdr[3] != (u8)m->seq || len > MY_MAX_PACKET - out->n) {
+            snprintf(m->err, ERRBUF, "MySQL 包序号或长度异常");
+            return 0;
+        }
         m->seq = (u32)hdr[3] + 1;
         buf_reserve(out, out->n + len + 1);
         if (len && !take(m, out->p + out->n, len)) return 0;
@@ -300,20 +310,23 @@ static void die(MySql *m, const char *msg) {
 
 static void err_packet(MySql *m, MyResult *r, const u8 *p, size_t n) {
     u16 code = n >= 3 ? rd16(p + 1) : 0;
-    size_t e = 3;
+    size_t start = n >= 9 && p[3] == '#' ? 9 : (n >= 3 ? 3 : n);
+    size_t e = start;
     while (e < n && p[e]) e++;
     Str s = {0};
-    decode_auto((const char *)p + 3, (int)(e - 3), &s);
+    decode_auto((const char *)p + start, (int)(e - start), &s);
     snprintf(m->err, ERRBUF, "MySQL %u: %s", code, s.p ? s.p : "");
     str_free(&s);
     (void)r;
 }
 
-static int read_ok(Buf *pkt, MyResult *r) {
+static int read_ok(MySql *m, Buf *pkt, MyResult *r) {
     size_t off = 1;
     u64 aff = 0, id = 0;
-    get_lenenc(pkt->p, pkt->n, &off, &aff);
-    if (off < pkt->n) get_lenenc(pkt->p, pkt->n, &off, &id);
+    if (!get_lenenc(pkt->p, pkt->n, &off, &aff) || aff == UINT64_MAX ||
+        !get_lenenc(pkt->p, pkt->n, &off, &id) || id == UINT64_MAX || pkt->n - off < 4)
+        return 0;
+    m->status = rd16(pkt->p + off);
     if (r) { r->affected = aff; r->insert_id = id; }
     return 1;
 }
@@ -374,13 +387,13 @@ static int handshake(MySql *m, const char *user, const char *pwd, const char *db
         buf_putc(&b, 0);
     }
     if (use & CAP_CONNECT_WITH_DB) buf_put(&b, db, strlen(db) + 1);
-    buf_put(&b, "mysql_native_password", 22);
+    if (use & CAP_PLUGIN_AUTH) buf_put(&b, "mysql_native_password", 22);
 
     if (!send_packet(m, b.p, b.n)) { buf_free(&b); die(m, "发送认证包失败"); goto out; }
     buf_free(&b);
 
     if (!recv_packet(m, &pkt) || pkt.n == 0) { die(m, "认证响应读取失败"); goto out; }
-    if (pkt.p[0] == 0x00) ret = 1;
+    if (pkt.p[0] == 0x00) ret = read_ok(m, &pkt, NULL);
     else if (pkt.p[0] == 0xFF) err_packet(m, NULL, pkt.p, pkt.n);
     else if (pkt.p[0] == 0xFE) die(m, "服务器要求切换认证插件，仅支持 mysql_native_password");
     else snprintf(m->err, ERRBUF, "未知认证响应 0x%02X", pkt.p[0]);
@@ -422,7 +435,8 @@ int mysql_open(MySql *m, const char *host, int port, const char *user, const cha
 }
 
 // 追加一行
-static void add_row(MyResult *r, Buf *pkt) {
+static int add_row(MyResult *r, Buf *pkt) {
+    if (!pkt->n || r->nrow >= INT_MAX / r->ncol) return 0;
     row_reserve(r, r->nrow + 1);
     size_t off = 0;
     int base = r->nrow * r->ncol;
@@ -432,15 +446,15 @@ static void add_row(MyResult *r, Buf *pkt) {
         r->nulls[idx] = 1;
         r->lens[idx] = 0;
         r->offs[idx] = -1;
-        if (!get_lenenc(pkt->p, pkt->n, &off, &len)) continue;
+        if (!get_lenenc(pkt->p, pkt->n, &off, &len)) return 0;
         if (len == UINT64_MAX) continue;
         // 长度是对方给的，不能直接做 off+len 再比较：那个加法会回绕，
         // 一个 0xFFFF...FE 的长度就能让判界失效，接着 buf_put 拿着天文数字去 memcpy。
         // 一律改写成减法判界。注意这里刻意不判 off>=n 就 break —— 值为空串时
         // 正好读掉最后一个字节后 off==n，那是合法的一列空值，跳过它等于把该列写成 NULL。
-        if (len > (u64)(pkt->n - off)) len = (u64)(pkt->n - off);
-        if (len > (u64)INT_MAX || r->arena.n > (size_t)INT_MAX - (size_t)len - 1)
-            continue;                                              // arena 超 2GB 截断防护
+        if (len > (u64)(pkt->n - off)) return 0;
+        if (len >= (u64)INT_MAX || r->arena.n > (size_t)INT_MAX - (size_t)len - 1)
+            return 0;                                              // Reject oversized results.
         r->offs[idx] = (int)r->arena.n;
         buf_put(&r->arena, pkt->p + off, (size_t)len);
         buf_putc(&r->arena, 0);
@@ -449,6 +463,7 @@ static void add_row(MyResult *r, Buf *pkt) {
         off += (size_t)len;
     }
     r->nrow++;
+    return off == pkt->n;
 }
 
 int mysql_query(MySql *m, const char *sql, MyResult *r) {
@@ -471,7 +486,11 @@ int mysql_query(MySql *m, const char *sql, MyResult *r) {
     int ret = 0;
     if (!recv_packet(m, &pkt) || pkt.n == 0) { die(m, "读取查询结果失败"); goto done; }
 
-    if (pkt.p[0] == 0x00) { ret = read_ok(&pkt, r); goto done; }
+    if (pkt.p[0] == 0x00) {
+        ret = read_ok(m, &pkt, r);
+        if (!ret) die(m, "MySQL OK 包长度异常");
+        goto done;
+    }
     if (pkt.p[0] == 0xFF) { err_packet(m, r, pkt.p, pkt.n); goto done; }
 
     {
@@ -504,15 +523,17 @@ int mysql_query(MySql *m, const char *sql, MyResult *r) {
             }
         }
         if (!recv_packet(m, &pkt)) { die(m, "读取列结束包失败"); goto done; }
-        if (!(pkt.n >= 1 && pkt.p[0] == 0xFE && pkt.n < 9)) {
-            if (pkt.p[0] == 0xFF) { err_packet(m, r, pkt.p, pkt.n); goto done; }
-            add_row(r, &pkt);            // 服务器省略 EOF
+        if (pkt.n != 5 || pkt.p[0] != 0xFE) {
+            if (pkt.n && pkt.p[0] == 0xFF) err_packet(m, r, pkt.p, pkt.n);
+            else die(m, "MySQL 列结束包异常");
+            goto done;
         }
+        m->status = rd16(pkt.p + 3);
         for (;;) {
             if (!recv_packet(m, &pkt)) { die(m, "读取数据行失败"); goto done; }
-            if (pkt.n >= 1 && pkt.p[0] == 0xFE && pkt.n < 9) break;
+            if (pkt.n == 5 && pkt.p[0] == 0xFE) { m->status = rd16(pkt.p + 3); break; }
             if (pkt.n >= 1 && pkt.p[0] == 0xFF) { err_packet(m, r, pkt.p, pkt.n); goto done; }
-            add_row(r, &pkt);
+            if (!add_row(r, &pkt)) { die(m, "MySQL 数据行长度异常或结果超过上限"); goto done; }
         }
         ret = 1;
     }
