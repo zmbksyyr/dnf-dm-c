@@ -146,7 +146,7 @@ static void card_refresh(void) {
     fmt(b, sizeof(b), "Lv.%d", c->lev);
     card_put(1, b);
     card_put(2, app_job_text(c->job));
-    card_put(3, c->online ? "在线（写库前请退出游戏）" : "离线");
+    card_put(3, c->online ? "在线" : "离线");
 
     app_money_text(d->money, t1, sizeof(t1));
     card_put(4, t1);

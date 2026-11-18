@@ -460,7 +460,7 @@ def gm_queue_four(ctx):
 
 # ================================================================ 刷新与缓存
 @core.case("gm.online_stale", needs=("gui", "db"), group="always",
-           desc="界面仍显示离线时账号重新登录：执行前拒绝写入，金币原值不变")
+           desc="界面仍显示离线时出现在线标记：游戏端不能确认当前角色则拒绝改金币")
 def gm_online_stale(ctx):
     from .cases_char import _log_mark, _wait_log
     cno = _prep(ctx)
@@ -482,7 +482,10 @@ def gm_online_stale(ctx):
         money = ctx.ctl(G["MONEY"])
         core.set_text(money, str(12345 if old[0] != 12345 else 12346))
         _commit(money, 1.5)
-        refused = "未写入" in _status(ctx) or bool(_wait_log(mark, ["设置金币", "未写入"], 6))
+        status = _status(ctx)
+        refused = any(word in status for word in ("未写入", "未执行", "未提交")) or bool(
+            _wait_log(mark, ["设置金币", "未执行"], 6)) or bool(
+            _wait_log(mark, ["设置金币", "未提交"], 6))
         ctx.ok("显示或记录在线写入拒绝", refused, _status(ctx))
         ctx.check("在线账号金币未改变", _money(ctx, cno), old[0])
     finally:

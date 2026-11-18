@@ -122,6 +122,7 @@ int  db_set_job(Db *d, const Charac *c, int job, int grow, Err err);
 // 不猜测曲线、不夹断经验，不支持负值表示保留。
 int  db_set_lev(Db *d, const Charac *c, int lev, i64 exp, Err err);
 int  db_set_money(Db *d, const Charac *c, u64 money, Err err);
+int  db_add_money(Db *d, const Charac *c, u64 money, Err err);
 int  db_set_coin(Db *d, const Charac *c, u64 coin, Err err);
 int  db_add_coin(Db *d, const Charac *c, u64 coin, Err err);
 int  db_set_account_money(Db *d, const Charac *c, u64 money, Err err);

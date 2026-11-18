@@ -659,14 +659,31 @@ class DataTests(unittest.TestCase):
             self.assertNotEqual(r.returncode, 0)
             self.assertEqual(self.bubble_state(), state)
 
-    def test_coin_zero_increment_and_owner_guard(self):
+    def test_balance_increment_zero_overflow_and_owner_guard(self):
         with self.bubble_fixture() as (ids, mid, _):
-            r=self.probe('add-coin',ids[0],mid,0)
-            self.assertEqual(r.returncode,0,r.stderr)
-            self.assertEqual(self.one('SELECT coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%s',(ids[0],)),10)
-            r=self.probe('coin',ids[0],mid+1,20)
-            self.assertNotEqual(r.returncode,0)
-            self.assertEqual(self.one('SELECT coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%s',(ids[0],)),10)
+            for field, maximum in [('coin', 4294967295), ('money', 2147483647)]:
+                for mode in ('', 'STRICT_TRANS_TABLES'):
+                    with self.subTest(field=field, mode=mode):
+                        def balance():
+                            return self.one('SELECT '+field+' FROM taiwan_cain_2nd.inventory WHERE charac_no=%s', (ids[0],))
+                        for args, expected in [((field, ids[0], mid, 10), 10),
+                                               (('add-'+field, ids[0], mid, 0), 10),
+                                               (('add-'+field, ids[0], mid, 7), 17),
+                                               ((field, ids[0], mid, 17), 17),
+                                               ((field, ids[0], mid, maximum), maximum)]:
+                            r=self.probe(*args, mode=mode)
+                            self.assertEqual(r.returncode, 0, r.stderr)
+                            self.assertEqual(balance(), expected)
+                        for args in [('add-'+field, ids[0], mid, 1),
+                                     (field, ids[0], mid, maximum+1),
+                                     (field, ids[0], mid+1, 20)]:
+                            r=self.probe(*args, mode=mode)
+                            self.assertNotEqual(r.returncode, 0)
+                            self.assertEqual(balance(), maximum)
+                        for args in [(field, ids[0], mid, 0), ('add-'+field, ids[0], mid, 0)]:
+                            r=self.probe(*args, mode=mode)
+                            self.assertEqual(r.returncode, 0, r.stderr)
+                            self.assertEqual(balance(), 0)
 
     def test_bubble_online_siblings_rejected_before_account_rewards(self):
         with self.bubble_fixture() as (_, mid, _):

@@ -1130,46 +1130,47 @@ fail:
     return 0;
 }
 
-int db_set_money(Db *d, const Charac *c, u64 money, Err err) {
-    return db_exec(d, "改金币", "taiwan_cain_2nd.inventory", "charac_no", c->no, err,
-                   "UPDATE taiwan_cain_2nd.inventory SET money=%llu WHERE charac_no=%u",
-                   (unsigned long long)money, c->no);
-}
-
-static int change_coin(Db *d, const Charac *c, u64 coin, int add, Err err) {
-    if(coin>UINT32_MAX) {snprintf(err,ERRBUF,"复活币超出范围");return 0;}
+// Online balances go through the original game; offline increments are atomic.
+static int change_balance(Db *d, const Charac *c, u64 value, int add, int money, Err err) {
+    const char *field=money?"money":"coin", *name=money?"金币":"复活币";
+    u32 maximum=money?(u32)INT32_MAX:UINT32_MAX;
+    if(value>maximum) {snprintf(err,ERRBUF,"%s超出范围",name);return 0;}
     int online=0;
     if(!db_account_online(d,c->mid,&online,err)) return 0;
     if(online) {
         OnlineCommand request;
-        return db_online_coin_submit(d,c,(u32)coin,add,&request,err) && db_online_finish(d,&request,err);
+        int ok=money?db_online_money_submit(d,c,(u32)value,add,&request,err)
+                    :db_online_coin_submit(d,c,(u32)value,add,&request,err);
+        return ok && db_online_finish(d,&request,err);
     }
     if(!db_require_offline(d,c->mid,err)) return 0;
-    // 在 UPDATE 内复查离线及归属；增量由数据库计算，不能基于 UI 的旧快照。
+    // Recheck offline state and ownership in the write, not just in the UI.
     Str s={0}; MyResult r={0}; u64 affected=0;
     str_catf(&s,
-                   "UPDATE taiwan_cain_2nd.inventory i JOIN taiwan_cain.charac_info c ON c.charac_no=i.charac_no "
-                   "SET i.coin=%s%llu WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 "
-                   "AND i.coin<=%u AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l "
-                   "WHERE l.m_id=c.m_id AND l.login_status>=1)",
-                   add?"i.coin+":"", (unsigned long long)coin,c->no,c->mid,
-                   add?UINT32_MAX-(u32)coin:UINT32_MAX);
+        "UPDATE taiwan_cain_2nd.inventory i JOIN taiwan_cain.charac_info c ON c.charac_no=i.charac_no "
+        "SET i.%s=%s%llu WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 "
+        "AND i.%s<=%u AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l "
+        "WHERE l.m_id=c.m_id AND l.login_status>=1)",
+        field,add?(money?"i.money+":"i.coin+"):"",(unsigned long long)value,c->no,c->mid,
+        field,add?maximum-(u32)value:maximum);
     int ok=run_aff(d,&s,&affected);
     if(ok && !affected) {
         str_clear(&s);
         str_catf(&s,"SELECT 1 FROM taiwan_cain_2nd.inventory i JOIN taiwan_cain.charac_info c "
             "ON c.charac_no=i.charac_no WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 "
-            "AND i.coin%s%llu AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l "
-            "WHERE l.m_id=c.m_id AND l.login_status>=1)",c->no,c->mid,add?"<=":"=",
-            (unsigned long long)(add?UINT32_MAX:coin));
-        ok=(!add || !coin) && select1(d,&s,&r) && r.nrow==1;
-        if(!ok) snprintf(err,ERRBUF,"复活币未写入：账号已上线、归属变化、余额溢出或库存不存在");
-    } else if(!ok) snprintf(err,ERRBUF,"改复活币：%s",d->err);
+            "AND i.%s%s%llu AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l "
+            "WHERE l.m_id=c.m_id AND l.login_status>=1)",c->no,c->mid,field,add?"<=":"=",
+            (unsigned long long)(add?maximum:value));
+        ok=(!add || !value) && select1(d,&s,&r) && r.nrow==1;
+        if(!ok) snprintf(err,ERRBUF,"%s未写入：账号已上线、归属变化、余额溢出或库存不存在",name);
+    } else if(!ok) snprintf(err,ERRBUF,"改%s：%s",name,d->err);
     my_free(&r);str_free(&s);return ok;
 }
 
-int db_set_coin(Db *d, const Charac *c, u64 coin, Err err) { return change_coin(d,c,coin,0,err); }
-int db_add_coin(Db *d, const Charac *c, u64 coin, Err err) { return change_coin(d,c,coin,1,err); }
+int db_set_money(Db *d, const Charac *c, u64 money, Err err) { return change_balance(d,c,money,0,1,err); }
+int db_add_money(Db *d, const Charac *c, u64 money, Err err) { return change_balance(d,c,money,1,1,err); }
+int db_set_coin(Db *d, const Charac *c, u64 coin, Err err) { return change_balance(d,c,coin,0,0,err); }
+int db_add_coin(Db *d, const Charac *c, u64 coin, Err err) { return change_balance(d,c,coin,1,0,err); }
 
 int db_set_account_money(Db *d, const Charac *c, u64 money, Err err) {
     // 账号金库是懒建的：玩家没在游戏里打开过账号金库，account_cargo 里就没有这行，

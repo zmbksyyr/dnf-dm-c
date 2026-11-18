@@ -1,4 +1,4 @@
-// Original game memory is authoritative for online inventory.coin.
+// Original game memory is authoritative for online inventory balances.
 #include "db_priv.h"
 
 int db_account_online(Db *d, u32 mid, int *online, Err err) {
@@ -10,16 +10,17 @@ int db_account_online(Db *d, u32 mid, int *online, Err err) {
     my_free(&r);str_free(&s);return ok;
 }
 
-static int online_submit(Db *d, const Charac *c, u32 amount, const char *operation, OnlineCommand *request, Err err) {
+static int online_submit(Db *d, const Charac *c, u32 amount, const char *operation, int version, OnlineCommand *request, Err err) {
     memset(request,0,sizeof(*request));
+    request->version=version;
     Str s={0};MyResult r={0};u64 affected=0;
     str_cat(&s,"SELECT REPLACE(UUID(),'-','')");
     int ok=select1(d,&s,&r);
     if(ok && r.nrow==1) cp_text(request->token,sizeof(request->token),&r,0,0);
     my_free(&r);str_clear(&s);
     if(!ok || strlen(request->token)!=32) goto failed;
-    str_cat(&s,"INSERT INTO d_taiwan.dnf_gm_online_v1 "
-        "(token,m_id,charac_no,operation,amount,created,expires,updated) ");
+    str_catf(&s,"INSERT INTO d_taiwan.dnf_gm_online_v%d "
+        "(token,m_id,charac_no,operation,amount,created,expires,updated) ",version);
     if(c->no) str_catf(&s,
         "SELECT '%s',c.m_id,c.charac_no,'%s',%u,NOW(6),DATE_ADD(NOW(6),INTERVAL 20 SECOND),NOW(6) "
         "FROM taiwan_cain.charac_info c WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 ",
@@ -28,10 +29,10 @@ static int online_submit(Db *d, const Charac *c, u32 amount, const char *operati
         "SELECT '%s',c.UID,0,'inspect',0,NOW(6),DATE_ADD(NOW(6),INTERVAL 20 SECOND),NOW(6) "
         "FROM d_taiwan.accounts c WHERE c.UID=%u ",request->token,c->mid);
     str_catf(&s,
-        "AND EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l JOIN d_taiwan.dnf_gm_hosts_v1 h "
+        "AND EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l JOIN d_taiwan.dnf_gm_hosts_v%d h "
         "ON h.channel_no=l.m_channel_no WHERE l.m_id=%u AND l.login_status>=1 "
         "AND h.seen>DATE_SUB(NOW(6),INTERVAL 5 SECOND))",
-        c->mid);
+        version,c->mid);
     ok=run_aff(d,&s,&affected);
     str_free(&s);
     if(ok && affected==1) return 1;
@@ -44,23 +45,29 @@ failed:
 
 int db_online_coin_submit(Db *d,const Charac *c,u32 amount,int add,OnlineCommand *request,Err err) {
     if(!c->no) {snprintf(err,ERRBUF,"在线奖励缺少角色编号");return 0;}
-    return online_submit(d,c,amount,add?"add_coin":"set_coin",request,err);
+    return online_submit(d,c,amount,add?"add_coin":"set_coin",1,request,err);
+}
+
+int db_online_money_submit(Db *d,const Charac *c,u32 amount,int add,OnlineCommand *request,Err err) {
+    if(!c->no) {snprintf(err,ERRBUF,"在线奖励缺少角色编号");return 0;}
+    return online_submit(d,c,amount,add?"add_money":"set_money",2,request,err);
 }
 
 int db_online_character_submit(Db *d,u32 mid,OnlineCommand *request,Err err) {
     Charac c={0};c.mid=mid;
-    int ok=online_submit(d,&c,0,"inspect",request,err);
+    int ok=online_submit(d,&c,0,"inspect",1,request,err);
     request->inspect=1;
     return ok;
 }
 
 int db_online_finish(Db *d, OnlineCommand *request, Err err) {
+    int version=request->version==2?2:1;
     Str s={0};MyResult r={0};
     u64 deadline=now_ms()+22000;
     int stopped=0,ok=0;
     for(;;) {
         str_clear(&s);
-        str_catf(&s,"SELECT state,note,expires<=NOW(6),charac_no FROM d_taiwan.dnf_gm_online_v1 WHERE token='%s'",request->token);
+        str_catf(&s,"SELECT state,note,expires<=NOW(6),charac_no FROM d_taiwan.dnf_gm_online_v%d WHERE token='%s'",version,request->token);
         if(!select1(d,&s,&r) || r.nrow!=1) {
             snprintf(err,ERRBUF,"在线命令 %s 结果不确定，请核对后再操作：%s",request->token,d->err);break;
         }
@@ -85,8 +92,8 @@ int db_online_finish(Db *d, OnlineCommand *request, Err err) {
                 snprintf(err,ERRBUF,"在线命令 %s 已被领取，结果不确定；请核对，勿重复发放",request->token);break;
             }
             str_clear(&s);
-            str_catf(&s,"UPDATE d_taiwan.dnf_gm_online_v1 SET state='rejected',note='gm_cancelled',updated=NOW(6) "
-                "WHERE token='%s' AND state='pending'",request->token);
+            str_catf(&s,"UPDATE d_taiwan.dnf_gm_online_v%d SET state='rejected',note='gm_cancelled',updated=NOW(6) "
+                "WHERE token='%s' AND state='pending'",version,request->token);
             if(!run(d,&s)) {
                 snprintf(err,ERRBUF,"在线命令 %s 取消确认失败，结果不确定：%s",request->token,d->err);break;
             }
