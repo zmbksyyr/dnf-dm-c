@@ -8,3 +8,4 @@ from . import cases_item     # noqa: F401
 from . import cases_char     # noqa: F401
 from . import cases_mail     # noqa: F401
 from . import cases_env      # noqa: F401
+from . import cases_encoding # noqa: F401

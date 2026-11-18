@@ -229,7 +229,7 @@ def _rename_char(ctx, cno, name, timeout=10.0):
 def _char_snapshot(ctx, cno):
     r = ctx.q("SELECT charac_name,HEX(charac_name),CHAR_LENGTH(charac_name),LENGTH(charac_name) "
               "FROM taiwan_cain.charac_info WHERE charac_no=%s", (cno,))
-    return r[0] if r else None
+    return (core.game_text(r[0][0]), *r[0][1:]) if r else None
 
 
 def _char_name(ctx, cno):
@@ -951,7 +951,7 @@ def shutdown_skip(ctx):
 
 # ---------------------------------------------------------------- 字符集：改名
 @core.case("db.charset_char", needs=("gui", "db"), group="always",
-           desc="中文角色名按字符数落库且可逐字节还原")
+           desc="中文角色名按原 ELF 字节约定落库且可逐字节还原")
 def charset_char(ctx):
     cno = ctx.char_no()
     if not ctx.ok("库里有角色", cno is not None):
@@ -968,15 +968,13 @@ def charset_char(ctx):
         got = _rename_char(ctx, cno, target)
         ctx.check("改名成中文后库里就是「%s」" % target, got, target)
         row = _char_snapshot(ctx, cno)
-        ctx.check("CHAR_LENGTH=%d（汉字按字符算，双重编码会是 3 倍）" % len(target),
-                  row[2], len(target))
-        ctx.check("LENGTH=%d（每个汉字 3 字节）" % (3 * len(target)), row[3], 3 * len(target))
+        ctx.check("存储字符数=%d（原 ELF 的 UTF-8 字节数）" % len(target.encode("utf8")),
+                  row[2], len(target.encode("utf8")))
+        ctx.check("存储长度=%d" % len(core.game_storage(target).encode("utf8")), row[3], len(core.game_storage(target).encode("utf8")))
         ctx.ok("utf8mb4 读回无乱码", row[0] == target, repr(row[0]))
     finally:
         got = _rename_char(ctx, cno, orig[0])
-        if got != orig[0]:
-            ctx.cur.execute("UPDATE taiwan_cain.charac_info SET charac_name=%s WHERE charac_no=%s",
-                            (orig[0], cno))
+        ctx.cur.execute("UPDATE taiwan_cain.charac_info SET charac_name=UNHEX(%s) WHERE charac_no=%s", (orig[1], cno))
         row = _char_snapshot(ctx, cno)
         ctx.check("名字改回原值", row[0], orig[0])
         ctx.check("还原后字节与原值一致", row[1], orig[1])
@@ -1042,11 +1040,11 @@ def charset_clone(ctx):
                       "charac_no=%s" % (clone_no,)):
             return
 
-        ctx.check("克隆角色名是中文（原名+数字后缀）", clone[1], target + "2")
-        ctx.check("克隆名 CHAR_LENGTH=%d" % (len(target) + 1), clone[3], len(target) + 1)
-        ctx.check("克隆名 LENGTH=%d（汉字 3 字节 + 后缀 1 字节）" % (3 * len(target) + 1),
-                  clone[4], 3 * len(target) + 1)
-        ctx.ok("克隆名无双重编码", clone[1] == target + "2", "hex=%s" % clone[2][:80])
+        ctx.check("克隆角色名是中文（原名+数字后缀）", core.game_text(clone[1]), target + "2")
+        ctx.check("克隆名存储字符数=%d" % (len(target.encode("utf8")) + 1), clone[3], len(target.encode("utf8")) + 1)
+        ctx.check("克隆名存储长度=%d" % (len(core.game_storage(target).encode("utf8")) + 1),
+                  clone[4], len(core.game_storage(target).encode("utf8")) + 1)
+        ctx.ok("克隆名按原 ELF 约定解码", core.game_text(clone[1]) == target + "2", "hex=%s" % clone[2][:80])
         ctx.check("克隆角色在 charac_info 里恰好 1 行",
                   ctx.q1("SELECT COUNT(*) FROM taiwan_cain.charac_info WHERE charac_no=%s",
                          (clone_no,)), 1)
@@ -1123,10 +1121,10 @@ def charset_mail_pet(ctx):
                                         ctx.q1("SELECT COUNT(*) FROM taiwan_cain_2nd.letter")))
         if row:
             sent_id = row[0]
-            ctx.check("letter_text 读回与发送内容一致", row[3], MAIL_TEXT)
-            ctx.check("letter_text CHAR_LENGTH=%d（字符数）" % len(MAIL_TEXT),
-                      row[5], len(MAIL_TEXT))
-            ctx.ok("letter_text 不是双重编码", "æ" not in (row[3] or ""),
+            ctx.check("letter_text 读回与发送内容一致", core.game_text(row[3]), MAIL_TEXT)
+            ctx.check("letter_text 存储字符数，正文 UTF-8 字节=%d" % len(MAIL_TEXT.encode("utf8")),
+                      row[5], len(MAIL_TEXT.encode("utf8")))
+            ctx.ok("letter_text 按原 ELF 约定解码", core.game_text(row[3]) == MAIL_TEXT,
                    "hex=%s" % (row[4] or "")[:80])
             ctx.check("send_charac_name=GM 未乱码", row[2], "GM")
             ctx.cur.execute("DELETE FROM taiwan_cain_2nd.letter WHERE letter_id=%s", (row[0],))
@@ -1158,15 +1156,15 @@ def charset_mail_pet(ctx):
             while time.time() - t0 < 15:
                 got = ctx.q1("SELECT name FROM taiwan_cain_2nd.creature_items WHERE ui_id=%s",
                              (pet[0],))
-                if got == PET_NAME:
+                if core.game_text(got) == PET_NAME:
                     break
                 time.sleep(0.4)
-            ctx.check("宠物名读回 = 「%s」" % PET_NAME, got, PET_NAME)
+            ctx.check("宠物名读回 = 「%s」" % PET_NAME, core.game_text(got), PET_NAME)
             r = ctx.q("SELECT name,HEX(name),CHAR_LENGTH(name),LENGTH(name) "
                       "FROM taiwan_cain_2nd.creature_items WHERE ui_id=%s", (pet[0],))[0]
-            ctx.check("宠物名 CHAR_LENGTH=4", r[2], 4)
-            ctx.check("宠物名 LENGTH=12", r[3], 12)
-            ctx.ok("宠物名无双重编码", r[0] == PET_NAME, "hex=%s" % r[1][:80])
+            ctx.check("宠物名存储字符数=12", r[2], len(PET_NAME.encode("utf8")))
+            ctx.check("宠物名存储 UTF-8 字节数=27", r[3], len(core.game_storage(PET_NAME).encode("utf8")))
+            ctx.ok("宠物名按原 ELF 约定解码", core.game_text(r[0]) == PET_NAME, "hex=%s" % r[1][:80])
     finally:
         if sent_id is not None:
             ctx.cur.execute("DELETE FROM taiwan_cain_2nd.letter WHERE letter_id=%s", (sent_id,))

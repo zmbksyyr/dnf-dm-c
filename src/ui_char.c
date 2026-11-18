@@ -610,10 +610,13 @@ static void gm_commit(int id) {
             }
             if (v == g.cur.lev) return;
             c.i1 = v;
-            // 经验写 0，不写「这一级的门槛值」：exp 是「本级已经攒了多少」，
-            // 填成门槛等于让人顶着满经验条进游戏，服务端一结算就再升一级
-            // （85 级的门槛就 10.8 亿，94 级往上还超过 int 上限）。0 = 刚到这一级。
-            c.u1 = 0;
+            u32 exp;
+            Err err = {0};
+            if (!pvf_level_min_exp(&g.pvf, v, &exp, err)) {
+                app_status("%s", err);
+                return;
+            }
+            c.u1 = exp;
             gm_push(K_LEV, &c);
             return;
         }

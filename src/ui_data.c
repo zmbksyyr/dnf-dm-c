@@ -24,6 +24,7 @@ typedef struct {
 typedef struct {
     int  kind;
     u32  ui_id;
+    u32  cno, mid;
     char s[64];
     int  sub;          // 通用：avatar 标记等
     u64  u64v;         // 通用：大 id
@@ -34,6 +35,12 @@ typedef struct {
     int  send_n;
 } DCtx;
 static DCtx dc;
+
+static int data_act(const char *what, int (*work)(void *, Err)) {
+    dc.cno = g.cur.no;
+    dc.mid = g.cur.mid;
+    return app_act(what, work, &dc);
+}
 
 // 宠物/时装/任务三张表的列表暂存：作业线程只写这里，UI 线程在 job_poll
 // 之后搬到 g.pets/g.avatars/g.quests。
@@ -110,7 +117,7 @@ static void tab_scan_start(void) {
     g_tab_pending = 1;
     dc.kind = D_TABSCAN;
     app_status("正在扫描宠物/时装表…");
-    app_act("扫表内错误", tab_work, &dc);
+    data_act("扫表内错误", tab_work);
 }
 
 // 每个对话框一份：两个表内错误窗嵌套时不会互相踩句柄
@@ -162,7 +169,7 @@ static void tab_del_run(TabCtx *t, int all) {
         return;
     g_tab_rescan = 1;
     dc.kind = D_TABDEL;
-    if (!app_act("删除错误记录", tab_work, &dc)) g_tab_rescan = 0;
+    if (!data_act("删除错误记录", tab_work)) g_tab_rescan = 0;
 }
 
 static LRESULT tab_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
@@ -242,13 +249,16 @@ static void tab_show(void) {
 
 static int pet_work(void *ctx, Err err) {
     DCtx *c = (DCtx *)ctx;
+    Charac who = {0};
+    who.no = c->cno; who.mid = c->mid;
     if (c->kind == D_PETS) {
         if (!s_pets_next.cap) vec_init(&s_pets_next, sizeof(PetRow));
-        s_pets_cno = g.cur.no;
-        int ok = db_list_pets(&g.db, &g.cur, &s_pets_next, err);
+        s_pets_cno = who.no;
+        int ok = db_list_pets(&g.db, &who, &s_pets_next, err);
         InterlockedOr(&s_lists_dirty, L_PETS);   // 失败也要换：界面按空列表重填，别反复重查
         return ok;
     }
+    if (!db_require_offline(&g.db, who.mid, err)) return 0;
     switch (c->kind) {
         case D_PETNAME: return db_set_pet_name(&g.db, c->ui_id, c->s, err);
         case D_PETFULL: return db_set_pet_full(&g.db, c->ui_id, err);
@@ -282,7 +292,7 @@ static void pet_reload(Page *p) {
     if (!(g.lists_ready & L_PETS)) {
         if (!job_running(&g.job_act)) {
             dc.kind = D_PETS;
-            app_act("读取宠物", pet_work, &dc);
+            data_act("读取宠物", pet_work);
         }
         ui_text(p_info, "正在读取宠物…");
         return;
@@ -322,27 +332,27 @@ static LRESULT pet_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             dc.ui_id = r->ui_id;
             snprintf(dc.s, sizeof(dc.s), "%s", nm);
             g.pets.n = 0;
-            app_act("宠物改名", pet_work, &dc);
+            data_act("宠物改名", pet_work);
             return 0;
         }
         case P_FULL:
             dc.kind = D_PETFULL;
             dc.ui_id = r->ui_id;
             g.pets.n = 0;
-            app_act("宠物满饱食", pet_work, &dc);
+            data_act("宠物满饱食", pet_work);
             return 0;
         case P_EXPIRE:
             dc.kind = D_PETEXPIRE;
             dc.ui_id = r->ui_id;
             g.pets.n = 0;
-            app_act("宠物续期", pet_work, &dc);
+            data_act("宠物续期", pet_work);
             return 0;
         case P_DEL:
             if (!app_confirm(fmt_new("删除宠物「%s」？", r->name))) return 0;
             dc.kind = D_PETDEL;
             dc.ui_id = r->ui_id;
             g.pets.n = 0;
-            app_act("删除宠物", pet_work, &dc);
+            data_act("删除宠物", pet_work);
             return 0;
     }
     return -1;
@@ -413,13 +423,16 @@ static HWND a_sep;
 
 static int ava_work(void *ctx, Err err) {
     DCtx *c = (DCtx *)ctx;
+    Charac who = {0};
+    who.no = c->cno; who.mid = c->mid;
     if (c->kind == D_AVAS) {
         if (!s_avas_next.cap) vec_init(&s_avas_next, sizeof(AvatarRow));
-        s_avas_cno = g.cur.no;
-        int ok = db_list_avatars(&g.db, &g.cur, &s_avas_next, err);
+        s_avas_cno = who.no;
+        int ok = db_list_avatars(&g.db, &who, &s_avas_next, err);
         InterlockedOr(&s_lists_dirty, L_AVAS);
         return ok;
     }
+    if (!db_require_offline(&g.db, who.mid, err)) return 0;
     switch (c->kind) {
         case D_AVAHIDE: return db_set_avatar_hidden(&g.db, c->ui_id, (int)c->s[0], err);
         case D_AVAEXPIRE: return db_set_avatar_expire(&g.db, c->ui_id, err);
@@ -452,7 +465,7 @@ static void ava_reload(Page *p) {
     if (!(g.lists_ready & L_AVAS)) {
         if (!job_running(&g.job_act)) {
             dc.kind = D_AVAS;
-            app_act("读时装", ava_work, &dc);
+            data_act("读时装", ava_work);
         }
         ui_text(a_info, "正在读取时装…");
         return;
@@ -488,20 +501,20 @@ static LRESULT ava_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             dc.ui_id = r->ui_id;
             dc.s[0] = (char)(r->hidden ? 0 : 1);
             g.avatars.n = 0;
-            app_act("切换显示", ava_work, &dc);
+            data_act("切换显示", ava_work);
             return 0;
         case A_EXPIRE:
             dc.kind = D_AVAEXPIRE;
             dc.ui_id = r->ui_id;
             g.avatars.n = 0;
-            app_act("时装续期", ava_work, &dc);
+            data_act("时装续期", ava_work);
             return 0;
         case A_DEL:
             dc.ui_id = r->ui_id;          // 弹框前取走，之后不再读 r
             if (!app_confirm("删除这件时装？")) return 0;
             dc.kind = D_AVADEL;
             g.avatars.n = 0;
-            app_act("删除时装", ava_work, &dc);
+            data_act("删除时装", ava_work);
             return 0;
     }
     return -1;
@@ -599,24 +612,27 @@ static void quest_enrich(void) {
 
 static int quest_work(void *ctx, Err err) {
     DCtx *c = (DCtx *)ctx;
+    Charac who = {0};
+    who.no = c->cno; who.mid = c->mid;
     if (c->kind == D_QUESTS) {
         if (!s_quests_next.cap) vec_init(&s_quests_next, sizeof(QuestRow));
-        s_quests_cno = g.cur.no;
-        int ok = db_list_quests(&g.db, &g.cur, &s_quests_next, err);
+        s_quests_cno = who.no;
+        int ok = db_list_quests(&g.db, &who, &s_quests_next, err);
         InterlockedOr(&s_lists_dirty, L_QUESTS);
         return ok;
     }
-    if (c->kind == D_QUESTCLR) return db_clear_quests(&g.db, &g.cur, err);
-    if (c->kind == D_QINIT) return db_quest_init(&g.db, &g.cur, err);
+    if (c->kind != D_QSEND && !db_require_offline(&g.db, who.mid, err)) return 0;
+    if (c->kind == D_QUESTCLR) return db_clear_quests(&g.db, &who, err);
+    if (c->kind == D_QINIT) return db_quest_init(&g.db, &who, err);
     if (c->kind == D_QSLOT) {
-        if (!db_set_quest_slot(&g.db, &g.cur, c->q.slot, c->q.id, c->q.trigger, err)) return 0;
+        if (!db_set_quest_slot(&g.db, &who, c->q.slot, c->q.id, c->q.trigger, err)) return 0;
         if (c->q.purge && c->q.purge_n)
-            return db_purge_quest_items(&g.db, &g.cur, c->q.purge_id, c->q.purge_n, NULL, err);
+            return db_purge_quest_items(&g.db, &who, c->q.purge_id, c->q.purge_n, NULL, err);
         return 1;
     }
     if (c->kind == D_QSEND) {
         for (int i = 0; i < c->send_n; i++)
-            if (!db_send_item_mail_ex(&g.db, &g.cur, "GM", "任务材料补发", &c->send[i], 0, 0, err))
+            if (!db_send_item_mail_ex(&g.db, &who, "GM", "任务材料补发", &c->send[i], 0, 0, err))
                 return 0;
         return 1;
     }
@@ -647,7 +663,7 @@ static void quest_reload(Page *p) {
     if (!(g.lists_ready & L_QUESTS)) {
         if (!job_running(&g.job_act)) {
             dc.kind = D_QUESTS;
-            app_act("读任务", quest_work, &dc);
+            data_act("读任务", quest_work);
         }
         ui_text(q_info, "正在读取任务…");
         return;
@@ -683,14 +699,14 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             return 0;
         dc.kind = D_QINIT;
         quest_rerun();
-        app_act("任务初始化", quest_work, &dc);
+        data_act("任务初始化", quest_work);
         return 0;
     }
     if (id == Q_CLEAR) {
         if (!app_confirm("清空该角色的全部任务记录？")) return 0;
         dc.kind = D_QUESTCLR;
         quest_rerun();
-        app_act("清空任务", quest_work, &dc);
+        data_act("清空任务", quest_work);
         return 0;
     }
     if (id == Q_DROP || id == Q_DONE || id == Q_SEND || id == Q_PURGE) {
@@ -706,7 +722,7 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             memset(&dc.q, 0, sizeof(dc.q));
             dc.q.slot = r->slot;
             dc.kind = D_QSLOT;
-            app_act("放弃任务", quest_work, &dc);
+            data_act("放弃任务", quest_work);
             quest_rerun();
             return 0;
         }
@@ -719,7 +735,7 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             dc.q.slot = r->slot;
             dc.q.id = r->id;
             dc.kind = D_QSLOT;
-            app_act("标记完成", quest_work, &dc);
+            data_act("标记完成", quest_work);
             quest_rerun();
             return 0;
         }
@@ -737,7 +753,7 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
                 g0->dur = 1;
             }
             dc.kind = D_QSEND;
-            app_act("补发材料", quest_work, &dc);
+            data_act("补发材料", quest_work);
             return 0;
         }
         // Q_PURGE：放弃任务，同时把为它攒的任务材料从背包里清掉
@@ -752,7 +768,7 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         dc.q.purge_n = r->nneed;
         for (int k = 0; k < r->nneed; k++) dc.q.purge_id[k] = r->need_id[k];
         dc.kind = D_QSLOT;
-        app_act("完美清除", quest_work, &dc);
+        data_act("完美清除", quest_work);
         quest_rerun();
         return 0;
     }

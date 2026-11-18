@@ -49,6 +49,28 @@ static void test_utf(void) {
        !u8_from_u16(w, -1, NULL, 10));
 }
 
+static void test_chinese_codepages(void) {
+    Str text = {0};
+    const char *words[] = {"复活币，城镇，武器装备等级", "復活幣，城鎮，武器裝備等級", "中文 UTF-8 文本"};
+    const unsigned cps[] = {936, 950, CP_UTF8};
+    for (int i = 0; i < COUNT_OF(cps); i++) {
+        WCHAR wide[128];
+        utf16(words[i], wide, COUNT_OF(wide));
+        char bytes[256];
+        int n = WideCharToMultiByte(cps[i], 0, wide, (int)wcslen(wide), bytes, sizeof(bytes), NULL, NULL);
+        ok("中文文本码页自动识别", cn_codepage(bytes, n) == cps[i]);
+        decode_cn(bytes, n, &text);
+        ok("中文文本按真实码页解码", !strcmp(str_c(&text), words[i]));
+    }
+    Str legacy = {0};
+    utf8_from_cp("中文角色", (int)strlen("中文角色"), 1252, &legacy);
+    ok("原服务 latin1 存储文本可逆还原", decode_game_text(str_c(&legacy), &text) && !strcmp(str_c(&text), "中文角色"));
+    ok("正常 UTF-8 中文不重复转码", !decode_game_text("中文角色", &text) && !strcmp(str_c(&text), "中文角色"));
+    ok("正常西文文本不猜测修复", !decode_game_text("café", &text) && !strcmp(str_c(&text), "café"));
+    str_free(&legacy);
+    str_free(&text);
+}
+
 static void test_hash(void) {
     char md5[33];
     hash_md5("abc", 3, md5);
@@ -147,6 +169,21 @@ static void test_pvf(void) {
     ok("pvf_decrypt 真的改了内容", memcmp(buf, orig, sizeof(buf)) != 0);
     pvf_encrypt(buf, sizeof(buf), 0x12345678);
     ok("pvf_encrypt 是 decrypt 的逆变换", memcmp(buf, orig, sizeof(buf)) == 0);
+
+    u32 curve[] = {1000, 2653, 5543, 0, 9000};
+    Pvf p = {0};
+    p.opened = 1; p.exp = curve; p.nexp = COUNT_OF(curve);
+    u32 exp = 123;
+    Err err = {0};
+    ok("等级 1 的累计经验为 0", pvf_level_min_exp(&p, 1, &exp, err) && exp == 0);
+    ok("等级 2 对应 PVF 首项", pvf_level_min_exp(&p, 2, &exp, err) && exp == 1000);
+    ok("等级 4 对应累计经验且没有下标偏移", pvf_level_min_exp(&p, 4, &exp, err) && exp == 5543);
+    ok("经验表重置后拒绝高等级", !pvf_level_min_exp(&p, 5, &exp, err));
+    curve[3] = 0x80000000u;
+    ok("经验超出有符号字段拒绝夹断", !pvf_level_min_exp(&p, 5, &exp, err));
+    ok("经验表缺级拒绝写入", !pvf_level_min_exp(&p, 7, &exp, err));
+    p.opened = 0;
+    ok("未加载 PVF 拒绝猜测经验", !pvf_level_min_exp(&p, 2, &exp, err));
 }
 
 int selftest_run(void) {
@@ -155,6 +192,7 @@ int selftest_run(void) {
     (void)freopen("CONOUT$", "w", stdout);
     str_cat(&s_log, "dnf-dm-c selftest\n");
     test_utf();
+    test_chinese_codepages();
     test_hash();
     test_zlib();
     test_item();

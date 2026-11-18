@@ -108,9 +108,12 @@ void utf8(const WCHAR *s, char *out, int cap);
 
 int  utf8_valid(const u8 *p, int n);
 void utf8_from_cp(const char *raw, int n, unsigned cp, Str *out);  // 指定代码页 → UTF-8
-unsigned cn_codepage(const char *raw, int n);                      // 936 或 950
+unsigned cn_codepage(const char *raw, int n);                      // UTF-8、936 或 950
 void decode_cn(const char *raw, int n, Str *out);
 void decode_auto(const char *raw, int n, Str *out);
+// Reverse the original game UTF-8-bytes/latin1 storage convention only when
+// every character round-trips and the recovered bytes are valid UTF-8.
+int decode_game_text(const char *text, Str *out);
 
 // ---------------- 文件 ----------------
 int  file_read(const char *path, Buf *out);

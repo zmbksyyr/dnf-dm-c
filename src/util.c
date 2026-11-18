@@ -239,14 +239,20 @@ void utf8_from_cp(const char *raw, int n, unsigned cp, Str *out) {
 static const char *kHotCn =
     "的一是不了在人有我他这为之大来以个中上们到说国和地也子时道出而要于就下得可你年生"
     "自会那后能对着事其里所去行过家十用发天如然作方成者多日都三小军二无同么经法当起与"
-    "好看学进种将还分此心前面又定见只主没公从已经给两最意点情外但身些";
+    "好看学进种将还分此心前面又定见只主没公从已经给两最意点情外但身些"
+    "這為個們說國時於會後對裡過發無麼經當與學進種將還見沒從給兩點萬龍劍鬥復幣師裝備級護體靈聖";
 
 static int cn_score(const char *u8s, int n) {
     int hit = 0, i = 0;
     while (i < n) {
         u8 c = (u8)u8s[i];
         int step = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 1;
-        if (step == 3) {
+        if (step == 3 && i + 3 <= n) {
+            // CP936 maps some invalid source pairs into the private-use area.
+            // A successful API conversion alone does not identify the encoding.
+            unsigned cp = ((unsigned)(c & 15u) << 12) |
+                          ((unsigned)((u8)u8s[i + 1] & 63u) << 6) | ((u8)u8s[i + 2] & 63u);
+            if (cp == 0xfffdu || (cp >= 0xe000u && cp <= 0xf8ffu)) hit -= 5;
             for (const char *p = kHotCn; *p;) {
                 u8 h = (u8)*p;
                 int hn = h < 0x80 ? 1 : (h >> 5) == 6 ? 2 : 3;
@@ -260,6 +266,7 @@ static int cn_score(const char *u8s, int n) {
 }
 
 unsigned cn_codepage(const char *raw, int n) {
+    if (utf8_valid((const u8 *)raw, n)) return CP_UTF8;
     Str a = {0}, b = {0};
     utf8_from_cp(raw, n, 936, &a);
     utf8_from_cp(raw, n, 950, &b);
@@ -271,19 +278,39 @@ unsigned cn_codepage(const char *raw, int n) {
 
 void decode_cn(const char *raw, int n, Str *out) {
     if (n <= 0) { str_clear(out); return; }
-    int probe = n > 4096 ? 4096 : n;   // 只需采样判码页，全量扫描太贵
-    utf8_from_cp(raw, n, cn_codepage(raw, probe), out);
+    // Use a complete text sample, preserving byte-pair boundaries. A 4096-byte
+    // prefix can consist entirely of ASCII comments in real n_string files.
+    utf8_from_cp(raw, n, cn_codepage(raw, n), out);
+    if (out->n >= 3 && !memcmp(out->p, "\xef\xbb\xbf", 3)) {
+        memmove(out->p, out->p + 3, (size_t)out->n - 2);
+        out->n -= 3;
+    }
 }
 
 void decode_auto(const char *raw, int n, Str *out) {
-    str_clear(out);
-    if (n <= 0) return;
-    if (utf8_valid((const u8 *)raw, n)) { str_setn(out, raw, n); return; }
-    utf8_from_cp(raw, n, 936, out);
-    if (out->n && utf8_valid((const u8 *)out->p, out->n)) return;
-    utf8_from_cp(raw, n, 950, out);
-    if (out->n && utf8_valid((const u8 *)out->p, out->n)) return;
-    utf8_from_cp(raw, n, 1252, out);
+    decode_cn(raw, n, out);
+}
+
+int decode_game_text(const char *text, Str *out) {
+    if (!text) text = "";
+    str_set(out, text);
+    int n = (int)strlen(text);
+    if (!n) return 0;
+    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, n, NULL, 0);
+    if (wlen <= 0) return 0;
+    WCHAR *wide = (WCHAR *)xalloc((size_t)wlen * sizeof(WCHAR));
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, n, wide, wlen);
+    char *raw = (char *)xalloc((size_t)n + 1);
+    BOOL used_default = FALSE;
+    int len = WideCharToMultiByte(1252, WC_NO_BEST_FIT_CHARS, wide, wlen, raw, n, NULL, &used_default);
+    free(wide);
+    int changed = 0;
+    if (len > 0 && !used_default && len < n && utf8_valid((const u8 *)raw, len)) {
+        str_setn(out, raw, len);
+        changed = 1;
+    }
+    free(raw);
+    return changed;
 }
 
 // ---------------- 文件 ----------------

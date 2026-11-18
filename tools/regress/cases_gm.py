@@ -424,7 +424,7 @@ def gm_write_restore(ctx):
         snap.restore()
 
 
-@core.case("gm.queue.four_fields", needs=("gui", "db"), group="always",
+@core.case("gm.queue.four_fields", needs=("gui", "db", "pvf"), group="always",
            desc="连改金币/复活币/点券/等级四个字段（间隔 80ms），四个都落到同一个角色")
 def gm_queue_four(ctx):
     cno = _prep(ctx)
@@ -438,7 +438,7 @@ def gm_queue_four(ctx):
         _take_soft(ctx, snap, "taiwan_cain_2nd.inventory", "charac_no", cno, ("money", "coin"))
         _take_soft(ctx, snap, "taiwan_billing.cash_cera", "account", mid, ("cera",))
         _take_soft(ctx, snap, "taiwan_billing.cash_cera_point", "account", mid, ("cera_point",))
-        _take_soft(ctx, snap, "taiwan_cain.charac_info", "charac_no", cno, ("lev",))
+        _take_soft(ctx, snap, "taiwan_cain.charac_info", "charac_no", cno, ("lev", "exp"))
         _take_soft(ctx, snap, "taiwan_cain.charac_stat", "charac_no", cno, ("exp",))
         if not ctx.ok("选中第一个角色", _select_char(ctx, cno)):
             return
@@ -459,6 +459,36 @@ def gm_queue_four(ctx):
 
 
 # ================================================================ 刷新与缓存
+@core.case("gm.online_stale", needs=("gui", "db"), group="always",
+           desc="界面仍显示离线时账号重新登录：执行前拒绝写入，金币原值不变")
+def gm_online_stale(ctx):
+    from .cases_char import _log_mark, _wait_log
+    cno = _prep(ctx)
+    if not cno:
+        return
+    mid = _mid(ctx, cno)
+    if not _offline(ctx, mid) or not _select_char(ctx, cno):
+        return
+    snap = Snap(ctx)
+    try:
+        old = snap.take("taiwan_cain_2nd.inventory", "charac_no", cno, ("money",))
+        login = snap.take("taiwan_login.login_account_3", "m_id", mid, ("login_status", "last_login_date"))
+        if not login:
+            ctx.skip("该账号缺少登录记录")
+            return
+        # 立即改输入框，不等待轮询；如果轮询先到达，UI 拒绝同样必须不写入。
+        mark = _log_mark()
+        ctx.cur.execute("UPDATE taiwan_login.login_account_3 SET login_status=1,last_login_date=NOW() WHERE m_id=%s", (mid,))
+        money = ctx.ctl(G["MONEY"])
+        core.set_text(money, str(12345 if old[0] != 12345 else 12346))
+        _commit(money, 1.5)
+        refused = "未写入" in _status(ctx) or bool(_wait_log(mark, ["设置金币", "未写入"], 6))
+        ctx.ok("显示或记录在线写入拒绝", refused, _status(ctx))
+        ctx.check("在线账号金币未改变", _money(ctx, cno), old[0])
+    finally:
+        snap.restore()
+
+
 @core.case("gm.stable.item_sel", needs=("gui", "db"), group="always",
            desc="物品页选中行扛过一次 reload：切到 GM 再切回来选中不丢")
 def gm_stable_item_sel(ctx):
@@ -530,7 +560,7 @@ def gm_poll_card(ctx):
         return
     snap = Snap(ctx)
     try:
-        _take_soft(ctx, snap, "taiwan_cain.charac_info", "charac_no", cno, ("lev",))
+        _take_soft(ctx, snap, "taiwan_cain.charac_info", "charac_no", cno, ("lev", "exp"))
         if not ctx.ok("选中第一个角色", _select_char(ctx, cno)):
             return
         levw = ctx.ctl(G["LEV"])
@@ -561,7 +591,7 @@ def gm_poll_item_sel(ctx):
         return
     snap = Snap(ctx)
     try:
-        _take_soft(ctx, snap, "taiwan_cain.charac_info", "charac_no", cno, ("lev",))
+        _take_soft(ctx, snap, "taiwan_cain.charac_info", "charac_no", cno, ("lev", "exp"))
         if not ctx.ok("选中第一个角色", _select_char(ctx, cno)):
             return
         ctx.page(PAGE_ITEM)
@@ -813,7 +843,7 @@ def gm_qadd_boxes(ctx):
             ctx.skip("inventory 没有这个角色的行")
             return
         m0, c0 = inv
-        row = _take_soft(ctx, snap, "taiwan_cain.charac_info", "charac_no", cno, ("lev",))
+        row = _take_soft(ctx, snap, "taiwan_cain.charac_info", "charac_no", cno, ("lev", "exp"))
         lev0 = row[0] if row else None
         _take_soft(ctx, snap, "taiwan_cain.charac_stat", "charac_no", cno, ("exp",))
         # 起点等级压在 [1, 上限) 内：撞上限时 +10 走的是另一条分支
@@ -844,9 +874,11 @@ def gm_qadd_boxes(ctx):
         want_lev = min(l0 + 10, lim)
         ctx.check("等级 +10 落在当前值上（封顶到 %d）" % lim,
                   _until(lambda: _lev(ctx, cno), want_lev), want_lev)
-        ctx.check("升级后经验清零",
-                  ctx.q1("SELECT exp FROM taiwan_cain.charac_stat WHERE charac_no=%s",
-                         (cno,)), 0)
+        ctx.cur.execute("SELECT c.exp,s.exp FROM taiwan_cain.charac_info c "
+                        "JOIN taiwan_cain.charac_stat s USING(charac_no) WHERE c.charac_no=%s", (cno,))
+        info_exp, stat_exp = ctx.cur.fetchone()
+        ctx.ok("升级使用正累计经验", info_exp > 0)
+        ctx.check("两张表累计经验一致", info_exp, stat_exp)
 
         # 连点三次金币 +1000万：每次都在上一次的结果上加
         for i in range(1, 4):
@@ -873,7 +905,7 @@ def gm_qadd_input(ctx):
         if not _offline(ctx, mid):
             return
         _take_soft(ctx, snap, "taiwan_cain_2nd.inventory", "charac_no", cno, ("money", "coin"))
-        _take_soft(ctx, snap, "taiwan_cain.charac_info", "charac_no", cno, ("lev",))
+        _take_soft(ctx, snap, "taiwan_cain.charac_info", "charac_no", cno, ("lev", "exp"))
         _take_soft(ctx, snap, "taiwan_cain.charac_stat", "charac_no", cno, ("exp",))
         if not ctx.ok("选中第一个角色", _select_char(ctx, cno)):
             return

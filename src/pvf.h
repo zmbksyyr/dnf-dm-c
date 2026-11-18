@@ -65,7 +65,7 @@ typedef struct {
     int   *ileaf;         // 与 items.key 平行：物品文件在 leafs 里的下标（懒建，-1=没有）
     IdTab  cre;          // creature/pet 定义编号，独立于物品 ID 空间
 
-    unsigned str_cp;     // stringtable 解码代码页（936/950）
+    unsigned str_cp;     // stringtable 解码代码页（UTF-8/936/950）
     int      opened;
 } Pvf;
 
@@ -75,6 +75,8 @@ void  pvf_decrypt(u8 *p, size_t n, u32 crc);              // 读：异或 + 右�
 void  pvf_encrypt(u8 *p, size_t n, u32 crc);              // 逆变换：左旋 6 位 + 异或（自检用）
 const Leaf *pvf_find(const Pvf *p, const char *path);
 int   pvf_read(const Pvf *p, const Leaf *lf, Buf *out);
+// The table starts at level 2 and stores accumulated experience.
+int   pvf_level_min_exp(const Pvf *p, int level, u32 *exp, Err err);
 
 typedef struct {
     u32  id;

@@ -119,25 +119,29 @@ int db_delete_all_mails(Db *d, const Charac *c, Err err) {
 }
 
 int db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *text, Err err) {
-    // 用配置的字符集写，别再手工切 latin1：letter.letter_text / send_charac_name 都是
-    // utf8 列，latin1 会话会把 UTF-8 字节当成 latin1 再转存，落库即双重编码；
-    // 且列上限按字符算，latin1 下一个汉字占 3 个字符，90 个汉字就被截到 255 个字符。
+    const char *body = text ? text : "", *from = sender ? sender : "GM";
+    if (strlen(body) > 255 || strlen(from) > 20 ||
+        !utf8_valid((const u8 *)body, (int)strlen(body)) || !utf8_valid((const u8 *)from, (int)strlen(from))) {
+        snprintf(err, ERRBUF, "邮件正文最多 255 字节、发件人最多 20 字节，须为 UTF-8 文字");
+        return 0;
+    }
     if (!set_names(d, db_cs_name(d->charset))) {
         snprintf(err, ERRBUF, "邮件字符集：%s", d->err);
         return 0;
     }
-    char *es = mysql_escape(&d->conn, sender ? sender : "GM");
-    char *et = mysql_escape(&d->conn, text ? text : "");
+    Str es = {0}, et = {0};
+    game_text_literal(&es, sender ? sender : "GM");
+    game_text_literal(&et, text ? text : "");
     Str s = {0};
     char ts[32];
     now_str(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S");
     str_catf(&s,
              "INSERT INTO taiwan_cain_2nd.letter "
              "(charac_no,send_charac_no,send_charac_name,letter_text,reg_date,stat) "
-             "VALUES (%u,0,'%s','%s','%s',1)",
-             c->no, es, et, ts);
-    free(es);
-    free(et);
+             "VALUES (%u,0,%s,%s,'%s',1)",
+             c->no, str_c(&es), str_c(&et), ts);
+    str_free(&es);
+    str_free(&et);
     int ok = run(d, &s);
     str_free(&s);
     if (!ok) snprintf(err, ERRBUF, "%s", d->err);
@@ -168,7 +172,8 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
     u64 letter_id = 0;
     if (!mail_insert_id(d, &letter_id, err)) goto fail;
     // 正文已经设置会话字符集；使用本连接的插入编号，不猜测“最新一封”。
-    char *es = mysql_escape(&d->conn, sender ? sender : "GM");
+    Str es = {0};
+    game_text_literal(&es, sender ? sender : "GM");
     Str s = {0};
 
     // 附件落点：普通物品 add_info 存数量；时装/宠物要先建一行再取 ui_id 作为 add_info
@@ -181,8 +186,8 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
                  "(charac_no,it_id,expire_date,obtain_from,reg_date,stat,jewel_socket) "
                  "VALUES (%u,%u,'9999-12-31 23:59:59',1,'%s',2,X'')",
                  c->no, g->id, ts0);
-        if (!run(d, &s)) { snprintf(err, ERRBUF, "建时装行：%s", d->err); str_free(&s); free(es); goto fail; }
-        if (!mail_insert_id(d, &add_info, err)) { str_free(&s); free(es); goto fail; }
+        if (!run(d, &s)) { snprintf(err, ERRBUF, "建时装行：%s", d->err); str_free(&s); str_free(&es); goto fail; }
+        if (!mail_insert_id(d, &add_info, err)) { str_free(&s); str_free(&es); goto fail; }
         str_clear(&s);
     } else if (creature_flag) {
         char ts0[32];
@@ -192,8 +197,8 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
                  "(charac_no,it_id,expire_date,reg_date,stat,item_lock_key,creature_type,stomach) "
                  "VALUES (%u,%u,'9999-12-31 23:59:59','%s',0,0,0,100)",
                  c->no, g->id, ts0);
-        if (!run(d, &s)) { snprintf(err, ERRBUF, "建宠物行：%s", d->err); str_free(&s); free(es); goto fail; }
-        if (!mail_insert_id(d, &add_info, err)) { str_free(&s); free(es); goto fail; }
+        if (!run(d, &s)) { snprintf(err, ERRBUF, "建宠物行：%s", d->err); str_free(&s); str_free(&es); goto fail; }
+        if (!mail_insert_id(d, &add_info, err)) { str_free(&s); str_free(&es); goto fail; }
         str_clear(&s);
     }
 
@@ -204,11 +209,11 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
              "(occ_time,send_charac_no,send_charac_name,receive_charac_no,amplify_option,amplify_value,"
              "seperate_upgrade,seal_flag,item_id,add_info,upgrade,gold,letter_id,avata_flag,creature_flag,"
              "endurance,unlimit_flag) "
-             "VALUES ('%s',0,'%s',%u,%u,%u,%u,%u,%u,%llu,%u,0,%llu,%d,%d,%u,1)",
-             ts, es, c->no, g->inc_type, g->inc_val, g->forge, g->seal, g->id,
+             "VALUES ('%s',0,%s,%u,%u,%u,%u,%u,%u,%llu,%u,0,%llu,%d,%d,%u,1)",
+             ts, str_c(&es), c->no, g->inc_type, g->inc_val, g->forge, g->seal, g->id,
              (unsigned long long)add_info, g->enhance,
              (unsigned long long)letter_id, avata_flag, creature_flag, g->dur);
-    free(es);
+    str_free(&es);
     int ok = run(d, &s);
     str_free(&s);
     if (!ok) {
@@ -282,7 +287,7 @@ int db_list_pets(Db *d, const Charac *c, Vec *out, Err err) {
         p->it_id = (u32)my_u64(&r, i, 1, 0);
         p->type = (int)my_i64(&r, i, 2, 0);
         p->stomach = (int)my_i64(&r, i, 3, 0);
-        cp_text(p->name, sizeof(p->name), &r, i, 4);
+        cp_game_text(p->name, sizeof(p->name), &r, i, 4);
         cp_text(p->expire, sizeof(p->expire), &r, i, 5);
     }
     my_free(&r);
@@ -290,20 +295,16 @@ int db_list_pets(Db *d, const Charac *c, Vec *out, Err err) {
 }
 
 int db_set_pet_name(Db *d, u32 ui_id, const char *name, Err err) {
-    // name 是 varchar(12) 的 utf8(mb3) 列：4 字节字符进不去，超长会被静默截断。
-    // 与 db_set_name 一样先挡 4 字节，再靠回读确认落库内容。
-    if (name)
-        for (const unsigned char *p = (const unsigned char *)name; *p; p++)
-            if (*p >= 0xF0) {
-                snprintf(err, ERRBUF, "名字里不能有 emoji 等 4 字节字符");
-                return 0;
-            }
-    set_names(d, db_cs_name(d->charset));
+    if (!name || strlen(name) > 12 || !utf8_valid((const u8 *)name, (int)strlen(name))) {
+        snprintf(err, ERRBUF, "宠物名最多 12 字节，且必须为 UTF-8 文字");
+        return 0;
+    }
+    if (!set_names(d, db_cs_name(d->charset))) { snprintf(err, ERRBUF, "%s", d->err); return 0; }
     if (!db_tx_begin(d, err)) return 0;
-    char *e = mysql_escape(&d->conn, name);
-    Str s = {0};
-    str_catf(&s, "UPDATE taiwan_cain_2nd.creature_items SET name='%s' WHERE ui_id=%u", e, ui_id);
-    free(e);
+    Str s = {0}, value = {0};
+    game_text_literal(&value, name);
+    str_catf(&s, "UPDATE taiwan_cain_2nd.creature_items SET name=%s WHERE ui_id=%u", str_c(&value), ui_id);
+    str_free(&value);
     int ok = run(d, &s);
     str_free(&s);
     if (!ok) {
@@ -315,7 +316,7 @@ int db_set_pet_name(Db *d, u32 ui_id, const char *name, Err err) {
     Str q = {0};
     MyResult r = {0};
     str_catf(&q, "SELECT name FROM taiwan_cain_2nd.creature_items WHERE ui_id=%u", ui_id);
-    if (select1(d, &q, &r) && r.nrow) cp_text(got, sizeof(got), &r, 0, 0);
+    if (select1(d, &q, &r) && r.nrow) cp_game_text(got, sizeof(got), &r, 0, 0);
     my_free(&r);
     str_free(&q);
     if (strcmp(got, name) != 0) {

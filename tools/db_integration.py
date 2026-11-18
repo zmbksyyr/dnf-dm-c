@@ -18,7 +18,7 @@ import pymysql
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = Path(os.environ.get("DNF_GM_BUILD", ROOT.parent / "_build" / "DNF_GM_C"))
-OUT = ROOT.parent / "_build" / "audit"
+OUT = Path(os.environ.get("DNF_GM_AUDIT", ROOT.parent / "_build" / "audit"))
 PROBE = OUT / "db_probe.exe"
 TEST_NO = 2000000001
 
@@ -38,12 +38,12 @@ def settings():
 def build():
     OUT.mkdir(parents=True, exist_ok=True)
     zig = os.environ.get("ZIG") or shutil.which("zig") or r"C:\zig\zig.exe"
-    sources = ["db", "db_mail", "db_admin", "db_bubble", "mysql", "util", "zlib", "item"]
+    sources = ["db", "db_mail", "db_admin", "db_bubble", "mysql", "util", "zlib", "item", "pvf"]
     cmd = [zig, "cc", "-target", "x86_64-windows-gnu", "-std=c11", "-O2",
            "-DUNICODE", "-D_UNICODE", "-Wall", "-Wextra", "-Wshadow", "-Wconversion",
            "-Wpedantic", "-Werror", "-Isrc", "tools/db_probe.c"]
     cmd += ["src/" + s + ".c" for s in sources]
-    cmd += ["-lws2_32", "-luser32", "-ladvapi32", "-o", str(PROBE)]
+    cmd += ["-lws2_32", "-luser32", "-lshell32", "-ladvapi32", "-o", str(PROBE)]
     subprocess.run(cmd, cwd=ROOT, check=True)
 
 
@@ -76,6 +76,24 @@ class DataTests(unittest.TestCase):
     def one(self, sql, args=None):
         self.cur.execute(sql, args)
         return self.cur.fetchone()[0]
+
+    def test_original_game_name_encoding_and_search(self):
+        before = self.one("SELECT HEX(charac_name) FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,))
+        name = "编码测试甲"
+        try:
+            r = self.probe("rename", self.cno, self.mid, name)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            wire = self.one("SELECT HEX(CONVERT(charac_name USING latin1)) FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,))
+            self.assertEqual(bytes.fromhex(wire), name.encode())
+            r = self.probe("read-name", self.cno, self.mid)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("name=" + name, r.stdout)
+            r = self.probe("search-name", name)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(str(self.cno) + " " + name, r.stdout)
+        finally:
+            self.cur.execute("UPDATE taiwan_cain.charac_info SET charac_name=UNHEX(%s) WHERE charac_no=%s", (before, self.cno))
+            self.assertEqual(self.one("SELECT HEX(charac_name) FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,)), before)
 
     @contextlib.contextmanager
     def trigger(self, table, event, body):
@@ -191,8 +209,8 @@ class DataTests(unittest.TestCase):
         table = "d_taiwan.member_punish_info"
         self.cur.execute("SELECT * FROM " + table + " WHERE m_id=%s", (self.mid,))
         rows = self.cur.fetchall()
-        self.cur.execute("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,))
-        level = self.cur.fetchone()[0]
+        self.cur.execute("SELECT lev,exp FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,))
+        level, info_exp = self.cur.fetchone()
         exp = self.one("SELECT exp FROM taiwan_cain.charac_stat WHERE charac_no=%s", (self.cno,))
         try:
             if not rows:
@@ -201,12 +219,70 @@ class DataTests(unittest.TestCase):
                 r = self.probe("level", self.cno, self.mid, 42 if level != 42 else 43)
             self.assertNotEqual(r.returncode, 0)
             self.assertEqual(self.one("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,)), level)
+            self.assertEqual(self.one("SELECT exp FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,)), info_exp)
             self.assertEqual(self.one("SELECT exp FROM taiwan_cain.charac_stat WHERE charac_no=%s", (self.cno,)), exp)
         finally:
-            self.cur.execute("UPDATE taiwan_cain.charac_info SET lev=%s WHERE charac_no=%s", (level, self.cno))
+            self.cur.execute("UPDATE taiwan_cain.charac_info SET lev=%s,exp=%s WHERE charac_no=%s", (level, info_exp, self.cno))
             self.cur.execute("UPDATE taiwan_cain.charac_stat SET exp=%s WHERE charac_no=%s", (exp, self.cno))
             if not rows:
                 self.cur.execute("DELETE FROM " + table + " WHERE m_id=%s", (self.mid,))
+
+    @contextlib.contextmanager
+    def level_fixture(self):
+        self.cur.execute("SELECT lev,exp FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,))
+        level, info_exp = self.cur.fetchone()
+        stat_exp = self.one("SELECT exp FROM taiwan_cain.charac_stat WHERE charac_no=%s", (self.cno,))
+        try:
+            yield level, info_exp, stat_exp
+        finally:
+            self.cur.execute("UPDATE taiwan_cain.charac_info SET lev=%s,exp=%s WHERE charac_no=%s",
+                             (level, info_exp, self.cno))
+            self.cur.execute("UPDATE taiwan_cain.charac_stat SET exp=%s WHERE charac_no=%s", (stat_exp, self.cno))
+
+    def test_level_updates_both_experience_columns(self):
+        # An empty punishment fixture avoids clearing any existing account penalties.
+        with self.level_fixture():
+            r = self.probe("level-exp", self.cno, TEST_NO, 60, 150172894)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.cur.execute("SELECT c.lev,c.exp,s.exp FROM taiwan_cain.charac_info c "
+                             "JOIN taiwan_cain.charac_stat s USING(charac_no) WHERE c.charac_no=%s", (self.cno,))
+            self.assertEqual(self.cur.fetchone(), (60, 150172894, 150172894))
+
+    def test_level_second_table_failure_rolls_back_first(self):
+        with self.level_fixture() as before:
+            with self.trigger("taiwan_cain.charac_stat", "UPDATE",
+                              "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit blocked experience'"):
+                r = self.probe("level-exp", self.cno, TEST_NO, 60, 150172894)
+            self.assertNotEqual(r.returncode, 0)
+            self.cur.execute("SELECT c.lev,c.exp,s.exp FROM taiwan_cain.charac_info c "
+                             "JOIN taiwan_cain.charac_stat s USING(charac_no) WHERE c.charac_no=%s", (self.cno,))
+            self.assertEqual(self.cur.fetchone(), before)
+
+    def test_level_out_of_range_never_clips_or_writes(self):
+        with self.level_fixture() as before:
+            for level, exp in ((0, 0), (128, 0), (60, -1), (94, 2147483648)):
+                r = self.probe("level-exp", self.cno, TEST_NO, level, exp)
+                self.assertNotEqual(r.returncode, 0, (level, exp, r.stdout))
+                self.cur.execute("SELECT c.lev,c.exp,s.exp FROM taiwan_cain.charac_info c "
+                                 "JOIN taiwan_cain.charac_stat s USING(charac_no) WHERE c.charac_no=%s", (self.cno,))
+                self.assertEqual(self.cur.fetchone(), before)
+
+    def test_offline_gate_rechecks_raw_account_status(self):
+        table = "taiwan_login.login_account_3"
+        self.assertEqual(self.one("SELECT COUNT(*) FROM " + table + " WHERE m_id=%s", (TEST_NO,)), 0)
+        try:
+            self.cur.execute("INSERT INTO " + table + " (m_id,login_status) VALUES (%s,0)", (TEST_NO,))
+            self.assertEqual(self.probe("offline", TEST_NO, TEST_NO).returncode, 0)
+            # A cached UI/offline count must never override a new login or transition.
+            for status in (1, 2):
+                self.cur.execute("UPDATE " + table + " SET login_status=%s WHERE m_id=%s", (status, TEST_NO))
+                r = self.probe("offline", TEST_NO, TEST_NO)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("未写入", r.stderr)
+            self.cur.execute("UPDATE " + table + " SET login_status=0 WHERE m_id=%s", (TEST_NO,))
+            self.assertEqual(self.probe("offline", TEST_NO, TEST_NO).returncode, 0)
+        finally:
+            self.cur.execute("DELETE FROM " + table + " WHERE m_id=%s", (TEST_NO,))
 
     def test_rename_no_backslash_escapes(self):
         name = self.one("SELECT charac_name FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,))
@@ -337,6 +413,27 @@ class DataTests(unittest.TestCase):
             found = [slots[i:i+296] for i in range(0,len(slots),296) if struct.unpack_from('<I',slots,i)[0] == new_no]
             self.assertEqual(len(found), 1)
             self.assertEqual(found[0][100], 99)
+
+    def test_clone_name_slot_uses_original_game_bytes(self):
+        before = self.one("SELECT HEX(charac_name) FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,))
+        plain = bytearray(296 * 4)
+        struct.pack_into('<I', plain, 0, self.cno)
+        try:
+            r = self.probe('rename', self.cno, self.mid, '编码克隆')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with self.clone_view(plain):
+                r = self.probe('clone', self.cno, self.mid)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                new_no = int(next(s.split('=')[1] for s in r.stdout.splitlines() if s.startswith('new_no=')))
+                name = bytes.fromhex(self.one('SELECT HEX(CONVERT(charac_name USING latin1)) FROM taiwan_cain.charac_info WHERE charac_no=%s', (new_no,)))
+                self.assertTrue(name.decode('utf8').startswith('编码克隆'))
+                blob = self.one('SELECT info FROM taiwan_cain.charac_view WHERE m_id=%s', (self.mid,))
+                slots = zlib.decompress(blob[4:])
+                found = [slots[i+4:i+24].split(b'\0')[0] for i in range(0, len(slots), 296)
+                         if struct.unpack_from('<I', slots, i)[0] == new_no]
+                self.assertEqual(found, [name])
+        finally:
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET charac_name=UNHEX(%s) WHERE charac_no=%s', (before, self.cno))
 
     def test_protocol_exact_packet_boundary(self):
         path = OUT / 'packet-boundary.sql'

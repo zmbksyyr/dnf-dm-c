@@ -2,7 +2,7 @@
 #include "pvf.h"
 
 #define XOR_KEY 0x81A79011u
-#define CACHE_MAGIC "PVFC8\0"   // 8：按 equipment type 区分宠物、宠物装备与时装
+#define CACHE_MAGIC "PVFC9\0"   // 9：文本区判码页，修正旧乱码缓存
 #define CACHE_MAGIC_LEN 6
 
 // ---------------- 解密 ----------------
@@ -248,23 +248,32 @@ static void load_stringtable(Pvf *p) {
     if (!pvf_read(p, lf, &d) || d.n < 8) { buf_free(&d); return; }
 
     u32 count = rd32(d.p);
-    if (count > 4000000 || 4 + (size_t)count * 8 > d.n) { buf_free(&d); return; }
+    if (count > 4000000 || 4 + ((size_t)count + 1) * 4 > d.n) { buf_free(&d); return; }
 
-    p->str_cp = cn_codepage((const char *)d.p, (int)(d.n < 262144 ? d.n : 262144));
-
-    // 索引里的 s/e 是相对「表数据起点(data+4)」的偏移，flat 是连续 offsets 数组
+    // count strings use count+1 contiguous offsets relative to data+4.
+    // The old count*2 also interpreted the text itself as extra offsets.
     const u8 *flat = d.p + 4;
     size_t flat_len = d.n - 4;
-    int nflat = (int)(flat_len / 4);
-    int nstr = (int)(count * 2);
-    if (nstr > nflat - 1) nstr = nflat - 1;
+    int nstr = (int)count;
+    Buf sample = {0};
+    int stride = nstr / 4096;
+    if (stride < 1) stride = 1;
+    for (int i = 0; i < nstr && sample.n < 262144; i += stride) {
+        u32 start = rd32(flat + i * 4), end = rd32(flat + (i + 1) * 4);
+        if (start < ((size_t)count + 1) * 4 || start >= end || end > flat_len ||
+            end - start + 1 > 262144 - sample.n) continue;
+        buf_put(&sample, flat + start, end - start);
+        buf_putc(&sample, '\n');
+    }
+    p->str_cp = cn_codepage((const char *)sample.p, (int)sample.n);
+    buf_free(&sample);
 
     StabBuild sb;
     sb_init(&sb, &p->strings);
     Str tmp = {0};
     for (int i = 0; i < nstr; i++) {
         u32 s = rd32(flat + i * 4), e = rd32(flat + (i + 1) * 4);
-        if (s >= e || e > flat_len) { sb_add(&sb, "", 0); continue; }
+        if (s < ((size_t)count + 1) * 4 || s >= e || e > flat_len) { sb_add(&sb, "", 0); continue; }
         utf8_from_cp((const char *)flat + s, (int)(e - s), p->str_cp, &tmp);
         sb_add(&sb, str_c(&tmp), tmp.n);
     }
@@ -1038,6 +1047,27 @@ int pvf_open(Pvf *p, const char *path, PvfProg prog, Err err) {
     save_cache(p);
     if (prog.pct) *prog.pct = 100;
     p->opened = 1;
+    return 1;
+}
+
+int pvf_level_min_exp(const Pvf *p, int level, u32 *exp, Err err) {
+    if (!p || !p->opened || !p->exp || p->nexp < 1) {
+        snprintf(err, ERRBUF, "请先加载与服务端一致的 PVF，再修改等级");
+        return 0;
+    }
+    if (!exp || level < 1 || level > 127 || level > p->nexp + 1) {
+        snprintf(err, ERRBUF, "PVF 没有可用的 %d 级经验", level);
+        return 0;
+    }
+    u32 value = 0;
+    for (int i = 0; i < level - 1; ++i) {
+        if (p->exp[i] <= value || p->exp[i] > 2147483647u) {
+            snprintf(err, ERRBUF, "%d 级经验曲线重置或超出服务端有符号字段范围", i + 2);
+            return 0;
+        }
+        value = p->exp[i];
+    }
+    *exp = value;
     return 1;
 }
 

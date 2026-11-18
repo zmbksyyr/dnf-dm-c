@@ -157,6 +157,23 @@ void cp_text(char *dst, int cap, const MyResult *r, int row, int col) {
     snprintf(dst, (size_t)cap, "%s", s);
 }
 
+// Game-owned display fields may use UTF-8 bytes stored through latin1.
+// Keep cp_text/raw backup, clone and verification paths byte preserving.
+void cp_game_text(char *dst, int cap, const MyResult *r, int row, int col) {
+    Str text = {0};
+    decode_game_text(my_text(r, row, col), &text);
+    cp_str(dst, cap, str_c(&text));
+    str_free(&text);
+}
+
+void game_text_literal(Str *sql, const char *text) {
+    if (!text) text = "";
+    if (!*text) { str_cat(sql, "''"); return; }
+    str_cat(sql, "CONVERT(_latin1 0x");
+    hex_str(text, strlen(text), sql);
+    str_cat(sql, " USING utf8)");
+}
+
 // 连接字符集。db_open 时记下，写备份头时要用 —— 头里声明的必须跟连接实际用的
 // 一致，否则还原时文件里的 SET NAMES 会把连接切到另一个字符集上去。
 static int s_cs = 45;
@@ -185,7 +202,7 @@ int  db_alive(const Db *d) { return mysql_alive(&d->conn); }
 // 账号名 / 在线列位各不相同，留在各自站点处理。
 static void charac_core(Charac *c, const MyResult *r, int i) {
     c->no = (u32)my_u64(r, i, 0, 0);
-    cp_text(c->name, sizeof(c->name), r, i, 1);
+    cp_game_text(c->name, sizeof(c->name), r, i, 1);
     c->job = (int)my_i64(r, i, 2, 0);
     c->grow = (int)my_i64(r, i, 3, 0);
     c->lev = (int)my_i64(r, i, 4, 0);
@@ -205,9 +222,14 @@ int db_list_chars(Db *d, Vec *out, int limit, const char *kw, Err err) {
              " WHERE c.delete_flag=0");
     if (kw && *kw) {
         char *e = mysql_escape(&d->conn, kw);
+        Str legacy = {0};
+        utf8_from_cp(kw, (int)strlen(kw), 1252, &legacy);
+        char *le = mysql_escape(&d->conn, str_c(&legacy));
         // 前导通配 LIKE 全表扫：角色表量小可接受；大表改前缀匹配/全文索引
         str_catf(&s, " AND (c.charac_name LIKE '%%%s%%' OR a.accountname LIKE '%%%s%%'"
-                     " OR c.charac_no='%s')", e, e, e);
+                     " OR c.charac_no='%s' OR c.charac_name LIKE '%%%s%%')", e, e, e, le);
+        free(le);
+        str_free(&legacy);
         free(e);
     }
     str_catf(&s, " ORDER BY c.charac_no DESC LIMIT %d", limit);
@@ -237,9 +259,14 @@ u32 db_count_chars(Db *d, const char *kw) {
                 " LEFT JOIN d_taiwan.accounts a ON a.UID=c.m_id WHERE c.delete_flag=0");
     if (kw && *kw) {
         char *e = mysql_escape(&d->conn, kw);
+        Str legacy = {0};
+        utf8_from_cp(kw, (int)strlen(kw), 1252, &legacy);
+        char *le = mysql_escape(&d->conn, str_c(&legacy));
         // 前导通配 LIKE 全表扫：角色表量小可接受；大表改前缀匹配/全文索引
         str_catf(&s, " AND (c.charac_name LIKE '%%%s%%' OR a.accountname LIKE '%%%s%%'"
-                     " OR c.charac_no='%s')", e, e, e);
+                     " OR c.charac_no='%s' OR c.charac_name LIKE '%%%s%%')", e, e, e, le);
+        free(le);
+        str_free(&legacy);
         free(e);
     }
     MyResult r = {0};
@@ -398,6 +425,21 @@ int db_is_online(Db *d, u32 mid) {
     return on;
 }
 
+int db_require_offline(Db *d, u32 mid, Err err) {
+    Str s = {0};
+    MyResult r = {0};
+    str_catf(&s, "SELECT COALESCE(MAX(login_status),0) FROM taiwan_login.login_account_3 WHERE m_id=%u", mid);
+    int ok = select1(d, &s, &r);
+    if (!ok) snprintf(err, ERRBUF, "无法确认账号已离线，未写入：%s", d->err);
+    else if (my_i64(&r, 0, 0, 1) != 0) {
+        snprintf(err, ERRBUF, "账号在线或正在退出，未写入；请完成退出游戏后重试，避免被服务端存档覆盖");
+        ok = 0;
+    }
+    my_free(&r);
+    str_free(&s);
+    return ok;
+}
+
 // ---------------- 数据容器 ----------------
 void db_free_data(CharData *cd) {
     blob_free(&cd->inv);
@@ -463,7 +505,7 @@ typedef struct {
 static const DbNeed kNeed[] = {
     // 角色主表：左栏、GM 表单、等级/职业/改名全在这
     {"taiwan_cain.charac_info",
-     "charac_no,charac_name,lev,job,grow_type,delete_flag,inven_weight,fatigue,max_fatigue", 0},
+     "charac_no,charac_name,lev,exp,job,grow_type,delete_flag,inven_weight,fatigue,max_fatigue", 0},
     {"taiwan_cain.charac_stat", "charac_no,exp,add_slot_flag,expert_job_exp,used_fatigue", 0},
     // 容器：六个 blob 里四个在这两张表
     {"taiwan_cain_2nd.inventory",
@@ -792,7 +834,7 @@ int db_read_charac(Db *d, u32 no, Charac *out, Err err) {
         snprintf(err, ERRBUF, "角色 %u 不存在", no);
         return 0;
     }
-    cp_text(out->name, sizeof(out->name), &r, 0, 0);
+    cp_game_text(out->name, sizeof(out->name), &r, 0, 0);
     out->job = (int)my_i64(&r, 0, 1, 0);
     out->grow = (int)my_i64(&r, 0, 2, 0);
     out->lev = (int)my_i64(&r, 0, 3, 0);
@@ -994,17 +1036,12 @@ int db_save_blob(Db *d, const Charac *c, const char *table, const char *field,
 // ---------------- 基础信息 ----------------
 int db_name_taken(Db *d, const char *name, u32 except_no) {
     int taken = 0;
-    // 用配置里的字符集（默认 45=utf8mb4），和读路径一致。早先这里切到 latin1，
-    // 理由是「写 UTF-8 字节流」；charac_name 实际是 varchar(20) CHARACTER SET utf8，
-    // 服务端会按 latin1 逐字节解释我们送进去的 UTF-8，再转成 utf8 存 —— 双重编码。
-    // 写按 latin1、读按 utf8mb4，两边不可能同时成立：库里正确存着「测试角色」时
-    // 这条查询恒不命中，重名检查形同虚设。
-    // 每次都显式设一遍：邮件/管理员那几条路径会把会话停在 latin1 或 utf8mb3。
     if (!set_names(d, db_cs_name(d->charset))) return 0;
     char *e = mysql_escape(&d->conn, name);
     Str s = {0};
     MyResult r = {0};
-    str_catf(&s, "SELECT charac_no FROM taiwan_cain.charac_info WHERE charac_name='%s'", e);
+    str_catf(&s, "SELECT charac_no FROM taiwan_cain.charac_info WHERE charac_name='%s' OR charac_name=", e);
+    game_text_literal(&s, name);
     free(e);
     if (select1(d, &s, &r)) {
         for (int i = 0; i < r.nrow; i++)
@@ -1016,37 +1053,30 @@ int db_name_taken(Db *d, const char *name, u32 except_no) {
 }
 
 int db_set_name(Db *d, const Charac *c, const char *name, Err err) {
-    // 4 字节 UTF-8（emoji、扩展区汉字）根本进不了 charac_name：列是
-    // varchar(20) CHARACTER SET utf8（mb3）。会话是 utf8mb4 + 非严格模式时
-    // MySQL 不报错，而是把那个字符换成 '?'，于是「改名 完成」的提示和库里
-    // 存的东西不是一回事；撞上已存在的同形名字还会弹一句与输入无关的 1062。
-    // 判首字节就够：>= 0xF0 只可能是 4 字节序列的头（续字节落在 0x80..0xBF）。
-    if (name)
-        for (const unsigned char *p = (const unsigned char *)name; *p; p++)
-            if (*p >= 0xF0) {
-                snprintf(err, ERRBUF,
-                         "名字里不能有 emoji 等 4 字节字符（charac_name 按 3 字节存）");
-                return 0;
-            }
-    // 与读路径用同一个字符集（db_cs_name(s_cs)），别再手工切 latin1：
-    // 那样写进去的是双重编码的乱码，工具自己下一次读都还原不回来；而且列上限
-    // 按「字符」算，切到 latin1 后一个汉字占 3 个字符，7 个汉字（21 字节）就会被
-    // 截成 20 个字符、末字切一半。用配置的字符集，21 字节只是 7 个字符，不会被截。
-    // 显式设一遍而不是「假定会话是对的」：邮件/管理员那几条路径会把会话停在
-    // latin1 或 utf8mb3，不设就会按上一个动作的字符集转义，同样写出乱码。
+    // Original ELF reads/writes UTF-8 name bytes through latin1. A normal UTF-8
+    // SQL value looks correct to a UTF-8 client but becomes '?' in that session.
+    // The wire slot and legacy varchar both allow at most 20 source bytes.
+    if (!name || !utf8_valid((const u8 *)name, (int)strlen(name)) || strlen(name) > 20) {
+        snprintf(err, ERRBUF, "角色名最多 20 字节，且必须为 UTF-8 中文或文字");
+        return 0;
+    }
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        if (*p >= 0xf0) {
+            snprintf(err, ERRBUF, "名字里不能有 emoji 等 4 字节字符");
+            return 0;
+        }
+    }
     if (!set_names(d, db_cs_name(d->charset))) {
         snprintf(err, ERRBUF, "设置连接字符集：%s", d->err);
         return 0;
     }
-    // 写和回读放在一个事务里。非严格模式下，超长（列上限按字符算，20 个字符）
-    // 和库不支持的字符都是静默处理，客户端从返回值上看不出任何异常 ——
-    // 只有读回来比对才知道库里到底是什么。不一致就整条回滚，名字保持原样。
     if (!db_tx_begin(d, err)) return 0;
-    char *e = mysql_escape(&d->conn, name);
+    Str value = {0};
+    game_text_literal(&value, name);
     int ok = db_exec(d, "改角色名", "taiwan_cain.charac_info", "charac_no", c->no, err,
-                     "UPDATE taiwan_cain.charac_info SET charac_name='%s' WHERE charac_no=%u",
-                     e ? e : "", c->no);
-    free(e);
+                     "UPDATE taiwan_cain.charac_info SET charac_name=%s WHERE charac_no=%u",
+                     str_c(&value), c->no);
+    str_free(&value);
     if (!ok) {
         db_tx_rollback(d);
         return 0;
@@ -1055,7 +1085,7 @@ int db_set_name(Db *d, const Charac *c, const char *name, Err err) {
     MyResult r = {0};
     char got[256] = "";
     str_catf(&q, "SELECT charac_name FROM taiwan_cain.charac_info WHERE charac_no=%u", c->no);
-    if (select1(d, &q, &r) && r.nrow) cp_text(got, sizeof(got), &r, 0, 0);
+    if (select1(d, &q, &r) && r.nrow) cp_game_text(got, sizeof(got), &r, 0, 0);
     my_free(&r);
     str_free(&q);
     if (strcmp(got, name) != 0) {
@@ -1073,21 +1103,18 @@ int db_set_job(Db *d, const Charac *c, int job, int grow, Err err) {
                    job, grow, c->no);
 }
 
-// exp < 0 表示「不知道该写多少」，此时只动等级、不动经验，
-// 免得 PVF 没加载时把人家的经验清零。
-// 三句写在一个事务里：等级改了经验没改，是最难解释的一种中间态。
+// 等级和累计经验同步更新；PVF 下标和字段范围由调用方校准。
 int db_set_lev(Db *d, const Charac *c, int lev, i64 exp, Err err) {
-    // charac_stat.exp 是 int(11)：PVF 里 94 级往上的经验就超过 2^31 了，
-    // 原样写会被非严格模式静默截成 2147483647、严格模式直接报错。
-    // 夹到列上限，至少写进去的是个确定值。
-    if (exp > 2147483647LL) exp = 2147483647LL;
+    if (lev < 1 || lev > 127 || exp < 0 || exp > 2147483647LL) {
+        snprintf(err, ERRBUF, "等级或累计经验超出原版服务端字段范围，未写入");
+        return 0;
+    }
     if (!db_tx_begin(d, err)) return 0;
     if (!db_exec(d, "改等级", "taiwan_cain.charac_info", "charac_no", c->no, err,
-                 "UPDATE taiwan_cain.charac_info SET lev=%d WHERE charac_no=%u", lev, c->no))
+                 "UPDATE taiwan_cain.charac_info SET lev=%d,exp=%llu WHERE charac_no=%u",
+                 lev, (unsigned long long)exp, c->no))
         goto fail;
-    // exp 来自 Ctx.u1（u64，恒为 0），不可能为负；exp>=0 恒真，仅作防御。
-    // 见 db.h：要"保留经验"不能靠传负，应另加标志位。
-    if (exp >= 0 && !db_exec(d, "改经验", "taiwan_cain.charac_stat", "charac_no", c->no, err,
+    if (!db_exec(d, "改经验", "taiwan_cain.charac_stat", "charac_no", c->no, err,
                              "UPDATE taiwan_cain.charac_stat SET exp=%llu WHERE charac_no=%u",
                              (unsigned long long)exp, c->no))
         goto fail;

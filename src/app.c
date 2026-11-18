@@ -374,7 +374,7 @@ static int w_write(void *argv, Err err) {
     memset(&who, 0, sizeof(who));
     who.no = c->cno;
     who.mid = c->mid;
-    int ok = db_tx_begin(&g.db, err);
+    int ok = db_require_offline(&g.db, who.mid, err) && db_tx_begin(&g.db, err);
     for (int p = 0; ok && p < 6; p++) {
         if (!(c->mask & (1u << p)) || !c->has[p]) continue;
         if (!db_save_blob(&g.db, &who, app_page_table(p), app_page_field(p), c->snap[p].p,
@@ -1099,8 +1099,7 @@ int app_item_slot_ok(int page, int slot, u8 type) {
 static int w_grant(void *ctx, Err err) {
     GrantCtx *c = (GrantCtx *)ctx;
     // 硬校验：UI 线程的在线位是缓存，可能过期；发放前在 job 线程里查一次真值
-    if (!c->by_mail && db_is_online(&g.db, g.cur.mid)) {
-        snprintf(err, ERRBUF, "角色在线，请改用「邮件」发放");
+    if (!c->by_mail && !db_require_offline(&g.db, g.cur.mid, err)) {
         return 0;
     }
     if (c->by_mail) {

@@ -49,6 +49,16 @@ int main(int argc, char **argv) {
                 buf_free(&data);
             }
         }
+        const IdTab *tables[] = {&p.jobs, &p.cre};
+        const char *labels[] = {"JOB", "CREATURE"};
+        for (int k = 0; k < COUNT_OF(tables); k++) {
+            const IdTab *table = tables[k];
+            for (int i = 0; i < table->n; i++) {
+                fprintf(f, "%s\t%u\t", labels[k], table->key[i]);
+                hex_text(f, idtab_get(table, table->key[i]));
+                fputc('\n', f);
+            }
+        }
         Npk npk = {0};
         if (argc == 5) {
             start = now_ms();

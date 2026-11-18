@@ -91,6 +91,9 @@ static int char_do(void *ctx, Err err) {
     memset(&who, 0, sizeof(who));
     who.no = c->cno;
     who.mid = c->mid;
+    // 排队期间可能重新登录；执行时复查账号，不能只依赖 UI 的轮询快照。
+    if (c->kind >= K_RENAME && c->kind <= K_PVP &&
+        !db_require_offline(&g.db, who.mid, err)) return 0;
     switch (c->kind) {
         case K_RENAME:
             // 重名检查放在任务线程里做：UI 线程直接查库会和后台作业抢同一条连接

@@ -2,6 +2,8 @@
 // Connection parameters come from the test runner's environment, never argv.
 #include "db.h"
 #include "item.h"
+#include "pvf.h"
+#include <shellapi.h>
 
 static int item_codec(const char *path) {
     Buf f = {0};
@@ -44,7 +46,7 @@ static void progress(int pct) {
     if (cancel && pct >= atoi(cancel)) db_cancel_request();
 }
 
-int main(int argc, char **argv) {
+static int run_probe(int argc, char **argv) {
     if (argc < 2) return 2;
     if (argc == 3 && !strcmp(argv[1], "item-codec")) return item_codec(argv[2]);
     Db d;
@@ -97,10 +99,69 @@ int main(int argc, char **argv) {
         ok = db_delete_mail(&d, (u64)strtoull(argv[2], NULL, 10), err);
     } else if (!strcmp(argv[1], "mail-delete-all") && argc == 3) {
         ok = db_delete_all_mails(&d, &c, err);
+    } else if (!strcmp(argv[1], "read-name") && argc == 4) {
+        ok = db_read_charac(&d, c.no, &c, err);
+        if (ok) printf("name=%s\n", c.name);
+    } else if (!strcmp(argv[1], "search-name") && argc == 3) {
+        Vec found;
+        vec_init(&found, sizeof(Charac));
+        ok = db_list_chars(&d, &found, 100, argv[2], err);
+        for (int i = 0; ok && i < found.n; i++) {
+            const Charac *row = VEC_AT(&found, Charac, i);
+            printf("%u %s\n", row->no, row->name);
+        }
+        vec_free(&found);
     } else if (!strcmp(argv[1], "rename") && argc == 5) {
         ok = db_set_name(&d, &c, argv[4], err);
     } else if (!strcmp(argv[1], "level") && argc == 5) {
         ok = db_set_lev(&d, &c, atoi(argv[4]), 0, err);
+    } else if (!strcmp(argv[1], "level-exp") && argc == 6) {
+        ok = db_set_lev(&d, &c, atoi(argv[4]), (i64)strtoll(argv[5], NULL, 10), err);
+    } else if (!strcmp(argv[1], "level-pvf") && argc == 6) {
+        Pvf p = {0};
+        PvfProg prog = {0};
+        u32 exp = 0;
+        ok = pvf_open(&p, argv[5], prog, err) &&
+             pvf_level_min_exp(&p, atoi(argv[4]), &exp, err) &&
+             db_set_lev(&d, &c, atoi(argv[4]), exp, err);
+        if (ok) printf("level=%d accumulated_exp=%u\n", atoi(argv[4]), exp);
+        pvf_close(&p);
+    } else if (!strcmp(argv[1], "scalars") && argc == 4) {
+        ok = db_set_money(&d, &c, 1234567, err) && db_set_coin(&d, &c, 17, err) &&
+             db_set_fatigue(&d, &c, err) && db_set_sp(&d, &c, 1234, 1234, 12, 12, err) &&
+             db_set_qp(&d, &c, 34, err) && db_set_cera(&d, &c, 4567, 5678, err);
+    } else if (!strcmp(argv[1], "coin") && argc == 5) {
+        ok = db_set_coin(&d, &c, (u64)strtoull(argv[4], NULL, 10), err);
+    } else if (!strcmp(argv[1], "online") && argc == 4) {
+        printf("online=%d\n", db_is_online(&d, c.mid));
+        ok = 1;
+    } else if (!strcmp(argv[1], "offline") && argc == 4) {
+        ok = db_require_offline(&d, c.mid, err);
+    } else if (!strcmp(argv[1], "item-slot") && argc == 8) {
+        CharData data = {0};
+        Buf packed = {0};
+        int slot = atoi(argv[4]);
+        ok = db_load_data(&d, &c, &data, err);
+        if (ok && (slot < 0 || slot >= data.inv.n || !data.inv.ok)) {
+            snprintf(err, ERRBUF, "invalid inventory slot");
+            ok = 0;
+        }
+        if (ok) {
+            Item *it = &data.inv.items[slot];
+            item_set_id(it, (u32)strtoul(argv[5], NULL, 10));
+            item_set_type(it, (u8)atoi(argv[6]));
+            item_set_num(it, (u32)strtoul(argv[7], NULL, 10));
+            ok = blob_pack(&data.inv, &packed) &&
+                 db_save_blob(&d, &c, "taiwan_cain_2nd.inventory", "inventory", packed.p, packed.n, err);
+        }
+        buf_free(&packed);
+        db_free_data(&data);
+    } else if (!strcmp(argv[1], "item-mail") && argc == 6) {
+        GrantItem g = {0};
+        g.id = (u32)strtoul(argv[4], NULL, 10);
+        g.num = (u32)strtoul(argv[5], NULL, 10);
+        g.type = IT_MATERIAL;
+        ok = db_send_item_mail_ex(&d, &c, "GM", "GM host comparison", &g, 0, 0, err);
     } else if (!strcmp(argv[1], "bubble") && (argc == 9 || argc == 11)) {
         BubbleCfg cfg = {0};
         cfg.target = atoi(argv[2]); cfg.tno = (u32)strtoul(argv[3], NULL, 10);
@@ -129,4 +190,23 @@ int main(int argc, char **argv) {
     if (ok) printf("OK tables=%d rows=%llu\n", nt, (unsigned long long)nr);
     else fprintf(stderr, "%s\n", err[0] ? err : "operation failed");
     return ok ? 0 : 1;
+}
+
+// The narrow CRT argv uses the Windows ANSI page. Tests must send exactly the
+// same UTF-8 strings as the Win32 UI, including names and Unicode file paths.
+int main(void) {
+    int argc = 0;
+    WCHAR **wide = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!wide) return 2;
+    char **args = (char **)xalloc((size_t)argc * sizeof(char *));
+    for (int i = 0; i < argc; i++) {
+        int bytes = WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, NULL, 0, NULL, NULL);
+        args[i] = (char *)xalloc((size_t)bytes);
+        WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, args[i], bytes, NULL, NULL);
+    }
+    int status = run_probe(argc, args);
+    for (int i = 0; i < argc; i++) free(args[i]);
+    free(args);
+    LocalFree(wide);
+    return status;
 }

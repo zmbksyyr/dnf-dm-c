@@ -13,6 +13,21 @@ import time
 
 from PIL import Image
 
+def game_storage(text):
+    # MySQL latin1 follows Windows-1252, including its undefined control bytes.
+    return ''.join(bytes([b]).decode('cp1252') if b not in (0x81, 0x8d, 0x8f, 0x90, 0x9d) else chr(b)
+                   for b in text.encode('utf8'))
+
+
+def game_text(text):
+    try:
+        raw = b''.join(bytes([ord(ch)]) if ord(ch) in (0x81, 0x8d, 0x8f, 0x90, 0x9d)
+                       else ch.encode('cp1252') for ch in text)
+        return raw.decode('utf8')
+    except (UnicodeError, TypeError):
+        return text
+
+
 u = ctypes.windll.user32
 g = ctypes.windll.gdi32
 k32 = ctypes.windll.kernel32
@@ -293,10 +308,15 @@ def wait_until(fn, timeout=30.0, step=0.5):
 
 
 def kill_stale():
-    """跑 GUI 之前清场：残留实例会占住 exe 和数据库。"""
-    subprocess.run(["taskkill", "/F", "/IM", "DNF_GM.exe"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(0.6)
+    """Only terminate stale copies of this explicit test build, never a user's GM."""
+    exe_literal = os.path.abspath(EXE).replace("'", "''")
+    command = ("Get-CimInstance Win32_Process -Filter \"name='DNF_GM.exe'\" | "
+               "Where-Object { $_.ExecutablePath -eq '" + exe_literal + "' } | "
+               "ForEach-Object { Stop-Process -Id $_.ProcessId }")
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   creationflags=0x08000000, check=True)
+    time.sleep(0.2)
 
 
 # ---------------------------------------------------------------- 数据库

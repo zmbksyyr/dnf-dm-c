@@ -254,7 +254,7 @@ def _char_row(ctx, cno):
     """(名字, HEX, CHAR_LENGTH, LENGTH)：字节级比较够看出双重编码/截断。"""
     r = ctx.q("SELECT charac_name,HEX(charac_name),CHAR_LENGTH(charac_name),"
               "LENGTH(charac_name) FROM taiwan_cain.charac_info WHERE charac_no=%s", (cno,))
-    return r[0] if r else None
+    return (core.game_text(r[0][0]), *r[0][1:]) if r else None
 
 
 def _char_name(ctx, cno):
@@ -266,7 +266,7 @@ def _char_fields(ctx, cno):
     """(名字, HEX, lev, job, grow_type)：改名/改等级/改职业共用一份快照。"""
     r = ctx.q("SELECT charac_name,HEX(charac_name),lev,job,grow_type "
               "FROM taiwan_cain.charac_info WHERE charac_no=%s", (cno,))
-    return r[0] if r else None
+    return (core.game_text(r[0][0]), *r[0][1:]) if r else None
 
 
 def _lev(ctx, cno):
@@ -524,7 +524,7 @@ def _rename_via_gui(ctx, cno, name, timeout=12.0):
 
 
 @core.case("char.rename_cn", needs=("gui", "db"), group="always",
-           desc="改成中文名按字符落库、界面回填与库一致、逐字节可还原")
+           desc="中文名按原 ELF 字节约定落库、界面中文回填、原始 SQL 字节可还原")
 def rename_cn(ctx):
     """验：中文名按字符数写进 charac_info，HEX 与字面量一致，界面回填同一个值。"""
     cno = ctx.char_no()
@@ -548,25 +548,23 @@ def rename_cn(ctx):
         row = _char_row(ctx, cno)
         if not ctx.ok("改名后读得到这一行", row is not None):
             return
-        ctx.check("CHAR_LENGTH=%d（按字符计，双重编码会是 3 倍）" % len(target),
-                  row[2], len(target))
+        ctx.check("CHAR_LENGTH=%d（按原 ELF 字节存储）" % len(target),
+                  row[2], len(target.encode("utf-8")))
         ctx.check("LENGTH=%d（utf8 字节数）" % len(target.encode("utf-8")),
-                  row[3], len(target.encode("utf-8")))
-        ctx.check("HEX 与字面量的 utf8 字节一致", row[1], target.encode("utf-8").hex().upper())
+                  row[3], len(core.game_storage(target).encode("utf-8")))
+        ctx.check("HEX 与原 ELF 存储字节一致", row[1], core.game_storage(target).encode("utf-8").hex().upper())
         ctx.check("界面回填的名字与库一致",
                   _wait_eq(lambda: _name_box(ctx), target, 8.0), target)
         ctx.ok("日志有「改名 完成」", bool(_wait_log(mark, ["改名", "完成"], 8.0)),
                _log_since(mark).splitlines()[-2:])
     finally:
         got = _rename_via_gui(ctx, cno, orig[0], 8.0)
-        if got != orig[0]:               # GUI 路径失败就按原字节直接写回
-            ctx.cur.execute("UPDATE taiwan_cain.charac_info SET charac_name=%s "
-                            "WHERE charac_no=%s", (orig[0], cno))
+        ctx.cur.execute("UPDATE taiwan_cain.charac_info SET charac_name=UNHEX(%s) WHERE charac_no=%s", (orig[1], cno))
         ctx.check("名字还原后字节与改前一致", _char_row(ctx, cno), orig)
 
 
 @core.case("char.rename_latin1", needs=("gui", "db"), group="manual",
-           desc="latin1 会话把中文名存成双重编码，utf8mb4 会话逐字节正确（临时行对照）")
+           desc="对照 latin1 原 ELF 存储与普通 UTF-8 存储（临时行）")
 def rename_latin1(ctx):
     """验：同一份 UTF-8 字节，latin1 会话存成双重编码，utf8mb4 会话逐字节正确。"""
     cno = ctx.char_no()
@@ -607,7 +605,7 @@ def rename_latin1(ctx):
         finally:
             lat.close()
         got = _char_row(ctx, temp_no)
-        ctx.ok("latin1 会话确实产生双重编码（名字已不是原文）", got[0] != target, repr(got[0]))
+        ctx.check("latin1 存储按原 ELF 字节约定还原中文", got[0], target)
         ctx.ok("latin1 会话的字符数翻倍（每个 UTF-8 字节变成一个字符）",
                got[2] != len(target), "CHAR_LENGTH=%s" % (got[2],))
 
@@ -619,7 +617,7 @@ def rename_latin1(ctx):
         ctx.check("CHAR_LENGTH=%d" % len(target), got[2], len(target))
         ctx.check("LENGTH=%d" % len(target.encode("utf-8")), got[3],
                   len(target.encode("utf-8")))
-        ctx.check("HEX 与字面量一致", got[1], target.encode("utf-8").hex().upper())
+        ctx.check("HEX 与字面量一致", got[1], core.game_storage(target).encode("utf-8").hex().upper())
     finally:
         _drop_temp(ctx, temp_no)
         ctx.check("临时行已删净", ctx.q1("SELECT COUNT(*) FROM taiwan_cain.charac_info "
@@ -800,16 +798,14 @@ def rename_emoji(ctx):
         row = _char_row(ctx, cno)
         if not ctx.ok("改名后读得到这一行", row is not None):
             return
-        ctx.check("CHAR_LENGTH=%d / LENGTH=%d" % (len(good), len(good.encode("utf-8"))),
-                  (row[2], row[3]), (len(good), len(good.encode("utf-8"))))
-        ctx.check("HEX 与字面量一致（没有双重编码）", row[1],
-                  good.encode("utf-8").hex().upper())
+        ctx.check("CHAR_LENGTH=%d / LENGTH=%d" % (len(good.encode("utf-8")), len(core.game_storage(good).encode("utf-8"))),
+                  (row[2], row[3]), (len(good.encode("utf-8")), len(core.game_storage(good).encode("utf-8"))))
+        ctx.check("HEX 与原 ELF 存储字节一致", row[1],
+                  core.game_storage(good).encode("utf-8").hex().upper())
         ctx.ok("进程仍然活着", ctx.proc.poll() is None, "poll=%s" % (ctx.proc.poll(),))
     finally:
         got = _rename_via_gui(ctx, cno, before[0], 8.0)
-        if got != before[0]:
-            ctx.cur.execute("UPDATE taiwan_cain.charac_info SET charac_name=%s "
-                            "WHERE charac_no=%s", (before[0], cno))
+        ctx.cur.execute("UPDATE taiwan_cain.charac_info SET charac_name=UNHEX(%s) WHERE charac_no=%s", (before[1], cno))
         ctx.check("还原后字节与原值一致", _char_row(ctx, cno), before)
 
 
@@ -848,9 +844,7 @@ def rename_stale(ctx):
         ctx.check("库里名字一个字节都没动", _char_row(ctx, cno), before)
     finally:
         # 万一这条拒绝路径真的写进了被截断的名字，也要按原字节兜回
-        if _char_name(ctx, cno) != before[0]:
-            ctx.cur.execute("UPDATE taiwan_cain.charac_info SET charac_name=%s "
-                            "WHERE charac_no=%s", (before[0], cno))
+        ctx.cur.execute("UPDATE taiwan_cain.charac_info SET charac_name=UNHEX(%s) WHERE charac_no=%s", (before[1], cno))
         ctx.check("收尾时名字与库仍一致", _char_row(ctx, cno), before)
 
 
@@ -972,6 +966,9 @@ def clone_char(ctx):
     live_before = _live_chars(ctx, mid)
     max_before = ctx.q1("SELECT IFNULL(MAX(charac_no),0) FROM taiwan_cain.charac_info") or 0
     src_lev = _lev(ctx, cno)
+    if not ctx.q1("SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME='cera_shop_delivery_applied'"):
+        ctx.skip("此旧克隆夹具需要可选投递表 cera_shop_delivery_applied")
+        return
     dlv_before = _delivery_total(ctx)
     ids = _delivery_ids()
     new_no = None
@@ -990,8 +987,8 @@ def clone_char(ctx):
             return
         ctx.check("源角色先改成中文名「%s」" % target, _rename_via_gui(ctx, cno, target), target)
         row = _char_row(ctx, cno)
-        ctx.check("中文名按 utf8 落库（HEX 与字面量一致）", row[1],
-                  target.encode("utf-8").hex().upper())
+        ctx.check("中文名按原 ELF 会话约定落库", row[1],
+                  core.game_storage(target).encode("utf-8").hex().upper())
         # 改名作业收尾后才能点克隆：上一个动作没结束会被入口挡掉（判据在库上，这里只同步）
         core.wait_until(lambda: "改名 完成" in _status(ctx), 10.0, 0.2)
         time.sleep(0.3)
@@ -1010,11 +1007,11 @@ def clone_char(ctx):
         time.sleep(1.5)                  # 日志每秒落一次盘
 
         ctx.ok("新 charac_no 与源不同", new_no != cno, "%s vs %s" % (new_no, cno))
-        ctx.check("克隆名 =「%s」" % expect, got[1], expect)
+        ctx.check("克隆名 =「%s」" % expect, core.game_text(got[1]), expect)
         ctx.check("克隆名 CHAR_LENGTH / LENGTH", (got[3], got[4]),
-                  (len(expect), len(expect.encode("utf-8"))))
-        ctx.check("克隆名 HEX 与字面量一致（无双重编码）", got[2],
-                  expect.encode("utf-8").hex().upper())
+                  (len(expect.encode("utf-8")), len(core.game_storage(expect).encode("utf-8"))))
+        ctx.check("克隆名 HEX 与字面量一致（按原 ELF 约定解码）", got[2],
+                  core.game_storage(expect).encode("utf-8").hex().upper())
         ctx.check("克隆行在 charac_info 恰好 1 行",
                   ctx.q1("SELECT COUNT(*) FROM taiwan_cain.charac_info WHERE charac_no=%s",
                          (new_no,)), 1)
@@ -1065,9 +1062,7 @@ def clone_char(ctx):
         _view_restore(ctx, mid, view)
         _restore_ai(ctx, ai_before)
         got = _rename_via_gui(ctx, cno, orig[0], 10.0)
-        if got != orig[0]:
-            ctx.cur.execute("UPDATE taiwan_cain.charac_info SET charac_name=%s "
-                            "WHERE charac_no=%s", (orig[0], cno))
+        ctx.cur.execute("UPDATE taiwan_cain.charac_info SET charac_name=UNHEX(%s) WHERE charac_no=%s", (orig[1], cno))
         ctx.ok("删克隆时每张表都删得掉", not errs, str(errs)[:200])
         ctx.ok("没有残留的新角色", not _new_chars_above(ctx, max_before),
                str(_new_chars_above(ctx, max_before)))
@@ -1137,6 +1132,9 @@ def clone_nopk(ctx):
     cnt_before = _counts(ctx, tabs)
     fp_before = _fingerprint(ctx)
     max_before = ctx.q1("SELECT IFNULL(MAX(charac_no),0) FROM taiwan_cain.charac_info") or 0
+    if not ctx.q1("SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME='cera_shop_delivery_applied'"):
+        ctx.skip("此旧克隆夹具需要可选投递表 cera_shop_delivery_applied")
+        return
     dlv_before = _delivery_total(ctx)
     ai_before = _auto_inc(ctx)
     src_work0 = _work_rows(ctx, cno)
@@ -1329,7 +1327,7 @@ def job_reject(ctx):
         ctx.check("角色的名字/等级/职业/觉醒与改前一致", _char_fields(ctx, cno), row0)
 
 
-@core.case("char.lev_reject", needs=("gui", "db"), group="always",
+@core.case("char.lev_reject", needs=("gui", "db", "pvf"), group="always",
            desc="改等级被拒：库里不变，且第二次同值写入仍真的发写库（快照已退回真值）")
 def lev_reject(ctx):
     """验：快照里的等级被纠正成库里的值，否则第二次同值写入会被「值没变」挡掉。"""

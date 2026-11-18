@@ -11,6 +11,9 @@ int  select1(Db *d, Str *sql, MyResult *r);
 // 字符串/结果集辅助
 void cp_str(char *dst, int cap, const char *src);
 void cp_text(char *dst, int cap, const MyResult *r, int row, int col);
+void cp_game_text(char *dst, int cap, const MyResult *r, int row, int col);
+// SQL literal for original-game UTF-8 bytes transmitted via a latin1 session.
+void game_text_literal(Str *sql, const char *text);
 int  set_names(Db *d, const char *cs);
 
 // 整库备份辅助（db_admin.c 用）

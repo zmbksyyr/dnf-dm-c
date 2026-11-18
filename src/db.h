@@ -99,6 +99,8 @@ int  db_list_chars(Db *d, Vec *out, int limit, const char *kw, Err err);   // Ve
 u32  db_count_chars(Db *d, const char *kw);
 int  db_poll_chars(Db *d, Vec *out, int limit, Err err);   // 列表+在线+当前角色，一条查询
 int  db_is_online(Db *d, u32 mid);
+// 写入前实时核对账号标志；不以通道汇总人数推断安全，不改动在线内存快照。
+int  db_require_offline(Db *d, u32 mid, Err err);
 // 封停页专用：全服角色 + 精确在线位（与 db_poll_chars 同口径）。
 // online_only=1 时只留「账号在线且正在玩该角色」的，用来做「加载在线」。
 int  db_list_ban_chars(Db *d, Vec *out, int online_only, int limit, Err err);   // Vec<Charac>
@@ -116,9 +118,8 @@ int  db_save_blob(Db *d, const Charac *c, const char *table, const char *field,
 int  db_set_name(Db *d, const Charac *c, const char *name, Err err);
 int  db_name_taken(Db *d, const char *name, u32 except_no);
 int  db_set_job(Db *d, const Charac *c, int job, int grow, Err err);
-// exp 就是要写的经验值（来自 Ctx.u1，u64；K_LEV 路径恒传 0 = 清零）。
-// u1 是 u64，无法表达「-1 = 不改」这样的哨兵，所以"保留经验"的语义不能靠负值传进来；
-// 真要保留时调用方根本不该走这条（或另加显式标志位）。因此函数体里的 exp>=0 恒真，仅作防御。
+// exp 为匹配 PVF 的累计经验下限；两张角色表在同一事务内更新。
+// 不猜测曲线、不夹断经验，不支持负值表示保留。
 int  db_set_lev(Db *d, const Charac *c, int lev, i64 exp, Err err);
 int  db_set_money(Db *d, const Charac *c, u64 money, Err err);
 int  db_set_coin(Db *d, const Charac *c, u64 coin, Err err);

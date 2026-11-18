@@ -39,8 +39,8 @@ int db_list_events(Db *d, Vec *out, Err err) {
         e->type = (u32)my_u64(&r, i, 1, 0);
         e->p1 = my_i64(&r, i, 2, 0);
         e->p2 = my_i64(&r, i, 3, 0);
-        cp_text(e->name, sizeof(e->name), &r, i, 4);
-        cp_text(e->explain, sizeof(e->explain), &r, i, 5);
+        cp_game_text(e->name, sizeof(e->name), &r, i, 4);
+        cp_game_text(e->explain, sizeof(e->explain), &r, i, 5);
     }
     my_free(&r);
     return 1;
@@ -57,8 +57,8 @@ int db_list_event_info(Db *d, Vec *out, Err err) {
         EventInfo *e = VEC_ADD(out, EventInfo);
         memset(e, 0, sizeof(*e));
         e->id = (u32)my_u64(&r, i, 0, 0);
-        cp_text(e->name, sizeof(e->name), &r, i, 1);
-        cp_text(e->explain, sizeof(e->explain), &r, i, 2);
+        cp_game_text(e->name, sizeof(e->name), &r, i, 1);
+        cp_game_text(e->explain, sizeof(e->explain), &r, i, 2);
     }
     my_free(&r);
     return 1;
@@ -149,7 +149,7 @@ int db_list_bans(Db *d, Vec *out, Err err) {
         cp_text(b->end, sizeof(b->end), &r, i, 4);
         cp_text(b->reason, sizeof(b->reason), &r, i, 5);
         cp_text(b->account, sizeof(b->account), &r, i, 6);
-        cp_text(b->char_name, sizeof(b->char_name), &r, i, 7);
+        cp_game_text(b->char_name, sizeof(b->char_name), &r, i, 7);
     }
     my_free(&r);
     str_free(&s);
@@ -706,7 +706,7 @@ static int view_sync_char(Db *d, u32 mid, u32 cno, u32 template_no, Err err) {
         my_free(&r); str_free(&s); return 0;
     }
     char name[64] = "";
-    cp_text(name, sizeof(name), &r, 0, 0);
+    cp_game_text(name, sizeof(name), &r, 0, 0);
     int job = (int)my_i64(&r, 0, 1, 0);
     int grow = (int)my_i64(&r, 0, 2, 0);
     int lev = (int)my_i64(&r, 0, 3, 0);
@@ -1167,10 +1167,9 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
         return 0;
     }
 
-    // 新名字 = 原名截到 18 字符 + 数字后缀。charac_name 是 varchar(20)，
-    // 留两位给后缀；LEFT 在服务端按字符截，中文不会被砍成半个字。
+    // Reserve two wire bytes for a numeric suffix, preserving UTF-8 boundaries.
     str_clear(&q);
-    str_catf(&q, "SELECT LEFT(charac_name,18) FROM taiwan_cain.charac_info WHERE charac_no=%u",
+    str_catf(&q, "SELECT charac_name FROM taiwan_cain.charac_info WHERE charac_no=%u",
              c->no);
     if (!select1(d, &q, &r) || !r.nrow) {
         snprintf(err, ERRBUF, "读源角色名失败：%s", d->err);
@@ -1179,7 +1178,13 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
         return 0;
     }
     char base[64];
-    cp_text(base, sizeof(base), &r, 0, 0);
+    cp_game_text(base, sizeof(base), &r, 0, 0);
+    size_t prefix = strlen(base);
+    if (prefix > 18) {
+        prefix = 18;
+        while (prefix && ((u8)base[prefix] & 0xc0u) == 0x80u) prefix--;
+        base[prefix] = 0;
+    }
     my_free(&r);
     str_free(&q);
     if (!base[0]) snprintf(base, sizeof(base), "Clone");
@@ -1210,19 +1215,15 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
 
     // 1) charac_info：charac_no 是自增列会被跳过，唯一要覆盖的就是 charac_name
     {
-        // 字符集跟读路径一致（db_cs_name），别再手工切 latin1：表达式里的字面量会
-        // 在 latin1 会话下被当成「UTF-8 字节 = latin1 字符」再转存成 utf8，落库就是
-        // 双重编码；column 上限还按字符算，5 个汉字就超 varchar(20)。
         set_names(d, db_cs_name(d->charset));
-        char *e = mysql_escape(&d->conn, cand);
-        char expr[160];
-        snprintf(expr, sizeof(expr), "'%s'", e ? e : "");
-        free(e);
-        CloneOvr ovr[1] = {{"charac_name", expr}};
+        Str expr = {0};
+        game_text_literal(&expr, cand);
+        CloneOvr ovr[1] = {{"charac_name", str_c(&expr)}};
         u64 aff = 0;
         CloneKey ck;
         int ret = clone_rows(d, "taiwan_cain", "charac_info", "charac_no", c->no, NULL,
                              ovr, 1, &ck, &aff, err);
+        str_free(&expr);
         if (ret != 1 || aff != 1) {
             if (ret == 1)
                 snprintf(err, ERRBUF, "复制 charac_info 影响了 %llu 行（应为 1）",
@@ -1730,7 +1731,7 @@ int db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, ItemStackLim lim, 
         memset(&c, 0, sizeof(c));
         c.no = (u32)my_u64(&ch, ci, 0, 0);
         c.mid = (u32)my_u64(&ch, ci, 2, 0);
-        cp_text(c.name, sizeof(c.name), &ch, ci, 1);
+        cp_game_text(c.name, sizeof(c.name), &ch, ci, 1);
         const char *acc = my_text(&ch, ci, 3);
         if (nchar) (*nchar)++;
 
@@ -1948,7 +1949,7 @@ int db_scan_tab_orphan(Db *d, Vec *out, ItemHasName has, void *hctx, Err err) {
             TabOrphan *o = VEC_ADD(out, TabOrphan);
             memset(o, 0, sizeof(*o));
             o->cno = cno;
-            if (f >= 0) cp_text(o->cname, sizeof(o->cname), &ch, f, 1);
+            if (f >= 0) cp_game_text(o->cname, sizeof(o->cname), &ch, f, 1);
             o->avatar = avatar;
             o->ui_id = ui;
             o->it_id = it;
