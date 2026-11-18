@@ -828,6 +828,70 @@ def _send_special_mail(ctx):
     return True
 
 
+@core.case("item.grant_target_switch", needs=("gui", "db", "pvf"), group="always",
+           desc="直接入包与邮件作业阻塞时切换角色，发放仍归属确认时的角色")
+def grant_target_switch(ctx):
+    from .cases_db import _wait_box, _close_box
+    from .cases_encoding import _cell
+    targets = ctx.q("SELECT charac_no,m_id,charac_name FROM taiwan_cain.charac_info "
+                    "WHERE delete_flag=0 ORDER BY charac_no DESC LIMIT 2")
+    if len(targets) < 2:
+        ctx.skip("需要两个独立的测试角色")
+        return
+    first, second = targets
+    for cid, mid, name in targets:
+        if ctx.q1("SELECT COALESCE(MAX(login_status),0) FROM taiwan_login.login_account_3 WHERE m_id=%s", (mid,)):
+            ctx.skip("测试角色账号仍在线")
+            return
+    inventory = {cid: ctx.q1("SELECT inventory FROM taiwan_cain_2nd.inventory WHERE charac_no=%s", (cid,))
+                 for cid, mid, name in targets}
+    try:
+        with _special_mail_fixture(ctx, first[0]), _special_mail_fixture(ctx, second[0]):
+            for mail in (False, True):
+                core.click_at(u.GetDlgItem(ctx.main, IDC_CHLIST), 40, 28, .3)
+                ctx.page(PAGE_GM)
+                if not ctx.ok("选中原发放角色", core.wait_until(
+                        lambda: core.txt(ctx.ctl(1801)) == core.game_text(first[2]), 15)):
+                    return
+                ctx.page(PAGE_GRANT)
+                # Clear the previous in-memory queue, then add a known material.
+                core.press(ctx.ctl(1214), .2)
+                core.set_text(ctx.ctl(G_ID), '3338')
+                core.set_text(ctx.ctl(G_NUM), '7')
+                core.press(ctx.ctl(1211), .3)
+                if not ctx.ok("队列指向测试材料", core.rows(ctx.ctl(G_LIST)) == 1 and
+                              _cell(ctx.proc.pid, ctx.ctl(G_LIST), 0, 1) == '3338'):
+                    return
+                before_mail = ctx.q1("SELECT IFNULL(MAX(postal_id),0) FROM taiwan_cain_2nd.postal")
+                table = "taiwan_cain_2nd.letter" if mail else "taiwan_cain_2nd.inventory"
+                with _lock([table]):
+                    core.press(ctx.ctl(1215 if mail else 1216), 0)
+                    box, text = _wait_box(ctx.main, 8)
+                    if not ctx.ok("出现发放确认框", bool(box), text):
+                        return
+                    _close_box(ctx.main, box, 1)
+                    if not ctx.ok("发放已开始并阻塞于目标表", _wait_blocked(ctx, table)[0]):
+                        return
+                    core.click_at(u.GetDlgItem(ctx.main, IDC_CHLIST), 40, 48, .1)
+                ctx.page(PAGE_GM)
+                ctx.ok("写入完成后切到第二个角色", core.wait_until(
+                    lambda: core.txt(ctx.ctl(1801)) == core.game_text(second[2]), 20))
+                ctx.ok("第二个角色背包字节不变", ctx.q1(
+                    "SELECT inventory FROM taiwan_cain_2nd.inventory WHERE charac_no=%s", (second[0],))
+                    == inventory[second[0]])
+                if mail:
+                    ctx.check("附件仅发给确认时的角色", ctx.q(
+                        "SELECT receive_charac_no,item_id,add_info FROM taiwan_cain_2nd.postal WHERE postal_id>%s",
+                        (before_mail,)), ((first[0], 3338, 7),))
+                else:
+                    ctx.ok("原角色背包收到物品", ctx.q1(
+                        "SELECT inventory FROM taiwan_cain_2nd.inventory WHERE charac_no=%s", (first[0],))
+                        != inventory[first[0]])
+    finally:
+        for cid, raw in inventory.items():
+            ctx.cur.execute("UPDATE taiwan_cain_2nd.inventory SET inventory=%s WHERE charac_no=%s", (raw, cid))
+
+
 @core.case("item.special_direct_guard", needs=("gui", "db", "pvf"), group="manual",
            desc="真实 PVF 时装/宠物/宠物装备直接入包被拒绝，库存原始字节不变")
 def special_direct_guard(ctx):
