@@ -132,6 +132,8 @@ static int run_probe(int argc, char **argv) {
              db_set_qp(&d, &c, 34, err) && db_set_cera(&d, &c, 4567, 5678, err);
     } else if (!strcmp(argv[1], "skill-points") && argc == 8) {
         ok = db_set_sp(&d, &c, atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), err);
+    } else if (!strcmp(argv[1], "quest-points") && argc == 5) {
+        ok = db_set_qp(&d, &c, atoi(argv[4]), err);
     } else if (!strcmp(argv[1], "fatigue") && argc == 4) {
         ok = db_set_fatigue(&d, &c, err);
     } else if (!strcmp(argv[1], "money") && argc == 5) {

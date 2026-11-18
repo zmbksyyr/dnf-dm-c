@@ -1253,17 +1253,32 @@ int db_set_sp(Db *d, const Charac *c, int sp, int sp2, int tp, int tp2, Err err)
 }
 
 int db_set_qp(Db *d, const Charac *c, int qp, Err err) {
-    // 同账号金库：charac_quest_shop 也是懒建的（角色没碰过 QP 商店就没有这行），
-    // 只 UPDATE 会 0 行。改成有行则改、无行则建，其余加成列走表默认值 0。
-    Str s = {0};
-    str_catf(&s,
-             "INSERT INTO taiwan_cain.charac_quest_shop (charac_no,qp) VALUES (%u,%d) "
-             "ON DUPLICATE KEY UPDATE qp=VALUES(qp)",
-             c->no, qp);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "改 QP：%s", d->err);
-    return ok;
+    if(qp<0) {snprintf(err,ERRBUF,"QP 必须在 0..2147483647，未写入");return 0;}
+    int online=0;
+    if(!db_account_online(d,c->mid,&online,err)) return 0;
+    if(online) {
+        OnlineCommand request;
+        return db_online_qp_submit(d,c,(u32)qp,&request,err) && db_online_finish(d,&request,err);
+    }
+    if(!db_require_offline(d,c->mid,err)) return 0;
+    Str s={0};MyResult r={0};u64 affected=0;
+    // A lazy-created row is allowed, but only for an owned, live, offline character.
+    // Preserve purchased bonuses, reset count and quest pieces on an existing row.
+    str_catf(&s,"INSERT INTO taiwan_cain.charac_quest_shop (charac_no,qp) "
+        "SELECT c.charac_no,%d FROM taiwan_cain.charac_info c "
+        "WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 AND NOT EXISTS "
+        "(SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status>=1) "
+        "ON DUPLICATE KEY UPDATE qp=VALUES(qp)",qp,c->no,c->mid);
+    int ok=run_aff(d,&s,&affected);
+    if(ok && !affected) {
+        str_clear(&s);
+        str_catf(&s,"SELECT 1 FROM taiwan_cain.charac_quest_shop s JOIN taiwan_cain.charac_info c ON c.charac_no=s.charac_no "
+            "WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 AND s.qp=%d AND NOT EXISTS "
+            "(SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status>=1)",c->no,c->mid,qp);
+        ok=select1(d,&s,&r) && r.nrow==1;
+        if(!ok) snprintf(err,ERRBUF,"QP 未写入：账号已上线、归属变化或角色已删除");
+    } else if(!ok) snprintf(err,ERRBUF,"改 QP：%s",d->err);
+    my_free(&r);str_free(&s);return ok;
 }
 
 int db_set_pvp(Db *d, const Charac *c, int grade, int win, int point, Err err) {

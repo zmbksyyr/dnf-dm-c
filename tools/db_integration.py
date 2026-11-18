@@ -685,6 +685,48 @@ class DataTests(unittest.TestCase):
                             self.assertEqual(r.returncode, 0, r.stderr)
                             self.assertEqual(balance(), 0)
 
+    def test_quest_points_range_lazy_row_and_offline_guards(self):
+        table='taiwan_cain.charac_quest_shop'
+        with self.bubble_fixture() as (ids,mid,_):
+            cid=ids[0]
+            self.assertEqual(self.one('SELECT COUNT(*) FROM '+table+' WHERE charac_no IN ('+
+                                     ','.join(map(str,ids))+')'),0)
+            def row():
+                self.cur.execute('SELECT * FROM '+table+' WHERE charac_no=%s',(cid,))
+                return self.cur.fetchone()
+            try:
+                for mode in ('','STRICT_ALL_TABLES'):
+                    for owner in (mid+1,mid):
+                        r=self.probe('quest-points',cid,owner,-1,mode=mode)
+                        self.assertNotEqual(r.returncode,0);self.assertIsNone(row())
+                    r=self.probe('quest-points',cid,mid+1,90000,mode=mode)
+                    self.assertNotEqual(r.returncode,0);self.assertIsNone(row())
+                    for value in (0,90000,2147483647,0):
+                        for _ in range(2):
+                            r=self.probe('quest-points',cid,mid,value,mode=mode)
+                            self.assertEqual(r.returncode,0,r.stderr)
+                            self.assertEqual(self.one('SELECT qp FROM '+table+' WHERE charac_no=%s',(cid,)),value)
+                    self.cur.execute('UPDATE '+table+' SET max_hp=5,init_count=7,quest_piece=9 WHERE charac_no=%s',(cid,))
+                    before=row();self.cur.execute('SELECT * FROM '+table+' LIMIT 0');columns=[x[0] for x in self.cur.description]
+                    r=self.probe('quest-points',cid,mid,90000,mode=mode)
+                    self.assertEqual(r.returncode,0,r.stderr);after=row()
+                    self.assertEqual([v for k,v in zip(columns,before) if k!='qp'],
+                                     [v for k,v in zip(columns,after) if k!='qp'])
+                    self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s',(cid,))
+                    r=self.probe('quest-points',cid,mid,1,mode=mode)
+                    self.assertNotEqual(r.returncode,0);self.assertEqual(row(),after)
+                    self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0 WHERE charac_no=%s',(cid,))
+                    self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=1,m_channel_no=0 WHERE m_id=%s',(mid,))
+                    r=self.probe('quest-points',cid,mid,1,mode=mode)
+                    self.assertNotEqual(r.returncode,0);self.assertEqual(row(),after)
+                    self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s',(mid,))
+                    self.cur.execute('DELETE FROM '+table+' WHERE charac_no=%s',(cid,))
+                    r=self.probe('quest-points',ids[-1],mid,90000,mode=mode)
+                    self.assertNotEqual(r.returncode,0)
+                    self.assertEqual(self.one('SELECT COUNT(*) FROM '+table+' WHERE charac_no=%s',(ids[-1],)),0)
+            finally:
+                self.cur.execute('DELETE FROM '+table+' WHERE charac_no IN ('+','.join(map(str,ids))+')')
+
     def test_skill_points_wire_range_and_offline_guards(self):
         table='taiwan_cain_2nd.skill'
         fields=('remain_sp','remain_sp_2nd','remain_sfp_1st','remain_sfp_2nd')
