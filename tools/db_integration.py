@@ -38,7 +38,7 @@ def settings():
 def build():
     OUT.mkdir(parents=True, exist_ok=True)
     zig = os.environ.get("ZIG") or shutil.which("zig") or r"C:\zig\zig.exe"
-    sources = ["db", "db_mail", "db_admin", "db_bubble", "mysql", "util", "zlib", "item", "pvf"]
+    sources = ["db", "db_mail", "db_admin", "db_bubble", "db_online", "mysql", "util", "zlib", "item", "pvf"]
     cmd = [zig, "cc", "-target", "x86_64-windows-gnu", "-std=c11", "-O2",
            "-DUNICODE", "-D_UNICODE", "-Wall", "-Wextra", "-Wshadow", "-Wconversion",
            "-Wpedantic", "-Werror", "-Isrc", "tools/db_probe.c"]
@@ -511,7 +511,7 @@ class DataTests(unittest.TestCase):
             self.cur.executemany('INSERT INTO d_taiwan.accounts (UID,accountname) VALUES (%s,%s)',
                                  [(mid, 'audit_bubble'), (empty, 'audit_bubble_empty')])
             self.cur.execute('INSERT INTO taiwan_login.login_account_3 (m_id,login_status,last_login_date) '
-                             'VALUES (%s,1,NOW())', (mid,))
+                             'VALUES (%s,0,NOW())', (mid,))
             for table, key in [('taiwan_cain.charac_info', 'charac_no'),
                                ('taiwan_cain_2nd.inventory', 'charac_no')]:
                 self.cur.execute('SELECT * FROM ' + table + ' WHERE charac_no=%s', (self.cno,))
@@ -582,11 +582,10 @@ class DataTests(unittest.TestCase):
             self.assertEqual(self.one("SELECT COUNT(*) FROM taiwan_billing.cash_cera WHERE account=%s "
                                      "AND reg_date>'2000-01-01' AND mod_date>'2000-01-01'", (str(mid),)), 1)
 
-    def test_bubble_online_excludes_deleted_and_orphan_accounts(self):
+    def test_bubble_account_excludes_deleted_and_orphan_accounts(self):
         with self.bubble_fixture() as (ids, mid, _):
-            self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=2 WHERE m_id=%s', (mid,))
             self.cur.execute('UPDATE taiwan_cain.charac_info SET m_id=%s WHERE charac_no=%s', (mid + 2, ids[1]))
-            self.bubble_paid(self.bubble(target=0, coin=1, dp=1), 1, 1)
+            self.bubble_paid(self.bubble(target=3, coin=1, dp=1), 1, 1)
             self.assertEqual(self.one('SELECT coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%s', (ids[0],)), 11)
             self.assertEqual(self.one('SELECT coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%s', (ids[1],)), 10)
 
@@ -601,20 +600,16 @@ class DataTests(unittest.TestCase):
                 self.assertEqual(self.one('SELECT coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%s', (no,)), coin + 2)
             self.assertEqual(self.one('SELECT coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%s', (ids[-1],)), 10)
 
-    def test_bubble_online_membership_is_frozen_across_rewards(self):
+    def test_bubble_sql_online_flags_are_not_active_game_characters(self):
         with self.bubble_fixture() as (ids, mid, second):
             self.cur.execute('UPDATE taiwan_cain.charac_info SET m_id=%s WHERE charac_no=%s', (second, ids[1]))
             self.cur.execute('INSERT INTO taiwan_login.login_account_3 (m_id,login_status,last_login_date) '
                              'VALUES (%s,1,NOW())', (second,))
-            with self.trigger('taiwan_cain_2nd.inventory', 'UPDATE',
-                              'UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id IN (' +
-                              str(mid) + ',' + str(second) + ')'):
-                self.bubble_paid(self.bubble(target=0, coin=1, dp=2, dc=3, item=1001, num=4), 2, 2)
-            for account, no in zip((mid, second), ids):
-                self.assertEqual(self.one('SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%s', (account,)), 0)
-                self.assertEqual(self.one('SELECT cera FROM taiwan_billing.cash_cera WHERE account=%s', (str(account),)), 2)
-                self.assertEqual(self.one('SELECT cera_point FROM taiwan_billing.cash_cera_point WHERE account=%s', (str(account),)), 3)
-                self.assertEqual(self.one('SELECT add_info FROM taiwan_cain_2nd.postal WHERE receive_charac_no=%s', (no,)), 4)
+            self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s', (mid,))
+            state=self.bubble_state()
+            r=self.bubble(target=0,coin=1,dp=2,dc=3,item=1001,num=4)
+            self.assertNotEqual(r.returncode,0)
+            self.assertEqual(self.bubble_state(),state)
 
     def test_bubble_deleted_or_missing_explicit_target_rejected(self):
         with self.bubble_fixture() as (ids, mid, _):
@@ -644,6 +639,25 @@ class DataTests(unittest.TestCase):
             r = self.bubble(coin=1, dp=1, dc=1, mode='')
             self.assertNotEqual(r.returncode, 0)
             self.assertEqual(self.bubble_state(), state)
+
+    def test_coin_zero_increment_and_owner_guard(self):
+        with self.bubble_fixture() as (ids, mid, _):
+            r=self.probe('add-coin',ids[0],mid,0)
+            self.assertEqual(r.returncode,0,r.stderr)
+            self.assertEqual(self.one('SELECT coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%s',(ids[0],)),10)
+            r=self.probe('coin',ids[0],mid+1,20)
+            self.assertNotEqual(r.returncode,0)
+            self.assertEqual(self.one('SELECT coin FROM taiwan_cain_2nd.inventory WHERE charac_no=%s',(ids[0],)),10)
+
+    def test_bubble_online_siblings_rejected_before_account_rewards(self):
+        with self.bubble_fixture() as (_, mid, _):
+            self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s',(mid,))
+            state=self.bubble_state()
+            r=self.bubble(coin=1,dp=1,dc=1)
+            self.assertNotEqual(r.returncode,0)
+            self.assertIn('包含多个角色',r.stderr)
+            self.assertIn('committed=0',r.stdout)
+            self.assertEqual(self.bubble_state(),state)
 
     def test_bubble_billing_overflow_rolls_back_prior_rewards_and_missing_row(self):
         with self.bubble_fixture() as (_, mid, _):

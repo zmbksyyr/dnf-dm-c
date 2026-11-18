@@ -1,0 +1,90 @@
+// Original game memory is authoritative for online inventory.coin.
+#include "db_priv.h"
+
+int db_account_online(Db *d, u32 mid, int *online, Err err) {
+    Str s = {0}; MyResult r = {0};
+    str_catf(&s,"SELECT COALESCE(MAX(login_status),0) FROM taiwan_login.login_account_3 WHERE m_id=%u",mid);
+    int ok=select1(d,&s,&r);
+    if(ok) *online=my_i64(&r,0,0,1)!=0;
+    else snprintf(err,ERRBUF,"无法确认账号状态，未写入：%s",d->err);
+    my_free(&r);str_free(&s);return ok;
+}
+
+static int online_submit(Db *d, const Charac *c, u32 amount, const char *operation, OnlineCommand *request, Err err) {
+    memset(request,0,sizeof(*request));
+    Str s={0};MyResult r={0};u64 affected=0;
+    str_cat(&s,"SELECT REPLACE(UUID(),'-','')");
+    int ok=select1(d,&s,&r);
+    if(ok && r.nrow==1) cp_text(request->token,sizeof(request->token),&r,0,0);
+    my_free(&r);str_clear(&s);
+    if(!ok || strlen(request->token)!=32) goto failed;
+    str_cat(&s,"INSERT INTO d_taiwan.dnf_gm_online_v1 "
+        "(token,m_id,charac_no,operation,amount,created,expires,updated) ");
+    if(c->no) str_catf(&s,
+        "SELECT '%s',c.m_id,c.charac_no,'%s',%u,NOW(6),DATE_ADD(NOW(6),INTERVAL 20 SECOND),NOW(6) "
+        "FROM taiwan_cain.charac_info c WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 ",
+        request->token,operation,amount,c->no,c->mid);
+    else str_catf(&s,
+        "SELECT '%s',c.UID,0,'inspect',0,NOW(6),DATE_ADD(NOW(6),INTERVAL 20 SECOND),NOW(6) "
+        "FROM d_taiwan.accounts c WHERE c.UID=%u ",request->token,c->mid);
+    str_catf(&s,
+        "AND EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l JOIN d_taiwan.dnf_gm_hosts_v1 h "
+        "ON h.channel_no=l.m_channel_no WHERE l.m_id=%u AND l.login_status>=1 "
+        "AND h.seen>DATE_SUB(NOW(6),INTERVAL 5 SECOND))",
+        c->mid);
+    ok=run_aff(d,&s,&affected);
+    str_free(&s);
+    if(ok && affected==1) return 1;
+    if(ok) snprintf(err,ERRBUF,"在线命令未提交：角色归属或状态变化，或游戏端桥接尚未就绪");
+    else snprintf(err,ERRBUF,"在线命令未提交：%s；需要启用游戏端 GM 桥接",d->err);
+    request->token[0]=0;return 0;
+failed:
+    str_free(&s);snprintf(err,ERRBUF,"创建在线命令失败：%s",d->err);request->token[0]=0;return 0;
+}
+
+int db_online_coin_submit(Db *d,const Charac *c,u32 amount,int add,OnlineCommand *request,Err err) {
+    if(!c->no) {snprintf(err,ERRBUF,"在线奖励缺少角色编号");return 0;}
+    return online_submit(d,c,amount,add?"add_coin":"set_coin",request,err);
+}
+
+int db_online_character_submit(Db *d,u32 mid,OnlineCommand *request,Err err) {
+    Charac c={0};c.mid=mid;
+    return online_submit(d,&c,0,"inspect",request,err);
+}
+
+int db_online_finish(Db *d, OnlineCommand *request, Err err) {
+    Str s={0};MyResult r={0};
+    u64 deadline=now_ms()+22000;
+    int stopped=0,ok=0;
+    for(;;) {
+        str_clear(&s);
+        str_catf(&s,"SELECT state,note,expires<=NOW(6),charac_no FROM d_taiwan.dnf_gm_online_v1 WHERE token='%s'",request->token);
+        if(!select1(d,&s,&r) || r.nrow!=1) {
+            snprintf(err,ERRBUF,"在线命令 %s 结果不确定，请核对后再操作：%s",request->token,d->err);break;
+        }
+        const char *state=my_text(&r,0,0),*note=my_text(&r,0,1);
+        if(state && !strcmp(state,"done")) {request->charac_no=(u32)my_u64(&r,0,3,0);ok=1;break;}
+        if(state && (!strcmp(state,"rejected") || !strcmp(state,"unknown"))) {
+            request->rejected=!strcmp(state,"rejected");
+            snprintf(err,ERRBUF,"在线命令 %s %s（%s）；请核对，勿重复发放",request->token,
+                !strcmp(state,"rejected")?"未执行":"结果不确定",note?note:"");break;
+        }
+        int expired=my_i64(&r,0,2,1)!=0;
+        my_free(&r);
+        if(expired || now_ms()>=deadline || db_cancelled()) {
+            if(stopped) {
+                snprintf(err,ERRBUF,"在线命令 %s 已被领取，结果不确定；请核对，勿重复发放",request->token);break;
+            }
+            str_clear(&s);
+            str_catf(&s,"UPDATE d_taiwan.dnf_gm_online_v1 SET state='rejected',note='gm_cancelled',updated=NOW(6) "
+                "WHERE token='%s' AND state='pending'",request->token);
+            if(!run(d,&s)) {
+                snprintf(err,ERRBUF,"在线命令 %s 取消确认失败，结果不确定：%s",request->token,d->err);break;
+            }
+            stopped=1;
+            continue;
+        }
+        Sleep(100);
+    }
+    my_free(&r);str_free(&s);return ok;
+}

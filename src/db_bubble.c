@@ -3,6 +3,27 @@
 
 #define BUB_BATCH 256
 
+// 登录表只有账号在线标记；由游戏线程读出当前角色，不能把同账号的其他角色也算在线。
+static int bubble_online_targets(Db *d,Vec *chars,Vec *accounts,Err err) {
+    Str s={0};MyResult r={0};Vec requests;vec_init(&requests,sizeof(OnlineCommand));
+    str_cat(&s,"SELECT DISTINCT a.UID FROM d_taiwan.accounts a JOIN taiwan_login.login_account_3 l "
+        "ON l.m_id=a.UID WHERE l.login_status>=1 ORDER BY a.UID");
+    int ok=select1(d,&s,&r);
+    if(!ok) snprintf(err,ERRBUF,"泡点在线名单：%s",d->err);
+    for(int i=0;ok && i<r.nrow;i++) {
+        u32 mid=(u32)my_u64(&r,i,0,0);
+        OnlineCommand *request=VEC_ADD(&requests,OnlineCommand);
+        ok=db_online_character_submit(d,mid,request,err);
+        if(ok) *VEC_ADD(accounts,u32)=mid;
+    }
+    for(int i=0;ok && i<requests.n;i++) {
+        OnlineCommand *request=vec_at(&requests,i);
+        ok=db_online_finish(d,request,err);
+        if(ok) *VEC_ADD(chars,u32)=request->charac_no;
+    }
+    my_free(&r);str_free(&s);vec_free(&requests);return ok;
+}
+
 static int cmp_mid(const void *a, const void *b) {
     u32 x = *(const u32 *)a, y = *(const u32 *)b;
     return (x > y) - (x < y);
@@ -13,6 +34,42 @@ static void id_list(Str *s, const Vec *ids, int start, int count, int quoted) {
         if (j) str_catc(s, ',');
         str_catf(s, quoted ? "'%u'" : "%u", *(const u32 *)vec_at(ids, start + j));
     }
+}
+
+// A whole-account coin reward includes inactive siblings. The original game
+// offers no memory-safe write API for them while that account is online.
+// Reject this known mismatch before committing any SQL/account rewards.
+static int bubble_coin_preflight(Db *d,const BubbleCfg *cfg,Err err) {
+    if(!cfg->coin || cfg->target==0) return 1;
+    Str s={0};MyResult r={0};
+    str_cat(&s,"SELECT c.m_id,MIN(c.charac_no),COUNT(*) FROM taiwan_cain.charac_info c "
+        "JOIN d_taiwan.accounts a ON a.UID=c.m_id WHERE c.delete_flag=0 "
+        "AND EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status>=1)");
+    if(cfg->target==2) str_catf(&s," AND c.charac_no=%u",cfg->tno);
+    if(cfg->target==3) str_catf(&s," AND c.m_id=%u",cfg->tno);
+    str_cat(&s," GROUP BY c.m_id");
+    int ok=select1(d,&s,&r);
+    if(!ok) snprintf(err,ERRBUF,"泡点在线角色检查：%s",d->err);
+    for(int i=0;ok && i<r.nrow;i++) {
+        u32 mid=(u32)my_u64(&r,i,0,0);
+        if(my_u64(&r,i,2,0)>1) {
+            snprintf(err,ERRBUF,"账号%u在线且本次包含多个角色；请用仅在线范围，或退出该账号后发放全账号复活币，未发放任何奖励",mid);
+            ok=0;break;
+        }
+    }
+    Vec requests;vec_init(&requests,sizeof(OnlineCommand));
+    for(int i=0;ok && i<r.nrow;i++)
+        ok=db_online_character_submit(d,(u32)my_u64(&r,i,0,0),VEC_ADD(&requests,OnlineCommand),err);
+    for(int i=0;ok && i<requests.n;i++) {
+        OnlineCommand *request=vec_at(&requests,i);
+        ok=db_online_finish(d,request,err);
+        if(ok && request->charac_no!=(u32)my_u64(&r,i,1,0)) {
+            u32 mid=(u32)my_u64(&r,i,0,0);
+            snprintf(err,ERRBUF,"账号%u当前使用其他角色；请退出后发放该角色复活币，未发放任何奖励",mid);
+            ok=0;
+        }
+    }
+    vec_free(&requests);my_free(&r);str_free(&s);return ok;
 }
 
 static int bubble_targets(Db *d, const BubbleCfg *cfg, Vec *chars, Vec *accounts, Err err) {
@@ -87,6 +144,9 @@ static int bubble_currency(Db *d, const Vec *ids, const char *table, const char 
                  amount, billing ? ",mod_date=NOW()" : "", billing ? "account" : "charac_no");
         id_list(&s, ids, i, n, billing);
         str_catf(&s, ") AND %s<=%u", col, UINT32_MAX - (u32)amount);
+        if(!billing) str_cat(&s," AND NOT EXISTS (SELECT 1 FROM taiwan_cain.charac_info c "
+            "JOIN taiwan_login.login_account_3 l ON l.m_id=c.m_id "
+            "WHERE c.charac_no=inventory.charac_no AND l.login_status>=1)");
         u64 affected = 0;
         if (!run_aff(d, &s, &affected)) { ok = 0; break; }
         if (affected != (u64)n) {
@@ -98,6 +158,29 @@ static int bubble_currency(Db *d, const Vec *ids, const char *table, const char 
     if (!ok && !err[0]) snprintf(err, ERRBUF, "泡点·%s：%s", col, d->err);
     str_free(&s);
     return ok;
+}
+
+// Queue online rewards in the same SQL transaction as the other rewards.
+// The game cannot claim them until commit. Confirm them after releasing SQL locks.
+static int bubble_coin(Db *d,const Vec *chars,int amount,Vec *requests,u32 *offline,Err err) {
+    if(!amount || !chars->n) return 1;
+    Str s={0};MyResult r={0};Vec ids;vec_init(&ids,sizeof(u32));
+    str_cat(&s,"SELECT c.charac_no,c.m_id,COALESCE((SELECT MAX(l.login_status) "
+        "FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id),0) "
+        "FROM taiwan_cain.charac_info c WHERE c.charac_no IN (");
+    id_list(&s,chars,0,chars->n,0);str_catc(&s,')');
+    int ok=select1(d,&s,&r);
+    if(!ok) snprintf(err,ERRBUF,"泡点账号状态：%s",d->err);
+    for(int i=0;ok && i<r.nrow;i++) {
+        Charac c={0};c.no=(u32)my_u64(&r,i,0,0);c.mid=(u32)my_u64(&r,i,1,0);
+        if(my_i64(&r,i,2,1)!=0) {
+            OnlineCommand *request=VEC_ADD(requests,OnlineCommand);
+            ok=db_online_coin_submit(d,&c,(u32)amount,1,request,err);
+        } else *VEC_ADD(&ids,u32)=c.no;
+    }
+    if(ok) ok=bubble_currency(d,&ids,"taiwan_cain_2nd.inventory","coin",amount,0,err);
+    if(ok) *offline=(u32)ids.n;
+    my_free(&r);str_free(&s);vec_free(&ids);return ok;
 }
 
 int db_bubble_tick(Db *d, const BubbleCfg *cfg, BubblePaid *paid, Err err) {
@@ -112,12 +195,18 @@ int db_bubble_tick(Db *d, const BubbleCfg *cfg, BubblePaid *paid, Err err) {
         return 0;
     }
     if (!cfg->coin && !cfg->dpoint && !cfg->dcoin && !cfg->item) return 1;
-    if (!db_tx_begin(d, err)) return 0;
-    Vec chars, accounts;
+    Vec chars, accounts, requests;
     vec_init(&chars, sizeof(u32));
     vec_init(&accounts, sizeof(u32));
-    int ok = bubble_targets(d, cfg, &chars, &accounts, err) &&
-        bubble_currency(d, &chars, "taiwan_cain_2nd.inventory", "coin", cfg->coin, 0, err) &&
+    vec_init(&requests,sizeof(OnlineCommand));
+    u32 offline=0;
+    int ok=bubble_coin_preflight(d,cfg,err) &&
+        (cfg->target!=0 || bubble_online_targets(d,&chars,&accounts,err));
+    if(!ok || !db_tx_begin(d,err)) {
+        vec_free(&chars);vec_free(&accounts);vec_free(&requests);return 0;
+    }
+    ok = (cfg->target==0 || bubble_targets(d, cfg, &chars, &accounts, err)) &&
+        bubble_coin(d,&chars,cfg->coin,&requests,&offline,err) &&
         bubble_currency(d, &accounts, "taiwan_billing.cash_cera", "cera", cfg->dpoint, 1, err) &&
         bubble_currency(d, &accounts, "taiwan_billing.cash_cera_point", "cera_point", cfg->dcoin, 2, err);
     for (int i = 0; ok && cfg->item && i < chars.n; i++) {
@@ -137,11 +226,29 @@ int db_bubble_tick(Db *d, const BubbleCfg *cfg, BubblePaid *paid, Err err) {
     if (ok && db_cancelled()) { snprintf(err, ERRBUF, "已取消"); ok = 0; }
     if (ok) ok = db_tx_commit(d, err);
     else db_tx_rollback(d);
-    if (ok && paid) {
-        paid->chars = cfg->coin || cfg->item ? (u32)chars.n : 0;
-        paid->accounts = cfg->dpoint || cfg->dcoin ? (u32)accounts.n : 0;
+    if(ok) {
+        BubblePaid result={0};result.committed=1;
+        result.chars=cfg->item?(u32)chars.n:offline;
+        result.accounts=cfg->dpoint || cfg->dcoin?(u32)accounts.n:0;
+        Err first={0};
+        for(int i=0;i<requests.n;i++) {
+            OnlineCommand *request=vec_at(&requests,i);
+            Err detail={0};
+            if(db_online_finish(d,request,detail)) {
+                if(!cfg->item) result.chars++;
+            } else {
+                if(!first[0]) snprintf(first,ERRBUF,"%s",detail);
+                if(request->rejected) result.coin_rejected++;
+                else result.coin_unknown++;
+                ok=0;
+            }
+        }
+        if(!ok) snprintf(err,ERRBUF,"部分奖励已提交：%u角色/%u账号已确认，复活币%u未执行/%u不确定；%s",
+            result.chars,result.accounts,result.coin_rejected,result.coin_unknown,first);
+        if(paid) *paid=result;
     }
     vec_free(&chars);
     vec_free(&accounts);
+    vec_free(&requests);
     return ok;
 }

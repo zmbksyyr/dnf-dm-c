@@ -132,6 +132,8 @@ static int run_probe(int argc, char **argv) {
              db_set_qp(&d, &c, 34, err) && db_set_cera(&d, &c, 4567, 5678, err);
     } else if (!strcmp(argv[1], "coin") && argc == 5) {
         ok = db_set_coin(&d, &c, (u64)strtoull(argv[4], NULL, 10), err);
+    } else if (!strcmp(argv[1], "add-coin") && argc == 5) {
+        ok = db_add_coin(&d, &c, (u64)strtoull(argv[4], NULL, 10), err);
     } else if (!strcmp(argv[1], "online") && argc == 4) {
         printf("online=%d\n", db_is_online(&d, c.mid));
         ok = 1;
@@ -170,7 +172,8 @@ static int run_probe(int argc, char **argv) {
         if (argc == 11) { cfg.avatar = atoi(argv[9]); cfg.creature = atoi(argv[10]); }
         BubblePaid paid;
         ok = db_bubble_tick(&d, &cfg, &paid, err);
-        printf("paid_chars=%u paid_accounts=%u\n", paid.chars, paid.accounts);
+        printf("paid_chars=%u paid_accounts=%u coin_rejected=%u coin_unknown=%u committed=%d\n",
+               paid.chars,paid.accounts,paid.coin_rejected,paid.coin_unknown,paid.committed);
     } else if (!strcmp(argv[1], "query") && argc == 3) {
         Buf f = {0};
         if (file_read(argv[2], &f)) {

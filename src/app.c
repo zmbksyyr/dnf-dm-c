@@ -573,6 +573,7 @@ typedef struct {
     char kw[64];
 } KwCtx;
 static KwCtx g_kw_ctx;
+static KwCtx g_poll_ctx;
 
 static int w_chars(void *ctx, Err err) {
     KwCtx *k = (KwCtx *)ctx;
@@ -606,7 +607,13 @@ static int chars_differs(const Vec *a, const Vec *b) {
 }
 
 static int w_poll(void *ctx, Err err) {
-    (void)ctx;
+    const KwCtx *filter=(const KwCtx *)ctx;
+    if(filter->kw[0]) {
+        if(!db_list_chars(&g.db,&s_chars_next,500,filter->kw,err)) return 1;
+        s_chars_total_next=db_count_chars(&g.db,filter->kw);
+        InterlockedExchange(&s_chars_dirty,1);
+        return 1;
+    }
     if (!db_poll_chars(&g.db, &s_chars_next, 500, err)) return 1;   // 轮询失败不打扰界面
     if (s_chars_next.n < 500) s_chars_total_next = (u32)s_chars_next.n;
     InterlockedExchange(&s_chars_dirty, 1);
@@ -659,6 +666,7 @@ static void connect_begin(void) {
 
 // 用户手动连接：先取消待进行的自动重连
 void app_connect(void) {
+    g_kw_ctx.kw[0]=0;
     app_reconnect_cancel();
     connect_begin();
 }
@@ -1783,6 +1791,7 @@ void app_tick(void) {
     // 连接被别的作业占着就跳过这一轮，不抢（抢会把包串了）
     if (g.db_ok && !app_db_busy() && now_ms() - last_poll > (u64)g.cfg.poll_sec * 1000) {
         last_poll = now_ms();
-        job_start(&g.job_poll, w_poll, NULL);
+        g_poll_ctx=g_kw_ctx;
+        job_start(&g.job_poll, w_poll, &g_poll_ctx);
     }
 }

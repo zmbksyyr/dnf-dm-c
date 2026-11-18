@@ -183,9 +183,14 @@ void app_bubble_tick(void) {
         const char *tg = bub_target_name(s_bubble_run.target);
         char d[88];
         if (err[0]) {
+            if(s_bubble_result.committed) {
+                g.cfg.bubble_on=0;app_cfg_save();
+                s_bubble_paid=s_bubble_result;
+                app_log("泡点已停用，避免重复发放。%s",err);
+            }
             app_err("泡点结算失败：%s", err);
             snprintf(d, sizeof(d), "%s", err);
-            bub_plan_add(tg, d, "发放失败");
+            bub_plan_add(tg, d, s_bubble_result.committed?"部分完成·已停用":"发放失败");
         } else {
             s_bubble_paid = s_bubble_result;
             s_bubble_runs++;

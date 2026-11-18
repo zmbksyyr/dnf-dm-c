@@ -92,7 +92,7 @@ static int char_do(void *ctx, Err err) {
     who.no = c->cno;
     who.mid = c->mid;
     // 排队期间可能重新登录；执行时复查账号，不能只依赖 UI 的轮询快照。
-    if (c->kind >= K_RENAME && c->kind <= K_PVP &&
+    if (c->kind >= K_RENAME && c->kind <= K_PVP && c->kind != K_COIN &&
         !db_require_offline(&g.db, who.mid, err)) return 0;
     switch (c->kind) {
         case K_RENAME:
@@ -104,7 +104,7 @@ static int char_do(void *ctx, Err err) {
             return db_set_name(&g.db, &who, c->s, err);
         case K_LEV: return db_set_lev(&g.db, &who, c->i1, (i64)c->u1, err);
         case K_MONEY: return db_set_money(&g.db, &who, c->u1, err);
-        case K_COIN: return db_set_coin(&g.db, &who, c->u1, err);
+        case K_COIN: return c->i1 ? db_add_coin(&g.db, &who, c->u1, err) : db_set_coin(&g.db, &who, c->u1, err);
         case K_CERA: return db_set_cera(&g.db, &who, c->u1, c->u2, err);
         case K_JOB: return db_set_job(&g.db, &who, c->i1, c->i2, err);
         case K_ACCM: return db_set_account_money(&g.db, &who, c->u1, err);

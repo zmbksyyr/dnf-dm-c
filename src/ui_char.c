@@ -161,7 +161,7 @@ static void gm_apply(int kind, const Ctx *c) {
         case K_JOB: g.cur.job = c->i1; g.cur.grow = c->i2; break;
         case K_RENAME: snprintf(g.cur.name, sizeof(g.cur.name), "%s", c->s); break;
         case K_MONEY: g.data.money = c->u1; break;
-        case K_COIN: g.data.coin = c->u1; break;
+        case K_COIN: g.data.coin = c->i1 ? g.data.coin+c->u1 : c->u1; break;
         case K_CERA: g.data.cera = c->u1; g.data.cera_point = c->u2; break;
         case K_ACCM: g.data.account_money = c->u1; break;
         case K_VIP: snprintf(g.data.vip, sizeof(g.data.vip), "%s", c->s); break;
@@ -592,7 +592,7 @@ static i64 gm_value(int id) {
 // 校验不过不弹框打断——失焦时弹模态框会跟焦点切换打架，状态栏说一句就够了。
 static void gm_commit(int id) {
     if (!g.char_ok) return;
-    if (g.cur.online) {
+    if (g.cur.online && id != G_COIN) {
         app_status("角色在线，改动未写入——请先退出游戏");
         gm_refill();                     // 顺便把刚填的值清掉
         return;
@@ -633,7 +633,7 @@ static void gm_commit(int id) {
             i64 v = gm_u32(c_coin);
             gm_take(c_coin);
             if (v == 0) return;
-            if (v == (i64)g.data.coin) return;
+            if (!g.cur.online && v == (i64)g.data.coin) return;
             c.u1 = (u64)v;
             gm_push(K_COIN, &c);
             return;
@@ -746,11 +746,18 @@ static const struct {
 static void gm_quick_add(int i) {
     if (i < 0 || i >= QADD_N) return;
     if (!g.char_ok) return;
-    if (g.cur.online) {
+    if (g.cur.online && kQAdd[i].target != G_COIN) {
         app_status("角色在线，改动未写入——请先退出游戏");
         return;
     }
     int tgt = kQAdd[i].target;
+    if (tgt == G_COIN) {
+        Ctx c = {0};
+        c.u1 = kQAdd[i].step;
+        c.i1 = 1;
+        gm_push(K_COIN, &c);
+        return;
+    }
     HWND e = gm_field(tgt);
     if (!e) return;
     i64 cap = (tgt == G_LEV) ? gm_lev_max()
@@ -1044,9 +1051,9 @@ static void gm_lock(Page *p) {
     // 与其让人改半天发现没生效，不如在线时把这些框置灰，并把条件写在组框标题上——
     // 灰掉的控件收不到悬停，提示只能写在旁边的文字里。一键按钮不受此限（它们直接改库）。
     int edit = g.char_ok && !g.cur.online;
-    for (int i = 0; i < 13; i++) ui_enable(GetDlgItem(p->wnd, ids[i]), edit);
+    for (int i = 0; i < 13; i++) ui_enable(GetDlgItem(p->wnd, ids[i]), ids[i]==G_COIN ? g.char_ok : edit);
     // 快捷按钮和它对应的输入框同生同死：框不能改的时候，按钮点了也没意义
-    for (int i = 0; i < QADD_N; i++) ui_enable(GetDlgItem(p->wnd, G_QADD + i), edit);
+    for (int i = 0; i < QADD_N; i++) ui_enable(GetDlgItem(p->wnd, G_QADD + i), kQAdd[i].target==G_COIN ? g.char_ok : edit);
     for (int i = 0; i < 10; i++) ui_enable(GetDlgItem(p->wnd, G_SP + i), on);
     ui_enable(GetDlgItem(p->wnd, G_QEXP), on);
     ui_enable(GetDlgItem(p->wnd, G_QIMP), on);
@@ -1061,7 +1068,7 @@ static void gm_lock(Page *p) {
             // 没选角色时不加任何后缀：那时候这些框是"还没东西可改"，不是"在线不能改"
             char *t = (!g.char_ok) ? fmt_new("%s", bx[i].base)
                       : edit       ? fmt_new("%s", bx[i].base)
-                                   : fmt_new("%s（角色在线，退出游戏才能改）", bx[i].base);
+                                     : fmt_new("%s（%s）", bx[i].base,i==1?"在线可改复活币，其余需退出":"退出游戏才能改");
             WCHAR w[96];
             utf16(t, w, COUNT_OF(w));
             if (h) SetWindowTextW(h, w);

@@ -123,11 +123,12 @@ int  db_set_job(Db *d, const Charac *c, int job, int grow, Err err);
 int  db_set_lev(Db *d, const Charac *c, int lev, i64 exp, Err err);
 int  db_set_money(Db *d, const Charac *c, u64 money, Err err);
 int  db_set_coin(Db *d, const Charac *c, u64 coin, Err err);
+int  db_add_coin(Db *d, const Charac *c, u64 coin, Err err);
 int  db_set_account_money(Db *d, const Charac *c, u64 money, Err err);
 int  db_set_cera(Db *d, const Charac *c, u64 cera, u64 point, Err err);
 
 // 泡点结算：固定本次名单，角色奖励逐角色、账号奖励去重，全部成功才报到账人数。
-// 在线范围为在线账号下未删除角色；空名单成功，缺失的指定目标报错。
+// 在线范围由游戏线程确认当前角色；空名单成功，缺失的指定目标报错。
 typedef struct {
     int  target;      // 0=仅在线 1=全服(含离线) 2=指定角色 3=指定账号
     int  coin;        // 复活币 (inventory.coin)
@@ -139,7 +140,9 @@ typedef struct {
     int  avatar, creature;  // 物品邮件附件类型，由调用方判定
 } BubbleCfg;
 typedef struct {
-    u32 chars, accounts;  // 收到角色奖励 / 账号奖励的去重人数，失败时均为 0
+    u32 chars, accounts;  // 已确认收到角色奖励 / 账号奖励的人数
+    u32 coin_rejected, coin_unknown;
+    int committed;       // SQL 已提交后在线命令可能部分成功，不可声称整批回滚
 } BubblePaid;
 int  db_bubble_tick(Db *d, const BubbleCfg *cfg, BubblePaid *paid, Err err);
 // GM 一键

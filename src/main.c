@@ -505,8 +505,10 @@ static void chars_fill(void) {
     int shown = 0, selrow = -1;
     for (int i = 0; i < g.chars.n; i++) {
         Charac *c = VEC_AT(&g.chars, Charac, i);
-        // 关键字同时匹配角色名与账号名
-        if (kw[0] && !str_istr(c->name, kw) && !str_istr(c->account, kw)) continue;
+        // 与数据库搜索保持一致：编号也能找到角色。
+        char number[16];
+        snprintf(number,sizeof(number),"%u",c->no);
+        if (kw[0] && !str_istr(c->name, kw) && !str_istr(c->account, kw) && strcmp(number,kw)) continue;
         char info[96];
         fmt(info, sizeof(info), "Lv.%d · %s · %s", c->lev, app_job_text(c->job),
             c->online ? "在线" : "离线");
@@ -871,7 +873,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
 
         case WM_KEYDOWN:              // 重查角色表（不停留在按钮上，F5 即可）
-            if (wp == VK_F5) { app_list_chars(""); return 0; }
+            if (wp == VK_F5) { PostMessageW(h,WM_COMMAND,IDC_KWGO,0); return 0; }
             return 0;
 
         case WM_SIZE:
@@ -992,13 +994,16 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 if (path[0] && str_ieq(path, g.cfg.img_dir) == 0) app_load_npk(path);
                 return 0;
             }
-            if (id == IDC_KWGO) {         // 只过滤已拉到的角色，不重查库，选择不会丢
-                chars_fill();
+            if (id == IDC_KWGO) {         // 搜索覆盖数据库，不限于首次载入的 200 个角色。
+                char keyword[64];
+                ui_get(g_kw,keyword,sizeof(keyword));
+                str_trim(keyword);
+                app_list_chars(keyword);
                 return 0;
             }
             if (id == IDC_KWCLR) {
                 ui_text(g_kw, "");
-                chars_fill();
+                app_list_chars("");
                 return 0;
             }
             if (id == IDC_KW && code == EN_CHANGE) {
