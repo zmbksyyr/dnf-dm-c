@@ -60,8 +60,13 @@ int db_online_character_submit(Db *d,u32 mid,OnlineCommand *request,Err err) {
     return ok;
 }
 
+int db_online_fatigue_submit(Db *d,const Charac *c,OnlineCommand *request,Err err) {
+    if(!c->no) {snprintf(err,ERRBUF,"在线操作缺少角色编号");return 0;}
+    return online_submit(d,c,0,"refill_fatigue",3,request,err);
+}
+
 int db_online_finish(Db *d, OnlineCommand *request, Err err) {
-    int version=request->version==2?2:1;
+    int version=request->version==3?3:request->version==2?2:1;
     Str s={0};MyResult r={0};
     u64 deadline=now_ms()+22000;
     int stopped=0,ok=0;

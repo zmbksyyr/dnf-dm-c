@@ -1290,25 +1290,34 @@ int db_max_expert(Db *d, const Charac *c, Err err) {
                    c->no);
 }
 
-// 补满疲劳：当前疲劳拉到上限，同时把已消耗计数清零（两表同生同死）
+// The pinned original game stores remaining fatigue, not consumed fatigue.
 int db_set_fatigue(Db *d, const Charac *c, Err err) {
-    if (!db_tx_begin(d, err)) return 0;
-    if (!db_exec(d, "补满疲劳", "taiwan_cain.charac_info", "charac_no", c->no, err,
-                 "UPDATE taiwan_cain.charac_info SET fatigue=max_fatigue WHERE charac_no=%u",
-                 c->no))
-        goto fail;
-    // OpenDNF 的「当前剩余疲劳」= 客户端上限(本端 176) − charac_stat.fatigue，
-    // 也就是这一列存的是「已消耗」，登录时只读它（charac_info.fatigue 根本不被读取，
-    // 完整的登录 SELECT 里只有 max_fatigue）。只清 used_fatigue 不清 fatigue，
-    // 游戏里疲劳一点都不会变 —— 实测：fatigue=9 显示 167/176，写完 0 才变 176/176。
-    if (!db_exec(d, "清疲劳消耗", "taiwan_cain.charac_stat", "charac_no", c->no, err,
-                 "UPDATE taiwan_cain.charac_stat SET fatigue=0, used_fatigue=0 "
-                 "WHERE charac_no=%u", c->no))
-        goto fail;
-    return db_tx_commit(d, err);
-fail:
-    db_tx_rollback(d);
-    return 0;
+    int online=0;
+    if(!db_account_online(d,c->mid,&online,err)) return 0;
+    if(online) {
+        OnlineCommand request;
+        return db_online_fatigue_submit(d,c,&request,err) && db_online_finish(d,&request,err);
+    }
+    if(!db_require_offline(d,c->mid,err)) return 0;
+    Str s={0};MyResult r={0};u64 affected=0;
+    // Both fields and the offline/ownership checks belong to the same write.
+    // Preserve premium fatigue; only the active game knows current entitlement.
+    str_catf(&s,"UPDATE taiwan_cain.charac_info c JOIN taiwan_cain.charac_stat s "
+        "ON s.charac_no=c.charac_no SET c.fatigue=c.max_fatigue,s.fatigue=c.max_fatigue,s.used_fatigue=0 "
+        "WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 AND c.max_fatigue BETWEEN 1 AND 32767 "
+        "AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status>=1)",c->no,c->mid);
+    int ok=run_aff(d,&s,&affected);
+    if(ok && !affected) {
+        str_clear(&s);
+        str_catf(&s,"SELECT 1 FROM taiwan_cain.charac_info c JOIN taiwan_cain.charac_stat s "
+            "ON s.charac_no=c.charac_no WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 "
+            "AND c.max_fatigue BETWEEN 1 AND 32767 AND c.fatigue=c.max_fatigue AND s.fatigue=c.max_fatigue "
+            "AND s.used_fatigue=0 AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l "
+            "WHERE l.m_id=c.m_id AND l.login_status>=1)",c->no,c->mid);
+        ok=select1(d,&s,&r) && r.nrow==1;
+        if(!ok) snprintf(err,ERRBUF,"疲劳未写入：账号已上线、归属变化、上限无效或角色记录缺失");
+    } else if(!ok) snprintf(err,ERRBUF,"补满疲劳：%s",d->err);
+    my_free(&r);str_free(&s);return ok;
 }
 
 // member_dungeon.dungeon 是「副本ID|难度」的逗号串，难度 3 为最高。

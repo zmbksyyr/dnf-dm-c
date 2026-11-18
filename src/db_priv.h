@@ -11,6 +11,7 @@ int  db_account_online(Db *d, u32 mid, int *online, Err err);
 typedef struct { char token[33]; int rejected, inspect, version; u32 charac_no; } OnlineCommand;
 int  db_online_coin_submit(Db *d, const Charac *c, u32 amount, int add, OnlineCommand *request, Err err);
 int  db_online_money_submit(Db *d, const Charac *c, u32 amount, int add, OnlineCommand *request, Err err);
+int  db_online_fatigue_submit(Db *d, const Charac *c, OnlineCommand *request, Err err);
 int  db_online_finish(Db *d, OnlineCommand *request, Err err);
 int  db_online_character_submit(Db *d, u32 mid, OnlineCommand *request, Err err);
 

@@ -665,7 +665,8 @@ def gm_btn_one_key(ctx):
         # 同一动作会连带写同表的其它列，一并快照还原
         _take_soft(ctx, snap, "taiwan_cain_2nd.skill", "charac_no", cno,
                    ("remain_sp_2nd", "remain_sfp_1st", "remain_sfp_2nd"))
-        _take_soft(ctx, snap, "taiwan_cain.charac_stat", "charac_no", cno, ("used_fatigue",))
+        _take_soft(ctx, snap, "taiwan_cain.charac_stat", "charac_no", cno, ("fatigue", "used_fatigue",))
+        _take_soft(ctx, snap, "taiwan_cain.charac_info", "charac_no", cno, ("fatigue",))
         if not ctx.ok("选中第一个角色", _select_char(ctx, cno)):
             return
         for label, cid, table, col, target, dirty in (
@@ -678,7 +679,7 @@ def gm_btn_one_key(ctx):
                 ("解锁装备等级", G["UNLOCK"], "taiwan_cain.charac_manage_info",
                  "max_equip_level", _lev_max(), 10),
                 ("满专家", G["EXPERT"], "taiwan_cain.charac_stat", "expert_job_exp", 2054, 7),
-                ("补满疲劳", G["FATIGUE"], "taiwan_cain.charac_info", "fatigue", None, 7)):
+                ("补满疲劳", G["FATIGUE"], "taiwan_cain.charac_stat", "fatigue", None, 7)):
             _one_key(ctx, snap, cno, label, cid, table, col, target, dirty)
     finally:
         snap.restore()

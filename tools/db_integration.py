@@ -685,6 +685,42 @@ class DataTests(unittest.TestCase):
                             self.assertEqual(r.returncode, 0, r.stderr)
                             self.assertEqual(balance(), 0)
 
+    def test_fatigue_remaining_value_and_offline_guards(self):
+        with self.bubble_fixture() as (ids, mid, _):
+            cid=ids[0]
+            table='taiwan_cain.charac_stat'
+            self.assertEqual(self.one('SELECT COUNT(*) FROM '+table+' WHERE charac_no=%s', (cid,)), 0)
+            self.cur.execute('INSERT INTO '+table+' (charac_no,fatigue,used_fatigue,premium_fatigue) VALUES (%s,13,13,7)', (cid,))
+            try:
+                self.cur.execute('UPDATE taiwan_cain.charac_info SET fatigue=9,max_fatigue=156 WHERE charac_no=%s', (cid,))
+                def values():
+                    self.cur.execute('SELECT c.fatigue,c.max_fatigue,s.fatigue,s.used_fatigue,s.premium_fatigue '
+                                     'FROM taiwan_cain.charac_info c JOIN '+table+' s ON s.charac_no=c.charac_no WHERE c.charac_no=%s', (cid,))
+                    return self.cur.fetchone()
+                before=values()
+                r=self.probe('fatigue',cid,mid+1)
+                self.assertNotEqual(r.returncode,0)
+                self.assertEqual(values(),before)
+                r=self.probe('fatigue',cid,mid)
+                self.assertEqual(r.returncode,0,r.stderr)
+                self.assertEqual(values(),(156,156,156,0,7))
+                r=self.probe('fatigue',cid,mid)
+                self.assertEqual(r.returncode,0,r.stderr)
+                # max_fatigue is signed SMALLINT; non-strict MySQL clamps 32768.
+                for invalid in (-1,0):
+                    self.cur.execute('UPDATE taiwan_cain.charac_info SET max_fatigue=%s WHERE charac_no=%s', (invalid,cid))
+                    before=values()
+                    r=self.probe('fatigue',cid,mid)
+                    self.assertNotEqual(r.returncode,0)
+                    self.assertEqual(values(),before)
+                self.cur.execute('UPDATE taiwan_cain.charac_info SET max_fatigue=156,fatigue=9 WHERE charac_no=%s', (cid,))
+                self.cur.execute('DELETE FROM '+table+' WHERE charac_no=%s',(cid,))
+                r=self.probe('fatigue',cid,mid)
+                self.assertNotEqual(r.returncode,0)
+                self.assertEqual(self.one('SELECT fatigue FROM taiwan_cain.charac_info WHERE charac_no=%s',(cid,)),9)
+            finally:
+                self.cur.execute('DELETE FROM '+table+' WHERE charac_no=%s',(cid,))
+
     def test_bubble_online_siblings_rejected_before_account_rewards(self):
         with self.bubble_fixture() as (_, mid, _):
             self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s',(mid,))
