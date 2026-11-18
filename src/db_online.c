@@ -10,7 +10,7 @@ int db_account_online(Db *d, u32 mid, int *online, Err err) {
     my_free(&r);str_free(&s);return ok;
 }
 
-static int online_submit(Db *d, const Charac *c, u32 amount, const char *operation, int version, OnlineCommand *request, Err err) {
+static int online_submit(Db *d, const Charac *c, u32 amount, const u32 *extra, const char *operation, int version, OnlineCommand *request, Err err) {
     memset(request,0,sizeof(*request));
     request->version=version;
     Str s={0};MyResult r={0};u64 affected=0;
@@ -20,11 +20,14 @@ static int online_submit(Db *d, const Charac *c, u32 amount, const char *operati
     my_free(&r);str_clear(&s);
     if(!ok || strlen(request->token)!=32) goto failed;
     str_catf(&s,"INSERT INTO d_taiwan.dnf_gm_online_v%d "
-        "(token,m_id,charac_no,operation,amount,created,expires,updated) ",version);
-    if(c->no) str_catf(&s,
-        "SELECT '%s',c.m_id,c.charac_no,'%s',%u,NOW(6),DATE_ADD(NOW(6),INTERVAL 20 SECOND),NOW(6) "
-        "FROM taiwan_cain.charac_info c WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 ",
-        request->token,operation,amount,c->no,c->mid);
+        "(token,m_id,charac_no,operation,amount%s,created,expires,updated) ",version,
+        extra?",amount_sp2,amount_tp,amount_tp2":"");
+    if(c->no) {
+        str_catf(&s,"SELECT '%s',c.m_id,c.charac_no,'%s',%u",request->token,operation,amount);
+        if(extra) str_catf(&s,",%u,%u,%u",extra[0],extra[1],extra[2]);
+        str_catf(&s,",NOW(6),DATE_ADD(NOW(6),INTERVAL 20 SECOND),NOW(6) "
+            "FROM taiwan_cain.charac_info c WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 ",c->no,c->mid);
+    }
     else str_catf(&s,
         "SELECT '%s',c.UID,0,'inspect',0,NOW(6),DATE_ADD(NOW(6),INTERVAL 20 SECOND),NOW(6) "
         "FROM d_taiwan.accounts c WHERE c.UID=%u ",request->token,c->mid);
@@ -45,28 +48,34 @@ failed:
 
 int db_online_coin_submit(Db *d,const Charac *c,u32 amount,int add,OnlineCommand *request,Err err) {
     if(!c->no) {snprintf(err,ERRBUF,"在线奖励缺少角色编号");return 0;}
-    return online_submit(d,c,amount,add?"add_coin":"set_coin",1,request,err);
+    return online_submit(d,c,amount,NULL,add?"add_coin":"set_coin",1,request,err);
 }
 
 int db_online_money_submit(Db *d,const Charac *c,u32 amount,int add,OnlineCommand *request,Err err) {
     if(!c->no) {snprintf(err,ERRBUF,"在线奖励缺少角色编号");return 0;}
-    return online_submit(d,c,amount,add?"add_money":"set_money",2,request,err);
+    return online_submit(d,c,amount,NULL,add?"add_money":"set_money",2,request,err);
 }
 
 int db_online_character_submit(Db *d,u32 mid,OnlineCommand *request,Err err) {
     Charac c={0};c.mid=mid;
-    int ok=online_submit(d,&c,0,"inspect",1,request,err);
+    int ok=online_submit(d,&c,0,NULL,"inspect",1,request,err);
     request->inspect=1;
     return ok;
 }
 
 int db_online_fatigue_submit(Db *d,const Charac *c,OnlineCommand *request,Err err) {
     if(!c->no) {snprintf(err,ERRBUF,"在线操作缺少角色编号");return 0;}
-    return online_submit(d,c,0,"refill_fatigue",3,request,err);
+    return online_submit(d,c,0,NULL,"refill_fatigue",3,request,err);
+}
+
+int db_online_skill_submit(Db *d,const Charac *c,u32 sp,u32 sp2,u32 tp,u32 tp2,OnlineCommand *request,Err err) {
+    if(!c->no) {snprintf(err,ERRBUF,"在线操作缺少角色编号");return 0;}
+    u32 extra[]={sp2,tp,tp2};
+    return online_submit(d,c,sp,extra,"set_skill_points",4,request,err);
 }
 
 int db_online_finish(Db *d, OnlineCommand *request, Err err) {
-    int version=request->version==3?3:request->version==2?2:1;
+    int version=request->version==4?4:request->version==3?3:request->version==2?2:1;
     Str s={0};MyResult r={0};
     u64 deadline=now_ms()+22000;
     int stopped=0,ok=0;

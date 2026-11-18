@@ -685,6 +685,50 @@ class DataTests(unittest.TestCase):
                             self.assertEqual(r.returncode, 0, r.stderr)
                             self.assertEqual(balance(), 0)
 
+    def test_skill_points_wire_range_and_offline_guards(self):
+        table='taiwan_cain_2nd.skill'
+        fields=('remain_sp','remain_sp_2nd','remain_sfp_1st','remain_sfp_2nd')
+        with self.bubble_fixture() as (ids,mid,_):
+            cid=ids[0]
+            self.assertEqual(self.one('SELECT COUNT(*) FROM '+table+' WHERE charac_no=%s',(cid,)),0)
+            self.cur.execute('SELECT s.* FROM '+table+' s JOIN taiwan_cain.charac_info c '
+                             'ON c.charac_no=s.charac_no WHERE c.delete_flag=0 LIMIT 1')
+            row=list(self.cur.fetchone());columns=[x[0] for x in self.cur.description]
+            row[columns.index('charac_no')]=cid
+            for i,name in enumerate(fields):row[columns.index(name)]=7+i
+            self.cur.execute('INSERT INTO '+table+' ('+','.join(map(ident,columns))+') VALUES ('+
+                             ','.join(['%s']*len(columns))+')',row)
+            def values():
+                self.cur.execute('SELECT '+','.join(fields)+' FROM '+table+' WHERE charac_no=%s',(cid,))
+                return self.cur.fetchone()
+            try:
+                before=values()
+                r=self.probe('skill-points',cid,mid+1,1,2,3,4)
+                self.assertNotEqual(r.returncode,0);self.assertEqual(values(),before)
+                for mode in ('','STRICT_ALL_TABLES'):
+                    for want in ((0,0,0,0),(12345,23456,34567,45678),(65535,)*4):
+                        for _ in range(2):
+                            r=self.probe('skill-points',cid,mid,*want,mode=mode)
+                            self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(values(),want)
+                    for index in range(4):
+                        for invalid in (-1,65536):
+                            bad=[1,2,3,4];bad[index]=invalid;before=values()
+                            r=self.probe('skill-points',cid,mid,*bad,mode=mode)
+                            self.assertNotEqual(r.returncode,0);self.assertEqual(values(),before)
+                self.cur.execute('SELECT * FROM '+table+' WHERE charac_no=%s',(cid,))
+                saved=self.cur.fetchone()
+                self.assertEqual([v for k,v in zip(columns,saved) if k not in fields],
+                                 [v for k,v in zip(columns,row) if k not in fields])
+                self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s',(cid,))
+                r=self.probe('skill-points',cid,mid,1,2,3,4)
+                self.assertNotEqual(r.returncode,0);self.assertEqual(values(),(65535,)*4)
+                self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0 WHERE charac_no=%s',(cid,))
+                self.cur.execute('DELETE FROM '+table+' WHERE charac_no=%s',(cid,))
+                r=self.probe('skill-points',cid,mid,1,2,3,4)
+                self.assertNotEqual(r.returncode,0)
+            finally:
+                self.cur.execute('DELETE FROM '+table+' WHERE charac_no=%s',(cid,))
+
     def test_fatigue_remaining_value_and_offline_guards(self):
         with self.bubble_fixture() as (ids, mid, _):
             cid=ids[0]

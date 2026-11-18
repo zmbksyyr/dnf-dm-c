@@ -4,6 +4,8 @@
 #include "item.h"
 #include "mysql.h"
 
+enum { GM_SKILL_POINT_MAX = 65535 }; // Original skill notification uses unsigned 16-bit counters.
+
 typedef struct {
     u32  no, mid;
     char name[64];        // UTF-8

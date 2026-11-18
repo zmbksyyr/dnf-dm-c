@@ -670,7 +670,7 @@ def gm_btn_one_key(ctx):
         if not ctx.ok("选中第一个角色", _select_char(ctx, cno)):
             return
         for label, cid, table, col, target, dirty in (
-                ("满SP/TP", G["SP"], "taiwan_cain_2nd.skill", "remain_sp", 90000, 7),
+                ("满SP/TP", G["SP"], "taiwan_cain_2nd.skill", "remain_sp", 65535, 7),
                 ("满QP", G["QP"], "taiwan_cain.charac_quest_shop", "qp", 90000, 7),
                 ("无限负重", G["NOWEIGHT"], "taiwan_cain.charac_info", "inven_weight",
                  99999999, 100),

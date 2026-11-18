@@ -1221,10 +1221,35 @@ int db_set_cera(Db *d, const Charac *c, u64 cera, u64 point, Err err) {
 
 // ---------------- GM 一键 ----------------
 int db_set_sp(Db *d, const Charac *c, int sp, int sp2, int tp, int tp2, Err err) {
-    return db_exec(d, "改 SP/TP", "taiwan_cain_2nd.skill", "charac_no", c->no, err,
-                   "UPDATE taiwan_cain_2nd.skill SET remain_sp=%d,remain_sp_2nd=%d,"
-                   "remain_sfp_1st=%d,remain_sfp_2nd=%d WHERE charac_no=%u",
-                   sp, sp2, tp, tp2, c->no);
+    if(sp<0 || sp>GM_SKILL_POINT_MAX || sp2<0 || sp2>GM_SKILL_POINT_MAX ||
+       tp<0 || tp>GM_SKILL_POINT_MAX || tp2<0 || tp2>GM_SKILL_POINT_MAX) {
+        snprintf(err,ERRBUF,"SP/TP 必须在 0..%d，超出原游戏协议范围未写入",GM_SKILL_POINT_MAX);return 0;
+    }
+    int online=0;
+    if(!db_account_online(d,c->mid,&online,err)) return 0;
+    if(online) {
+        OnlineCommand request;
+        return db_online_skill_submit(d,c,(u32)sp,(u32)sp2,(u32)tp,(u32)tp2,&request,err) && db_online_finish(d,&request,err);
+    }
+    if(!db_require_offline(d,c->mid,err)) return 0;
+    Str s={0};MyResult r={0};u64 affected=0;
+    str_catf(&s,"UPDATE taiwan_cain_2nd.skill s JOIN taiwan_cain.charac_info c ON c.charac_no=s.charac_no "
+        "SET s.remain_sp=%d,s.remain_sp_2nd=%d,s.remain_sfp_1st=%d,s.remain_sfp_2nd=%d "
+        "WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 "
+        "AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status>=1)",
+        sp,sp2,tp,tp2,c->no,c->mid);
+    int ok=run_aff(d,&s,&affected);
+    if(ok && !affected) {
+        str_clear(&s);
+        str_catf(&s,"SELECT 1 FROM taiwan_cain_2nd.skill s JOIN taiwan_cain.charac_info c ON c.charac_no=s.charac_no "
+            "WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 AND s.remain_sp=%d AND s.remain_sp_2nd=%d "
+            "AND s.remain_sfp_1st=%d AND s.remain_sfp_2nd=%d AND NOT EXISTS "
+            "(SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status>=1)",
+            c->no,c->mid,sp,sp2,tp,tp2);
+        ok=select1(d,&s,&r) && r.nrow==1;
+        if(!ok) snprintf(err,ERRBUF,"SP/TP 未写入：账号已上线、归属变化或技能记录缺失");
+    } else if(!ok) snprintf(err,ERRBUF,"改 SP/TP：%s",d->err);
+    my_free(&r);str_free(&s);return ok;
 }
 
 int db_set_qp(Db *d, const Charac *c, int qp, Err err) {

@@ -838,7 +838,7 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     kc.cno = g.cur.no;
     kc.mid = g.cur.mid;
     switch (id) {
-        case G_SP: kc.kind = K_SP; kc.i1 = 90000; kc.i2 = 90000; break;
+        case G_SP: kc.kind = K_SP; kc.i1 = GM_SKILL_POINT_MAX; kc.i2 = GM_SKILL_POINT_MAX; break;
         case G_QP: kc.kind = K_QP; kc.i1 = 90000; break;
         case G_NOWEIGHT: kc.kind = K_NOWEIGHT; break;
         case G_SLOT: kc.kind = K_SLOT; break;
