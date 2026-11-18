@@ -8,7 +8,7 @@ int  run_aff(Db *d, Str *sql, u64 *aff);
 int  run(Db *d, Str *sql);
 int  select1(Db *d, Str *sql, MyResult *r);
 int  db_account_online(Db *d, u32 mid, int *online, Err err);
-typedef struct { char token[33]; int rejected; u32 charac_no; } OnlineCommand;
+typedef struct { char token[33]; int rejected, inspect; u32 charac_no; } OnlineCommand;
 int  db_online_coin_submit(Db *d, const Charac *c, u32 amount, int add, OnlineCommand *request, Err err);
 int  db_online_finish(Db *d, OnlineCommand *request, Err err);
 int  db_online_character_submit(Db *d, u32 mid, OnlineCommand *request, Err err);

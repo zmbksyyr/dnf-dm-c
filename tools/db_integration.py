@@ -611,6 +611,25 @@ class DataTests(unittest.TestCase):
             self.assertNotEqual(r.returncode,0)
             self.assertEqual(self.bubble_state(),state)
 
+    @unittest.skipUnless(os.environ.get('DNF_GM_TEST_LIVE_BRIDGE'),
+                         'requires an isolated live original-game bridge and no other online accounts')
+    def test_live_bubble_skips_inactive_accounts_without_rewarding_or_mutating_them(self):
+        self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_login.login_account_3 WHERE login_status<>0'), 0)
+        channel=self.one('SELECT channel_no FROM d_taiwan.dnf_gm_hosts_v1 '
+                         'WHERE seen>DATE_SUB(NOW(6),INTERVAL 5 SECOND) ORDER BY channel_no LIMIT 1')
+        with self.bubble_fixture() as (ids,mid,empty):
+            self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=1,m_channel_no=%s WHERE m_id=%s',
+                             (channel,mid))
+            self.cur.execute('INSERT INTO taiwan_login.login_account_3 (m_id,login_status,m_channel_no,last_login_date) '
+                             'VALUES (%s,1,%s,NOW())',(empty,channel))
+            state=self.bubble_state()
+            self.bubble_paid(self.bubble(target=0,coin=1,dp=2,dc=3,item=1001,num=4),0,0)
+            self.assertEqual(self.bubble_state(),state)
+            result=self.probe('add-coin',ids[0],mid,3)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('wrong_active_character',result.stderr)
+            self.assertEqual(self.bubble_state(),state)
+
     def test_bubble_deleted_or_missing_explicit_target_rejected(self):
         with self.bubble_fixture() as (ids, mid, _):
             state = self.bubble_state()

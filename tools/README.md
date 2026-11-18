@@ -39,6 +39,12 @@ python tools\compare_item.py --build
 建触发器权限；用例在 finally 中清理临时记录、触发器与自增计数。
 只在测试库执行，并与 GUI 回归、游戏服务和其他写入者错开。
 
+`DataTests.test_live_bubble_skips_inactive_accounts_without_rewarding_or_mutating_them`
+单独验证真实游戏桥接对残留在线标记的处理：须显式设置 `DNF_GM_TEST_LIVE_BRIDGE=1`，
+仅在独立副本、原游戏桥接运行且其他账号全部离线时执行。它创建并清理保留编号的
+测试记录，验证泡点跳过无当前角色账号、无奖励落库，以及直接增量仍拒绝；
+默认数据回归会跳过此用例。
+
 连接参数读同一份 settings.ini，或用 `DNF_GM_TEST_HOST`、`DNF_GM_TEST_PORT`、
 `DNF_GM_TEST_USER`、`DNF_GM_TEST_PWD` 覆盖；不在命令行参数或日志中输出密码。
 探针产物位于 `..\_build\audit\`，`DNF_GM_BUILD` 可指定读取配置的构建目录。

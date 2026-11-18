@@ -14,12 +14,14 @@ static int bubble_online_targets(Db *d,Vec *chars,Vec *accounts,Err err) {
         u32 mid=(u32)my_u64(&r,i,0,0);
         OnlineCommand *request=VEC_ADD(&requests,OnlineCommand);
         ok=db_online_character_submit(d,mid,request,err);
-        if(ok) *VEC_ADD(accounts,u32)=mid;
     }
     for(int i=0;ok && i<requests.n;i++) {
         OnlineCommand *request=vec_at(&requests,i);
         ok=db_online_finish(d,request,err);
-        if(ok) *VEC_ADD(chars,u32)=request->charac_no;
+        if(ok && request->charac_no) {
+            *VEC_ADD(chars,u32)=request->charac_no;
+            *VEC_ADD(accounts,u32)=(u32)my_u64(&r,i,0,0);
+        }
     }
     my_free(&r);str_free(&s);vec_free(&requests);return ok;
 }

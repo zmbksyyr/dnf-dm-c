@@ -1,5 +1,25 @@
 # 三项目审查与优化记录
 
+## 在线名单中的残留标记（2026-11-19）
+
+沿用下节原 ELF、MySQL、DP2 和两端独立副本。600 目标混合负载排空后，
+原版 Linux 有 5 个账号仍被登录表标记在线，游戏端已经没有当前角色。
+旧 GM 将只读 inspect 的 `wrong_active_character` 当成整批泡点失败；
+六并发复活币增量成功，但泡点被这些残留账号阻断，测试数据已恢复。
+
+现在只在 inspect 查询中把该明确结果解释为无当前角色，从角色与账号奖励名单中
+同时跳过；写入请求、其他拒绝、超时和不确定结果继续失败，不清改登录状态。
+新构建在保留这 5 个残留标记时通过当前角色泡点，且对无当前角色账号的直接增量
+仍拒绝并保持余额。Windows 与 Linux 的六并发增量、退出存档、离线增量、溢出和
+归属检查均再次通过并恢复测试值。Linux 随后的 600 人正常上线/退出清除了残留标记，
+独立 SQL 连续 15 秒确认全离线，没有直接重置在线标记。
+
+外部证据为 `../x/dnf-gm-output/evidence/` 下
+`gm-online-extra-server-logout-linux.private.json`（首轮失败）、
+`gm-online-extra-server-logout-linux-active-fix-verified.private.json`、
+`gm-online-extra-server-logout-windows-active-fix.private.json` 和
+`server-logout-linux-sql-offline.json`。此轮没有扩展其他缓存字段的在线写入能力。
+
 ## GM 在线桥接收尾（2026-11-18）
 
 本节更新下文同日早期实验的阶段性结论：在线命令传输、结果确认、复活币和泡点已接入生产路径。

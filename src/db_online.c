@@ -49,7 +49,9 @@ int db_online_coin_submit(Db *d,const Charac *c,u32 amount,int add,OnlineCommand
 
 int db_online_character_submit(Db *d,u32 mid,OnlineCommand *request,Err err) {
     Charac c={0};c.mid=mid;
-    return online_submit(d,&c,0,"inspect",request,err);
+    int ok=online_submit(d,&c,0,"inspect",request,err);
+    request->inspect=1;
+    return ok;
 }
 
 int db_online_finish(Db *d, OnlineCommand *request, Err err) {
@@ -66,6 +68,13 @@ int db_online_finish(Db *d, OnlineCommand *request, Err err) {
         if(state && !strcmp(state,"done")) {request->charac_no=(u32)my_u64(&r,0,3,0);ok=1;break;}
         if(state && (!strcmp(state,"rejected") || !strcmp(state,"unknown"))) {
             request->rejected=!strcmp(state,"rejected");
+            // An inspect request has no requested character. This v1 bridge
+            // reply means the account has no active game character (including
+            // character select or a stale SQL online flag), not a failed write.
+            // Mutation requests and ambiguous replies must still fail.
+            if(request->inspect && request->rejected && note && !strcmp(note,"wrong_active_character")) {
+                request->charac_no=0;ok=1;break;
+            }
             snprintf(err,ERRBUF,"在线命令 %s %s（%s）；请核对，勿重复发放",request->token,
                 !strcmp(state,"rejected")?"未执行":"结果不确定",note?note:"");break;
         }
