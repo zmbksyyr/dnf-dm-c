@@ -5,6 +5,7 @@
 #include "mysql.h"
 
 enum { GM_SKILL_POINT_MAX = 65535 }; // Original skill notification uses unsigned 16-bit counters.
+enum { GM_INVENTORY_WEIGHT = 99999999 }; // Existing one-click weight-capacity target.
 
 typedef struct {
     u32  no, mid;

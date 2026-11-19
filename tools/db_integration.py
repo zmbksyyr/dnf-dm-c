@@ -261,6 +261,30 @@ class DataTests(unittest.TestCase):
             r = self.probe('equipment-slots', TEST_NO, TEST_NO)
             self.assertNotEqual(r.returncode, 0, r.stdout)
 
+    def test_weight_offline_ownership_and_login_state(self):
+        with self.offline_character():
+            self.cur.execute('SELECT * FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,))
+            before = self.cur.fetchone(); columns = [d[0] for d in self.cur.description]
+            index = columns.index('inven_weight')
+            for _ in range(2):
+                r = self.probe('no-weight', TEST_NO, TEST_NO)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.cur.execute('SELECT * FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,))
+                after = self.cur.fetchone()
+                self.assertEqual(after[index], 99999999)
+                self.assertEqual(after[:index] + after[index + 1:], before[:index] + before[index + 1:])
+            r = self.probe('no-weight', TEST_NO, TEST_NO + 1)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s', (TEST_NO,))
+            r = self.probe('no-weight', TEST_NO, TEST_NO)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0,inven_weight=35000 WHERE charac_no=%s', (TEST_NO,))
+            for status in (1, 2):
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s', (status, TEST_NO))
+                r = self.probe('no-weight', TEST_NO, TEST_NO)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertEqual(self.one('SELECT inven_weight FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,)), 35000)
+
     def test_equipment_level_lazy_row_and_preserved_selection(self):
         with self.equipment_fixture():
             r = self.probe('equipment-level', TEST_NO, TEST_NO + 1, 85)

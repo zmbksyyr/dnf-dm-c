@@ -153,6 +153,8 @@ static int run_probe(int argc, char **argv) {
         ok = db_require_offline(&d, c.mid, err);
     } else if (!strcmp(argv[1], "equipment-slots") && argc == 4) {
         ok = db_open_equip_slot(&d, &c, err);
+    } else if (!strcmp(argv[1], "no-weight") && argc == 4) {
+        ok = db_no_weight(&d, &c, err);
     } else if (!strcmp(argv[1], "equipment-level") && argc == 5) {
         ok = db_unlock_lev_equip(&d, &c, atoi(argv[4]), err);
     } else if (!strcmp(argv[1], "item-slot") && argc == 8) {

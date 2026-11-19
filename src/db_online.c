@@ -87,6 +87,11 @@ int db_online_equipment_submit(Db *d,const Charac *c,u32 amount,int level,Online
     return online_submit(d,c,amount,NULL,level?"unlock_equipment_level":"open_equipment_slots",7,request,err);
 }
 
+int db_online_weight_submit(Db *d,const Charac *c,OnlineCommand *request,Err err) {
+    if(!c->no) {snprintf(err,ERRBUF,"在线操作缺少角色编号");return 0;}
+    return online_submit(d,c,GM_INVENTORY_WEIGHT,NULL,"raise_inventory_weight",8,request,err);
+}
+
 // Called inside the billing transaction, after its writes. Keep the reload
 // request invisible to the game until those balances commit together.
 int db_online_billing_submit(Db *d,u32 mid,OnlineCommand *request,Err err) {
@@ -110,7 +115,7 @@ int db_online_billing_submit(Db *d,u32 mid,OnlineCommand *request,Err err) {
 }
 
 int db_online_finish(Db *d, OnlineCommand *request, Err err) {
-    int version=request->version==7?7:request->version==6?6:request->version==5?5:request->version==4?4:request->version==3?3:request->version==2?2:1;
+    int version=request->version>=1 && request->version<=8?request->version:1;
     Str s={0};MyResult r={0};
     u64 deadline=now_ms()+22000;
     int stopped=0,ok=0;

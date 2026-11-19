@@ -92,7 +92,7 @@ static int char_do(void *ctx, Err err) {
     who.no = c->cno;
     who.mid = c->mid;
     // 排队期间可能重新登录；执行时复查账号，不能只依赖 UI 的轮询快照。
-    if (c->kind >= K_RENAME && c->kind <= K_PVP && c->kind != K_COIN && c->kind != K_MONEY && c->kind != K_FATIGUE && c->kind != K_SP && c->kind != K_QP && c->kind != K_SLOT && c->kind != K_UNLOCK &&
+    if (c->kind >= K_RENAME && c->kind <= K_PVP && c->kind != K_COIN && c->kind != K_MONEY && c->kind != K_FATIGUE && c->kind != K_SP && c->kind != K_QP && c->kind != K_SLOT && c->kind != K_UNLOCK && c->kind != K_NOWEIGHT &&
         !db_require_offline(&g.db, who.mid, err)) return 0;
     switch (c->kind) {
         case K_RENAME:
