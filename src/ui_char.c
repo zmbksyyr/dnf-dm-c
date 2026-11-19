@@ -352,8 +352,8 @@ static void on_restore(void) {
     utf8(file, path, sizeof(path));
     if (!app_confirm(fmt_new("把 %s 导入数据库？\n\n%s", path,
                              strstr(path, "char-")
-                                 ? "角色备份：会先删掉该角色现有数据，再按备份写回。"
-                                 : "整库备份：先清空各表的现有行，再按备份写回。")))
+                                 ? "角色备份：请先退出该账号，现有角色数据将由备份替换。"
+                                 : "整库备份：请先停止游戏服务，各表现有数据将由备份替换。")))
         return;
     // 还原前会自动整库备份（app_restore_file），这里只需要确认意图
     if (!app_confirm("确认执行导入？\n\n会先自动做一次整库备份，备份失败则中止。")) return;

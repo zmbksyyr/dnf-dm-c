@@ -1603,6 +1603,187 @@ class DataTests(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
+    @contextlib.contextmanager
+    def owned_restore(self):
+        path = OUT / 'owned-character-restore.sql'
+        try:
+            with self.owned_clone():
+                result = self.probe('char-dump', TEST_NO, TEST_NO, path)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                yield path
+        finally:
+            path.unlink(missing_ok=True)
+
+    def restore_values(self):
+        self.cur.execute('SELECT * FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,))
+        info = self.cur.fetchone()
+        self.cur.execute('SELECT info,charac_count FROM taiwan_cain.charac_view WHERE m_id=%s', (TEST_NO,))
+        view = self.cur.fetchone()
+        return info, self.container_values(), view
+
+    def test_character_restore_rejects_online_and_changed_owner(self):
+        with self.owned_restore() as path:
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET lev=42 WHERE charac_no=%s', (TEST_NO,))
+            before = self.restore_values()
+            for status in (1, 2, 3):
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s', (status, TEST_NO))
+                result = self.probe('restore', path)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn('在线或正在退出', result.stderr)
+                self.assertEqual(self.restore_values(), before)
+            self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s', (TEST_NO,))
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET m_id=%s WHERE charac_no=%s', (TEST_NO+1, TEST_NO))
+            before = self.restore_values()
+            result = self.probe('restore', path)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn('其他账号', result.stderr)
+            self.assertEqual(self.restore_values(), before)
+
+    def test_character_restore_recovers_deleted_or_missing_role_and_full_payload(self):
+        with self.owned_restore() as path:
+            before = self.restore_values()
+            for mode, missing in (('', False), ('STRICT_TRANS_TABLES', True), ('NO_BACKSLASH_ESCAPES', False)):
+                if missing:
+                    self.cur.execute('DELETE FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,))
+                else:
+                    self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1,lev=42 WHERE charac_no=%s', (TEST_NO,))
+                changed = bytearray(61 * 249)
+                struct.pack_into('<I', changed, 2, 3012)
+                self.cur.execute('UPDATE taiwan_cain_2nd.inventory SET inventory=CONCAT(LEFT(inventory,4),%s) WHERE charac_no=%s', (zlib.compress(changed), TEST_NO))
+                self.assertNotEqual(self.container_values(), before[1])
+                result = self.probe('restore', path, mode=mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                after = self.restore_values()
+                self.assertEqual(after[:2], before[:2])
+                plain = zlib.decompress(after[2][0][4:])
+                slot = next(plain[i:i+148] for i in range(0,len(plain),148) if struct.unpack_from('<I',plain,i)[0]==TEST_NO)
+                self.assertEqual(struct.unpack_from('<H',slot,26)[0], self.one('SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,)))
+
+    def test_character_restore_rolls_back_late_failure_or_view_readback_mismatch(self):
+        with self.owned_restore() as path:
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET lev=42 WHERE charac_no=%s', (TEST_NO,))
+            before = self.restore_values()
+            for body in ("SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit restore view failure'", 'SET NEW.info=OLD.info'):
+                with self.trigger('taiwan_cain.charac_view', 'UPDATE', body):
+                    result = self.probe('restore', path)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.restore_values(), before)
+
+    def test_character_restore_rejects_nontransactional_extension_without_partial_writes(self):
+        table = 'taiwan_cain_2nd.codex_restore_nontransactional'
+        self.assertEqual(self.one("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME='codex_restore_nontransactional'"), 0)
+        self.cur.execute('CREATE TABLE '+table+' (charac_no INT PRIMARY KEY,value INT) ENGINE=MyISAM')
+        try:
+            with self.owned_restore() as path:
+                self.cur.execute('INSERT INTO '+table+' VALUES (%s,3)', (TEST_NO,))
+                before = self.restore_values()
+                result = self.probe('restore', path)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn('InnoDB', result.stderr)
+                self.assertEqual(self.one('SELECT value FROM '+table+' WHERE charac_no=%s', (TEST_NO,)), 3)
+                self.assertEqual(self.restore_values(), before)
+        finally:
+            self.cur.execute('DROP TABLE '+table)
+
+    def test_character_restore_rejects_transaction_controls_and_invalid_metadata(self):
+        with self.owned_restore() as path:
+            original = path.read_text(encoding='utf8')
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET lev=42 WHERE charac_no=%s', (TEST_NO,))
+            before = self.restore_values()
+            for command in ('COMMIT', 'SET autocommit=1', 'CREATE TABLE taiwan_cain.codex_restore_ddl (id INT)',
+                            'DELETE FROM `taiwan_cain`.`charac_info`'):
+                path.write_text(original.replace('SET FOREIGN_KEY_CHECKS=1;',command+';\nSET FOREIGN_KEY_CHECKS=1;'),encoding='utf8')
+                result = self.probe('restore', path)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.restore_values(), before)
+            self.assertEqual(self.one("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME='codex_restore_ddl'"),0)
+            path.write_text(original.replace('m_id='+str(TEST_NO),'m_id=0',1),encoding='utf8')
+            result = self.probe('restore',path)
+            self.assertNotEqual(result.returncode,0,result.stdout)
+            self.assertEqual(self.restore_values(),before)
+
+    def test_character_restore_holds_existing_or_absent_login_lock_until_commit(self):
+        for absent in (False, True):
+            with self.subTest(absent=absent), self.owned_restore() as path:
+                if absent:
+                    self.cur.execute('DELETE FROM taiwan_login.login_account_3 WHERE m_id=%s', (TEST_NO,))
+                params = dict(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+                lock = pymysql.connect(**params)
+                login = pymysql.connect(**params)
+                pending = None
+                try:
+                    lock.begin()
+                    with lock.cursor() as query:
+                        query.execute('SELECT m_id FROM taiwan_cain.charac_info WHERE charac_no=%s FOR UPDATE', (TEST_NO,))
+                    env = dict(os.environ, **{'DNF_GM_TEST_' + key.upper(): value for key, value in self.params.items()})
+                    pending = subprocess.Popen([str(PROBE), 'restore', str(path)], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    waiting = 'SELECT m_id FROM taiwan_cain.charac_info WHERE charac_no=' + str(TEST_NO) + ' FOR UPDATE'
+                    deadline = time.monotonic() + 20
+                    while not self.one('SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO=%s', (waiting,)):
+                        self.assertIsNone(pending.poll(), 'restore exited before role-lock wait')
+                        self.assertLess(time.monotonic(), deadline, 'restore role-lock wait missing')
+                        time.sleep(.05)
+                    change = ('INSERT INTO taiwan_login.login_account_3 (m_id,login_status) VALUES(%s,1)' if absent else 'UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s')
+                    with login.cursor() as query:
+                        query.execute('SET SESSION innodb_lock_wait_timeout=1')
+                        with self.assertRaises(pymysql.err.OperationalError) as blocked:
+                            query.execute(change, (TEST_NO,))
+                        self.assertEqual(blocked.exception.args[0], 1205)
+                    lock.commit()
+                    out, err = pending.communicate(timeout=30)
+                    self.assertEqual(pending.returncode, 0, (out, err))
+                    with login.cursor() as query:
+                        query.execute(change, (TEST_NO,))
+                finally:
+                    lock.rollback()
+                    if pending is not None and pending.poll() is None:
+                        pending.kill()
+                        pending.communicate(timeout=10)
+                    lock.close()
+                    login.close()
+
+    def test_character_restore_rechecks_online_state_after_lock_wait(self):
+        with self.owned_restore() as path:
+            before = self.restore_values()
+            lock = pymysql.connect(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+            pending = None
+            try:
+                lock.begin()
+                with lock.cursor() as query:
+                    query.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s', (TEST_NO,))
+                env = dict(os.environ, **{'DNF_GM_TEST_' + key.upper(): value for key, value in self.params.items()})
+                pending = subprocess.Popen([str(PROBE), 'restore', str(path)], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                waiting = 'SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=' + str(TEST_NO) + ' FOR UPDATE'
+                deadline = time.monotonic() + 20
+                while not self.one('SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO=%s', (waiting,)):
+                    self.assertIsNone(pending.poll(), 'restore exited before login wait')
+                    self.assertLess(time.monotonic(), deadline, 'restore login-lock wait missing')
+                    time.sleep(.05)
+                lock.commit()
+                out, err = pending.communicate(timeout=30)
+                self.assertNotEqual(pending.returncode, 0, out)
+                self.assertIn('在线或正在退出', err.decode('utf8'))
+                self.assertEqual(self.restore_values(), before)
+            finally:
+                lock.rollback()
+                if pending is not None and pending.poll() is None:
+                    pending.kill()
+                    pending.communicate(timeout=10)
+                lock.close()
+
+    def test_restore_generic_sql_refuses_online_accounts(self):
+        path = OUT / 'online-generic-restore.sql'
+        try:
+            with self.offline_character():
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s', (TEST_NO,))
+                path.write_text('UPDATE taiwan_cain.charac_info SET lev=42 WHERE charac_no=' + str(TEST_NO) + ';', encoding='utf8')
+                before = self.one('SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,))
+                result = self.probe('restore', path)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.one('SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,)), before)
+        finally:
+            path.unlink(missing_ok=True)
+
     def test_character_backup_roundtrip(self):
         path = OUT / 'character-roundtrip.sql'
         self.cur.execute('SELECT * FROM taiwan_cain.charac_info WHERE charac_no=%s', (self.cno,))

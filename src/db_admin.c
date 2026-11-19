@@ -543,7 +543,71 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
 // 一个诚实的限制：MySQL 里 CREATE / DROP / ALTER 会隐式提交事务，所以整库备份
 // （带建表语句）做不到端到端原子，只能保证两个 DDL 之间的 DML 段是原子的。角色
 // 备份是纯 DML，能完整回滚 —— 而它恰恰是最需要回滚的那一种。
+typedef struct {
+    char db[64];
+    char tb[96];
+    int  by_mid;     // 0 = 按 charac_no，1 = 按 m_id
+} CharTab;
+
+static int char_tabs(Db *d, Vec *out, Err err);
 static int view_sync_char(Db *d, u32 mid, u32 cno, u32 template_no, Err err);
+
+// A character backup is generated as bounded DELETE/INSERT plus these session
+// settings. Do not execute DDL or transaction control inside its atomic restore.
+static int restore_char_statement(const Str *sql, const Vec *tabs, u32 mid, u32 cno) {
+    const char *text = str_c(sql);
+    static const char *const settings[] = {
+        "SET NAMES latin1", "SET NAMES utf8", "SET NAMES utf8mb4",
+        "SET SQL_MODE='NO_AUTO_VALUE_ON_ZERO'", "SET FOREIGN_KEY_CHECKS=0", "SET FOREIGN_KEY_CHECKS=1"
+    };
+    for (int i = 0; i < COUNT_OF(settings); i++) if (!_stricmp(text, settings[i])) return 1;
+    int allowed = 0;
+    Str prefix = {0};
+    for (int i = 0; i < tabs->n && !allowed; i++) {
+        const CharTab *ct = VEC_AT(tabs, CharTab, i);
+        str_set(&prefix, "DELETE FROM "); dump_name(&prefix, ct->db, ct->tb);
+        str_catf(&prefix, " WHERE `%s`=%u", ct->by_mid ? "m_id" : "charac_no", ct->by_mid ? mid : cno);
+        if (!_stricmp(text, str_c(&prefix))) { allowed = 1; break; }
+        str_set(&prefix, "INSERT INTO "); dump_name(&prefix, ct->db, ct->tb); str_cat(&prefix, " (");
+        if (!_strnicmp(text, str_c(&prefix), (size_t)prefix.n)) allowed = 1;
+    }
+    str_free(&prefix);
+    return allowed;
+}
+
+static int restore_char_lock(Db *d, const Vec *tabs, u32 mid, u32 cno, Err err) {
+    Str q = {0}; MyResult r = {0};
+    str_cat(&q, "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE='InnoDB' AND "
+        "CONCAT(TABLE_SCHEMA,'.',TABLE_NAME) IN ('taiwan_login.login_account_3','taiwan_cain.charac_view'");
+    for (int i = 0; i < tabs->n; i++) {
+        const CharTab *ct = VEC_AT(tabs, CharTab, i);
+        Str name = {0}; str_catf(&name, "%s.%s", ct->db, ct->tb); str_catc(&q, ',');
+        sql_lit(&q, str_c(&name), name.n, 1); str_free(&name);
+    }
+    str_catc(&q, ')');
+    int ok = select1(d, &q, &r) && my_i64(&r, 0, 0, 0) == tabs->n + 2;
+    my_free(&r); str_clear(&q);
+    if (!ok) { snprintf(err, ERRBUF, "角色还原需要 InnoDB 登录、槽位和关联表，未写入"); goto done; }
+    str_catf(&q, "SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%u FOR UPDATE", mid);
+    ok = select1(d, &q, &r);
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    else if (r.nrow && my_i64(&r, 0, 0, -1) != 0) {
+        snprintf(err, ERRBUF, "账号在线或正在退出，请先退出游戏后还原角色，未写入"); ok = 0;
+    }
+    my_free(&r); str_clear(&q);
+    if (ok) {
+        // Restoring a deleted/missing character is valid; taking another
+        // account's current character number is not.
+        str_catf(&q, "SELECT m_id FROM taiwan_cain.charac_info WHERE charac_no=%u FOR UPDATE", cno);
+        ok = select1(d, &q, &r);
+        if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+        else if (r.nrow && my_u64(&r, 0, 0, 0) != mid) {
+            snprintf(err, ERRBUF, "角色编号已属于其他账号，未还原"); ok = 0;
+        }
+    }
+done:
+    my_free(&r); str_free(&q); return ok;
+}
 int db_sql_file_complete(const char *path, int *is_full, Err err) {
     Buf f = {0};
     if (!file_read(path, &f)) { snprintf(err, ERRBUF, "读不到 %s", path); return 0; }
@@ -604,20 +668,38 @@ int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
         unsigned a = 0, b = 0;
         if (sscanf(mk, "-- 视图 m_id=%u charac_no=%u", &a, &b) == 2) { vmid = a; vcno = b; }
     }
+    int character = strstr((const char *)f.p, "-- DNF GM 角色备份") != NULL;
+    if ((character || mk) && (!vmid || !vcno)) {
+        snprintf(err, ERRBUF, "角色备份缺少有效账号／角色编号，未写入"); buf_free(&f); return 0;
+    }
+    character = character || mk != NULL;
+    Vec tabs; vec_init(&tabs, sizeof(CharTab));
+    if (character && !char_tabs(d, &tabs, err)) { vec_free(&tabs); buf_free(&f); return 0; }
 
     Str q = {0}, cur = {0}, saved_mode = {0};
     MyResult state = {0};
     str_cat(&q, "SELECT @@autocommit,@@foreign_key_checks,@@sql_mode");
     if (!select1(d, &q, &state) || !state.nrow) {
         snprintf(err, ERRBUF, "读取连接会话失败：%s", d->err);
-        my_free(&state); str_free(&q); buf_free(&f); return 0;
+        my_free(&state); str_free(&q); vec_free(&tabs); buf_free(&f); return 0;
     }
     u64 saved_ac = my_u64(&state, 0, 0, 1), saved_fk = my_u64(&state, 0, 1, 1);
     str_set(&saved_mode, my_text(&state, 0, 2)); my_free(&state);
     int ok = 0, n = 0, quote = 0;
     if (!set_names(d, db_cs_name(d->charset))) goto done;
+    if (character) {
+        str_set(&q, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+        if (!run(d, &q)) goto done;
+    } else {
+        str_set(&q, "SELECT COUNT(*) FROM taiwan_login.login_account_3 WHERE login_status<>0");
+        MyResult online = {0};
+        int offline = select1(d, &q, &online) && online.nrow == 1 && my_u64(&online, 0, 0, 1) == 0;
+        my_free(&online);
+        if (!offline) { snprintf(err, ERRBUF, "请先停止游戏服务并确认账号均已退出，再还原整库或导入 SQL"); goto done; }
+    }
     str_set(&q, "SET autocommit=0"); if (!run(d, &q)) goto done;
     str_set(&q, "START TRANSACTION"); if (!run(d, &q)) goto done;
+    if (character && !restore_char_lock(d, &tabs, vmid, vcno, err)) goto done;
 
     for (size_t i = 0; i < f.n; i++) {
         char c = (char)f.p[i];
@@ -645,6 +727,9 @@ int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
             if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); goto done; }
             if (cur.p) str_trim(cur.p);
             if (cur.p && cur.p[0]) {
+                if (character && !restore_char_statement(&cur, &tabs, vmid, vcno)) {
+                    snprintf(err, ERRBUF, "第 %d 条不属于角色备份的事务内还原语句，已回滚", n + 1); goto done;
+                }
                 if (!run(d, &cur)) { snprintf(err, ERRBUF, "第 %d 条：%s", n + 1, d->err); goto done; }
                 n++;
             }
@@ -656,6 +741,9 @@ int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
     if (cur.p) str_trim(cur.p);
     if (cur.p && cur.p[0]) {
         if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); goto done; }
+        if (character && !restore_char_statement(&cur, &tabs, vmid, vcno)) {
+            snprintf(err, ERRBUF, "第 %d 条不属于角色备份的事务内还原语句，已回滚", n + 1); goto done;
+        }
         if (!run(d, &cur)) { snprintf(err, ERRBUF, "第 %d 条：%s", n + 1, d->err); goto done; }
         n++;
     }
@@ -668,7 +756,7 @@ int db_restore_sql(Db *d, const char *path, int *stmts, Err err) {
 done:
     if (!ok && !err[0]) snprintf(err, ERRBUF, "%s", d->err);
     if (!restore_session(d, saved_ac, saved_fk, str_c(&saved_mode), err)) ok = 0;
-    str_free(&saved_mode); str_free(&q); str_free(&cur); buf_free(&f);
+    vec_free(&tabs); str_free(&saved_mode); str_free(&q); str_free(&cur); buf_free(&f);
     if (ok && stmts) *stmts = n;
     return ok;
 }
@@ -682,12 +770,6 @@ static void vec_free_strs(Vec *v) {
 // ---------------- 角色备份 / 还原 ----------------
 // 只导一个角色（外加可选的账号共享数据），误删、误改时能定点回滚。
 // 生成的是标准 SQL，还原直接复用 db_restore_sql。
-typedef struct {
-    char db[64];
-    char tb[96];
-    int  by_mid;     // 0 = 按 charac_no，1 = 按 m_id
-} CharTab;
-
 // charac_view：账号的角色槽位视图，客户端的角色列表照着它画。
 // 原 ELF 的 DB_Login 和 CUser::SetCharacInfo：步长 0x94，+0 编号(u32)、
 // +4 名字(20)、+24 job、+25 grow_type、+26 lev(u16)。来源见 docs/audit.md。

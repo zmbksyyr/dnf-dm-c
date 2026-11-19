@@ -1354,15 +1354,16 @@ static int w_db_dump_char(void *ctx, Err err) {
     DbJobCtx *c = (DbJobCtx *)ctx;
     int nt = 0;
     u64 nr = 0;
-    if (!db_backup_char(&g.db, &g.cur, c->path, &nt, &nr, err)) return 0;
-    app_log("备份角色 %u · %d 张表 / %llu 行 → %s", g.cur.no, nt, (unsigned long long)nr, c->path);
+    if (!db_backup_char(&g.db, &c->who, c->path, &nt, &nr, err)) return 0;
+    app_log("备份角色 %u · %d 张表 / %llu 行 → %s", c->who.no, nt, (unsigned long long)nr, c->path);
     return 1;
 }
 
 int app_db_backup_char(void) {
     if (!g.db_ok) { app_info("请先连接数据库。"); return 0; }
     if (!g.char_ok) { app_info("请先选择角色。"); return 0; }
-    db_backup_char_path(g_dbc.path, sizeof(g_dbc.path), &g.cur);
+    g_dbc.who = g.cur;
+    db_backup_char_path(g_dbc.path, sizeof(g_dbc.path), &g_dbc.who);
     return app_act("备份角色", w_db_dump_char, &g_dbc);
 }
 
