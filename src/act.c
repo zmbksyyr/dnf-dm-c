@@ -107,7 +107,7 @@ static int char_do(void *ctx, Err err) {
         case K_COIN: return c->i1 ? db_add_coin(&g.db, &who, c->u1, err) : db_set_coin(&g.db, &who, c->u1, err);
         case K_CERA: return db_set_cera(&g.db, &who, c->u1, c->u2, err);
         case K_JOB: return db_set_job(&g.db, &who, c->i1, c->i2, err);
-        case K_ACCM: return db_set_account_money(&g.db, &who, c->u1, err);
+        case K_ACCM: return db_set_account_money(&g.db, &who, c->u1, c->i2, err);
         case K_SP: return db_set_sp(&g.db, &who, c->i1, c->i1, c->i2, c->i2, err);
         case K_QP: return db_set_qp(&g.db, &who, c->i1, err);
         case K_NOWEIGHT: return db_no_weight(&g.db, &who, err);

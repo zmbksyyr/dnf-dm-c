@@ -1301,19 +1301,66 @@ int db_add_money(Db *d, const Charac *c, u64 money, Err err) { return change_bal
 int db_set_coin(Db *d, const Charac *c, u64 coin, Err err) { return change_balance(d,c,coin,0,0,err); }
 int db_add_coin(Db *d, const Charac *c, u64 coin, Err err) { return change_balance(d,c,coin,1,0,err); }
 
-int db_set_account_money(Db *d, const Charac *c, u64 money, Err err) {
-    // 账号金库是懒建的：玩家没在游戏里打开过账号金库，account_cargo 里就没有这行，
-    // 光 UPDATE 影响 0 行 —— 写过就弹回去，界面上永远显示 0。这里改成有行则改、
-    // 无行则建（cargo/容量留默认，只写钱）。
-    Str s = {0};
-    str_catf(&s,
-             "INSERT INTO taiwan_cain.account_cargo (m_id,money,occ_time) "
-             "VALUES (%u,%llu,NOW()) ON DUPLICATE KEY UPDATE money=VALUES(money),occ_time=NOW()",
-             c->mid, (unsigned long long)money);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "改账号金库：%s", d->err);
-    return ok;
+int db_set_account_money(Db *d, const Charac *c, u64 money, int create_capacity, Err err) {
+    // The original account cargo stores unsigned 32-bit money. It is shared
+    // by the account and cached by the game; hold the login lock through commit.
+    if (!c->no || !c->mid || money > UINT32_MAX || d->tx_depth) {
+        snprintf(err, ERRBUF, "账号金库目标无效、金额超出 32 位范围或事务未结束，未写入"); return 0;
+    }
+    Str q = {0}; MyResult r = {0}; u64 expected_capacity = 0;
+    str_cat(&q, "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE='InnoDB' AND "
+        "CONCAT(TABLE_SCHEMA,'.',TABLE_NAME) IN ('taiwan_login.login_account_3',"
+        "'taiwan_cain.charac_info','taiwan_cain.account_cargo')");
+    int ok = select1(d, &q, &r) && my_i64(&r, 0, 0, 0) == 3;
+    my_free(&r); str_clear(&q);
+    if (!ok) { snprintf(err, ERRBUF, "账号金库写入需要 InnoDB 登录、角色和金库表，未写入"); goto finish; }
+    str_cat(&q, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+    ok = run(d, &q); str_clear(&q);
+    if (!ok) { snprintf(err, ERRBUF, "%s", d->err); goto finish; }
+    if (!db_tx_begin(d, err)) { ok = 0; goto finish; }
+    str_catf(&q, "SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%u FOR UPDATE", c->mid);
+    ok = select1(d, &q, &r);
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    else if (r.nrow && my_i64(&r, 0, 0, -1) != 0) {
+        snprintf(err, ERRBUF, "账号在线或正在退出，请先退出游戏后修改账号金库，未写入"); ok = 0;
+    }
+    my_free(&r); str_clear(&q);
+    if (ok) {
+        str_catf(&q, "SELECT m_id,delete_flag FROM taiwan_cain.charac_info WHERE charac_no=%u FOR UPDATE", c->no);
+        ok = select1(d, &q, &r) && r.nrow == 1 && my_u64(&r, 0, 0, 0) == c->mid && my_i64(&r, 0, 1, 1) == 0;
+        if (!ok) snprintf(err, ERRBUF, "账号金库未写入：角色不存在、已删除或账号归属变化");
+        my_free(&r); str_clear(&q);
+    }
+    if (ok) {
+        str_catf(&q, "SELECT capacity FROM taiwan_cain.account_cargo WHERE m_id=%u FOR UPDATE", c->mid);
+        ok = select1(d, &q, &r);
+        if (!ok) snprintf(err, ERRBUF, "读取账号金库失败：%s", d->err);
+        else if ((!r.nrow || !my_u64(&r, 0, 0, 0)) && (create_capacity < 1 || create_capacity > 56)) {
+            snprintf(err, ERRBUF, "账号金库尚未开通，请先加载匹配服务端的 PVF 后设置金额，未写入"); ok = 0;
+        }
+        if (ok) expected_capacity = my_u64(&r, 0, 0, 0) ? my_u64(&r, 0, 0, 0) : (u64)create_capacity;
+        my_free(&r); str_clear(&q);
+    }
+    if (ok) {
+        // Keep lazy creation, capacity and item bytes. Only money and the
+        // existing operation timestamp change for an already-created cargo.
+        str_catf(&q, "INSERT INTO taiwan_cain.account_cargo (m_id,money,occ_time,cargo,capacity) "
+            "VALUES (%u,%llu,NOW(),'',%d) ON DUPLICATE KEY UPDATE money=VALUES(money),"
+            "occ_time=NOW(),capacity=IF(capacity=0,VALUES(capacity),capacity)",
+            c->mid, (unsigned long long)money, create_capacity > 0 && create_capacity <= 56 ? create_capacity : 0);
+        ok = run(d, &q); str_clear(&q);
+        if (!ok) snprintf(err, ERRBUF, "改账号金库：%s", d->err);
+    }
+    if (ok) {
+        str_catf(&q, "SELECT money,capacity FROM taiwan_cain.account_cargo WHERE m_id=%u FOR UPDATE", c->mid);
+        ok = select1(d, &q, &r) && r.nrow == 1 && my_u64(&r, 0, 0, UINT64_MAX) == money &&
+             my_u64(&r, 0, 1, 0) == expected_capacity;
+        if (!ok) snprintf(err, ERRBUF, "账号金库金额或容量回读不一致，已回滚");
+    }
+    if (!ok) db_tx_rollback(d);
+    else ok = db_tx_commit(d, err);
+finish:
+    my_free(&r); str_free(&q); return ok;
 }
 
 // 点券分两张表存，必须同生同死：扣了没加比不扣更糟

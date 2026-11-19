@@ -133,7 +133,7 @@ int  db_set_money(Db *d, const Charac *c, u64 money, Err err);
 int  db_add_money(Db *d, const Charac *c, u64 money, Err err);
 int  db_set_coin(Db *d, const Charac *c, u64 coin, Err err);
 int  db_add_coin(Db *d, const Charac *c, u64 coin, Err err);
-int  db_set_account_money(Db *d, const Charac *c, u64 money, Err err);
+int  db_set_account_money(Db *d, const Charac *c, u64 money, int create_capacity, Err err);
 int  db_set_cera(Db *d, const Charac *c, u64 cera, u64 point, Err err);
 
 // 泡点结算：固定本次名单，角色奖励逐角色、账号奖励去重，全部成功才报到账人数。

@@ -267,6 +267,159 @@ class DataTests(unittest.TestCase):
         values.append(self.one('SELECT cargo FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,)))
         return values
 
+    def test_account_money_lazy_create_range_and_preserved_cargo(self):
+        with self.container_fixture():
+            self.cur.execute('SELECT cargo,capacity FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,))
+            original = self.cur.fetchone()
+            for mode in ('', 'STRICT_TRANS_TABLES', 'NO_BACKSLASH_ESCAPES'):
+                for value in (0, 17, 4294967295, 0):
+                    for _ in range(2):
+                        result = self.probe('account-money', TEST_NO, TEST_NO, value, mode=mode)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.cur.execute('SELECT cargo,capacity,money FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,))
+                        self.assertEqual(self.cur.fetchone(), (*original, value))
+                result = self.probe('account-money', TEST_NO, TEST_NO, 4294967296, mode=mode)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.one('SELECT money FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,)), 0)
+            self.cur.execute('DELETE FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,))
+            for capacity in (0, -1, 57):
+                result = self.probe('account-money', TEST_NO, TEST_NO, 12345, capacity)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,)), 0)
+            result = self.probe('account-money', TEST_NO, TEST_NO, 12345, 8)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.one('SELECT money FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,)), 12345)
+            self.assertEqual(self.one('SELECT capacity FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,)), 8)
+            self.cur.execute('UPDATE taiwan_cain.account_cargo SET capacity=0 WHERE m_id=%s', (TEST_NO,))
+            result = self.probe('account-money', TEST_NO, TEST_NO, 12345, 16)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.one('SELECT capacity FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,)), 16)
+
+    def test_account_money_rejects_online_stale_deleted_and_missing_role(self):
+        with self.container_fixture():
+            self.cur.execute('SELECT * FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,))
+            before = self.cur.fetchone()
+            for status in (1, 2, 3, -1):
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s', (status, TEST_NO))
+                result = self.probe('account-money', TEST_NO, TEST_NO, 111, 8)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn('在线或正在退出', result.stderr)
+            self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s', (TEST_NO,))
+            for cno, mid in ((0, TEST_NO), (TEST_NO, 0), (TEST_NO + 1, TEST_NO), (TEST_NO, TEST_NO + 1)):
+                result = self.probe('account-money', cno, mid, 111)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s', (TEST_NO,))
+            result = self.probe('account-money', TEST_NO, TEST_NO, 111)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0,m_id=%s WHERE charac_no=%s', (TEST_NO + 1, TEST_NO))
+            result = self.probe('account-money', TEST_NO, TEST_NO, 111)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.cur.execute('SELECT * FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,))
+            self.assertEqual(self.cur.fetchone(), before)
+            self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO + 1,)), 0)
+
+    def test_account_money_fault_and_readback_rollback_existing_or_new_row(self):
+        with self.container_fixture():
+            self.cur.execute('SELECT * FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,))
+            before = self.cur.fetchone()
+            for body in ("SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit account money fault'", 'SET NEW.money=OLD.money', 'SET NEW.capacity=1'):
+                with self.trigger('taiwan_cain.account_cargo', 'UPDATE', body):
+                    result = self.probe('account-money', TEST_NO, TEST_NO, 111)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.cur.execute('SELECT * FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,))
+                self.assertEqual(self.cur.fetchone(), before)
+            self.cur.execute('DELETE FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,))
+            with self.trigger('taiwan_cain.account_cargo', 'INSERT', 'SET NEW.money=17'):
+                result = self.probe('account-money', TEST_NO, TEST_NO, 111, 8)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,)), 0)
+
+    def test_account_money_rejects_nontransactional_table_before_write(self):
+        with self.container_fixture():
+            self.cur.execute('ALTER TABLE taiwan_cain.account_cargo ENGINE=MyISAM')
+            try:
+                self.cur.execute('SELECT * FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,))
+                before = self.cur.fetchone()
+                result = self.probe('account-money', TEST_NO, TEST_NO, 111)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn('InnoDB', result.stderr)
+                self.cur.execute('SELECT * FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,))
+                self.assertEqual(self.cur.fetchone(), before)
+            finally:
+                self.cur.execute('ALTER TABLE taiwan_cain.account_cargo ENGINE=InnoDB')
+
+    def test_account_money_holds_login_lock_during_role_or_cargo_wait(self):
+        for absent, cargo in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(absent=absent, cargo=cargo), self.container_fixture():
+                if absent:
+                    self.cur.execute('DELETE FROM taiwan_login.login_account_3 WHERE m_id=%s', (TEST_NO,))
+                params = dict(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+                lock = pymysql.connect(**params)
+                login = pymysql.connect(**params)
+                pending = None
+                try:
+                    lock.begin()
+                    with lock.cursor() as query:
+                        query.execute('SELECT 1 FROM ' + ('taiwan_cain.account_cargo WHERE m_id=%s' if cargo else 'taiwan_cain.charac_info WHERE charac_no=%s') + ' FOR UPDATE', (TEST_NO,))
+                    env = dict(os.environ, **{'DNF_GM_TEST_' + key.upper(): value for key, value in self.params.items()})
+                    pending = subprocess.Popen([str(PROBE), 'account-money', str(TEST_NO), str(TEST_NO), '111'], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    prefix = 'SELECT capacity FROM taiwan_cain.account_cargo' if cargo else 'SELECT m_id,delete_flag FROM taiwan_cain.charac_info'
+                    deadline = time.monotonic() + 20
+                    while True:
+                        self.cur.execute('SHOW FULL PROCESSLIST')
+                        if any(row[7] and row[7].startswith(prefix) for row in self.cur.fetchall()):
+                            break
+                        self.assertIsNone(pending.poll(), 'account-money exited before target wait')
+                        self.assertLess(time.monotonic(), deadline, 'account-money target lock missing')
+                        time.sleep(.05)
+                    change = ('INSERT INTO taiwan_login.login_account_3 (m_id,login_status) VALUES(%s,1)' if absent else 'UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s')
+                    with login.cursor() as query:
+                        query.execute('SET SESSION innodb_lock_wait_timeout=1')
+                        with self.assertRaises(pymysql.err.OperationalError) as blocked:
+                            query.execute(change, (TEST_NO,))
+                        self.assertEqual(blocked.exception.args[0], 1205)
+                    lock.commit()
+                    out, err = pending.communicate(timeout=30)
+                    self.assertEqual(pending.returncode, 0, (out, err))
+                    self.assertEqual(self.one('SELECT money FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,)), 111)
+                    with login.cursor() as query:
+                        query.execute(change, (TEST_NO,))
+                finally:
+                    lock.rollback()
+                    if pending is not None and pending.poll() is None:
+                        pending.kill()
+                        pending.communicate(timeout=10)
+                    lock.close()
+                    login.close()
+
+    def test_account_money_rechecks_online_state_after_login_wait(self):
+        with self.container_fixture():
+            lock = pymysql.connect(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+            pending = None
+            try:
+                lock.begin()
+                with lock.cursor() as query:
+                    query.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s', (TEST_NO,))
+                env = dict(os.environ, **{'DNF_GM_TEST_' + key.upper(): value for key, value in self.params.items()})
+                pending = subprocess.Popen([str(PROBE), 'account-money', str(TEST_NO), str(TEST_NO), '111'], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                waiting = 'SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=' + str(TEST_NO) + ' FOR UPDATE'
+                deadline = time.monotonic() + 20
+                while not self.one('SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO=%s', (waiting,)):
+                    self.assertIsNone(pending.poll())
+                    self.assertLess(time.monotonic(), deadline, 'account-money login lock missing')
+                    time.sleep(.05)
+                lock.commit()
+                out, err = pending.communicate(timeout=30)
+                self.assertNotEqual(pending.returncode, 0, out)
+                self.assertIn('在线或正在退出', err.decode('utf8'))
+                self.assertEqual(self.one('SELECT money FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,)), 0)
+            finally:
+                lock.rollback()
+                if pending is not None and pending.poll() is None:
+                    pending.kill()
+                    pending.communicate(timeout=10)
+                lock.close()
+
     def test_containers_each_page_and_atomic_all_pages(self):
         for mode in ('', 'STRICT_TRANS_TABLES', 'NO_BACKSLASH_ESCAPES'):
             with self.subTest(mode=mode), self.container_fixture() as paths:

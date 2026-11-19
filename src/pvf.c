@@ -544,6 +544,38 @@ static int stk_ints(Pvf *p, const Buf *c, const char *want, u32 *out, int max) {
     return got;
 }
 
+int pvf_account_cargo_create_capacity(Pvf *p, int *capacity) {
+    *capacity = 0;
+    if (!p || !p->opened) return 0;
+    Buf data = {0};
+    const Leaf *leaf = pvf_find(p, "etc/accountcargo.etc");
+    if (!leaf || !pvf_read(p, leaf, &data)) return 0;
+    // Original script rows are capacity, money limit, item cost, gold cost.
+    // GetCreateInfo uses the smallest capacity in the ordered upgrade map.
+    u32 row[4]; int used = 0, inside = 0, valid = 1;
+    for (size_t i = 2; i + 5 <= data.n; i += 5) {
+        u8 type = data.p[i]; u32 value = rd32(data.p + i + 1);
+        if (type >= 5 && type <= 8) {
+            const char *tag = stab_get(&p->strings, (int)value);
+            if (is_seg_name(tag)) {
+                if (inside) break;
+                inside = strcmp(tag, "[upgrade info]") == 0;
+            }
+        } else if (inside) {
+            if (type != 2) { valid = 0; break; }
+            row[used++] = value;
+            if (used == 4) {
+                if (!row[0] || row[0] > 56) { valid = 0; break; }
+                if (!*capacity || row[0] < (u32)*capacity) *capacity = (int)row[0];
+                used = 0;
+            }
+        }
+    }
+    buf_free(&data);
+    if (!valid || used) *capacity = 0;
+    return *capacity != 0;
+}
+
 // 目录作为缺省分类；装备还需读取 equipment type，宠物也属于 equipment.lst。
 static u8 kind_of_equip(const char *path) {
     return strstr(path, "/avatar/") ? PK_AVATAR : PK_EQUIP;

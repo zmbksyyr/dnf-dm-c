@@ -186,6 +186,40 @@ static void test_pvf(void) {
     ok("未加载 PVF 拒绝猜测经验", !pvf_level_min_exp(&p, 2, &exp, err));
 }
 
+static int cargo_capacity_fixture(const u32 *values, int count) {
+    u8 bytes[128] = {0};
+    char tags[] = "[upgrade info]\0[/upgrade info]";
+    u32 offsets[] = {0, sizeof("[upgrade info]")}, index = 0;
+    char path[] = "etc/accountcargo.etc";
+    bytes[2] = 5;
+    for (int i = 0; i < count; i++) {
+        bytes[7 + i * 5] = 2;
+        wr32(bytes + 8 + i * 5, values[i]);
+    }
+    bytes[7 + count * 5] = 5; wr32(bytes + 8 + count * 5, 1);
+    u32 length = (u32)(2 + (count + 2) * 5 + 3) & ~3u;
+    pvf_encrypt(bytes, length, 123);
+    Leaf leaf = {0}; leaf.path = path; leaf.len = length; leaf.crc = 123;
+    Pvf p = {0}; p.opened = 1; p.base = bytes; p.size = length;
+    p.leafs = &leaf; p.nleaf = 1; p.by_path = &index; p.nby_path = 1;
+    p.strings.blob = tags; p.strings.off = offsets; p.strings.n = 2;
+    p.strings.blob_len = sizeof(tags);
+    int capacity = 0;
+    return pvf_account_cargo_create_capacity(&p, &capacity) ? capacity : 0;
+}
+
+static void test_account_cargo(void) {
+    u32 values[] = {16, 150000000, 1, 0, 8, 100000000, 1, 0};
+    ok("金库初始容量按升序映射取最小档，不依赖声明顺序", cargo_capacity_fixture(values, 8) == 8);
+    ok("金库未完成的升级行拒绝猜测容量", cargo_capacity_fixture(values, 7) == 0);
+    values[0] = 0;
+    ok("金库零容量配置拒绝补建", cargo_capacity_fixture(values, 8) == 0);
+    values[0] = 57;
+    ok("金库超过原游戏 56 格容量拒绝补建", cargo_capacity_fixture(values, 8) == 0);
+    Pvf empty = {0}; int capacity = 99;
+    ok("未加载金库 PVF 不猜测初始容量", !pvf_account_cargo_create_capacity(&empty, &capacity) && !capacity);
+}
+
 int selftest_run(void) {
     // GUI 子系统没有控制台：挂到父进程的控制台上，输出才能被 CI/脚本看到
     AttachConsole(ATTACH_PARENT_PROCESS);
@@ -197,6 +231,7 @@ int selftest_run(void) {
     test_zlib();
     test_item();
     test_pvf();
+    test_account_cargo();
     str_catf(&s_log, "\n%s（%d 项失败）\n", s_fail ? "失败" : "全部通过", s_fail);
     char dir[MAX_PATH], path[MAX_PATH];
     app_config_dir(dir, sizeof(dir));

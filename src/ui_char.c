@@ -257,6 +257,7 @@ static void gm_push(int kind, const Ctx *c) {
     s_gmq[s_gmq_n].kind = kind;
     s_gmq[s_gmq_n].cno = g.cur.no;     // 归属：排队期间用户可能已经切了角色
     s_gmq[s_gmq_n].mid = g.cur.mid;
+    if (kind == K_ACCM) pvf_account_cargo_create_capacity(&g.pvf, &s_gmq[s_gmq_n].i2);
     s_gmq_n++;
     app_status("%s…", gm_what(kind));
     gm_kick();

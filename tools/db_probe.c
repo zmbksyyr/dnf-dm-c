@@ -77,7 +77,9 @@ static int run_probe(int argc, char **argv) {
     Charac c = {0};
     if (argc > 2) c.no = (u32)strtoul(argv[2], NULL, 10);
     if (argc > 3) c.mid = (u32)strtoul(argv[3], NULL, 10);
-    if ((!strcmp(argv[1], "orphan-delete") || !strcmp(argv[1], "purge-orphan")) && argc == 8) {
+    if (!strcmp(argv[1], "account-money") && (argc == 5 || argc == 6)) {
+        ok = db_set_account_money(&d, &c, (u64)strtoull(argv[4], NULL, 10), argc == 6 ? atoi(argv[5]) : 0, err);
+    } else if ((!strcmp(argv[1], "orphan-delete") || !strcmp(argv[1], "purge-orphan")) && argc == 8) {
         u32 invalid = (u32)strtoul(argv[7], NULL, 10);
         ItemHasName has = invalid ? cleanup_has : NULL;
         if (!strcmp(argv[1], "orphan-delete")) {
