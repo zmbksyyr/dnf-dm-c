@@ -42,6 +42,7 @@ static int gm_bridge_version(int id) {
         case G_SLOT:case G_UNLOCK:return 7;
         case G_NOWEIGHT:return 8;
         case G_LEV:return 9;
+        case G_GRADE:case G_WIN:case G_PVP_POINT:return 10;
         default:return 0;
     }
 }
@@ -77,16 +78,27 @@ enum { JOB_N = 11 };
 static char kJobBuf[JOB_N + 1][96];
 static const char *kJobLbl[JOB_N + 1];
 
-// 段位 0~34：与参考实现（PVPRankList）一致，34 是最高的「斗神」
-static char kPvpBuf[35][40];
-static const char *kPvpLabel[35];
-static const int kPvpMax = 34;
+// The fixed original game's rank setter accepts 0..37; retain unknown values.
+static char kPvpBuf[39][64];
+static const char *kPvpLabel[39];
+static const int kPvpMax = 37;
 
 static void pvp_labels(void) {
     for (int i = 0; i <= kPvpMax; i++) {
         snprintf(kPvpBuf[i], sizeof(kPvpBuf[i]), "%d · %s", i, app_pvp_text(i));
         kPvpLabel[i] = kPvpBuf[i];
     }
+}
+
+static void pvp_fill(int current) {
+    int n=kPvpMax+1,sel=current;
+    if(current<0 || current>kPvpMax) {
+        snprintf(kPvpBuf[n],sizeof(kPvpBuf[n]),"段位 %d（保留）",current);
+        kPvpLabel[n]=kPvpBuf[n];sel=n++;
+    }
+    ui_combo_fill(g_grade,kPvpLabel,n,sel);
+    for(int i=0;i<n;i++)
+        SendMessageW(g_grade,CB_SETITEMDATA,(WPARAM)i,i<=kPvpMax?(LPARAM)i:(LPARAM)current);
 }
 
 // PVF 里的职业名比内置表准，加载了就换过来
@@ -290,10 +302,7 @@ static void gm_reload(Page *p) {
     SendMessageW(c_vip, BM_SETCHECK,
                  (g.data.vip[0] && strcmp(g.data.vip, "0")) ? BST_CHECKED : BST_UNCHECKED, 0);
 
-    int gr = g.data.pvp_grade;
-    if (gr < 0) gr = 0;
-    if (gr > kPvpMax) gr = kPvpMax;
-    ui_combo_set(g_grade, gr);
+    pvp_fill(g.data.pvp_grade);
     ui_set_int(g_win, 0);
     ui_set_int(g_point, 0);
     s_fill_gen = g.data_ver;             // 这一代快照已经填过了
@@ -590,7 +599,7 @@ static void scan_show(void) {
 // 不会出现「框里是增量、点到别处却当成现值」的歧义。
 // 金币/复活币/账号金币/点券/赠送点券在库里都是 int unsigned，塞不进 2^32。
 #define GM_U32_MAX 4294967295LL
-#define GM_PVP_MAX 2000000000          // 胜场/胜点，库里是 int
+#define GM_PVP_MAX 2147483647          // Original signed 32-bit win/point fields.
 
 // 等级上限不写死：各端封顶不一样（多数是 85），写在 settings.ini 的 [gm] lev_max，
 // 缺省 85。以前硬编码 100，在 85 封顶的服上按 100 写会越界。
@@ -747,11 +756,11 @@ static void gm_commit(int id) {
         case G_PVP_POINT: {
             // 段位是下拉（选中的就是目标值），胜场/胜点是设定框：框里 0 表示
             // 这一项不动，沿用当前值 —— 只改段位时不用把另外两个数字再抄一遍。
-            int gr = ui_combo_sel(g_grade), win = ui_int(g_win), pt = ui_int(g_point);
+            int sel=ui_combo_sel(g_grade),win=ui_int(g_win),pt=ui_int(g_point);
+            if(sel<0) {gm_refill();return;}
+            int gr=(int)SendMessageW(g_grade,CB_GETITEMDATA,(WPARAM)sel,0);
             gm_take(g_win);
             gm_take(g_point);
-            if (gr < 0) gr = 0;
-            if (gr > kPvpMax) gr = kPvpMax;
             if (win <= 0) win = g.data.pvp_win;
             if (win > GM_PVP_MAX) win = GM_PVP_MAX;
             if (pt <= 0) pt = g.data.pvp_point;
@@ -1134,7 +1143,7 @@ static void gm_lock(Page *p) {
             // 没选角色时不加任何后缀：那时候这些框是"还没东西可改"，不是"在线不能改"
             const char *note=i==0?(gm_available(G_LEV)?"在线可改等级":"退出游戏才能改"):
                 i==1?((caps&3)==3?"在线可改金币、复活币":(caps&1)?"在线可改复活币":(caps&2)?"在线可改金币":"退出游戏才能改"):
-                "退出游戏才能改";
+                 (gm_available(G_GRADE)?"在线可改":"退出游戏才能改");
             char *t = !g.char_ok || edit?fmt_new("%s",bx[i].base):fmt_new("%s（%s）",bx[i].base,note);
             WCHAR w[96];
             utf16(t, w, COUNT_OF(w));
@@ -1197,7 +1206,7 @@ static void gm_build(HWND parent) {
 
     pvp_labels();
     g_grade = ui_combo(parent, G_GRADE, 1);
-    ui_combo_fill(g_grade, kPvpLabel, kPvpMax + 1, kPvpMax);   // 默认选最高段位
+    pvp_fill(0);
     // 初始文本留空：建带文本的 EDIT 会发 EN_CHANGE，页面处理函数可能在
     // 构建中途弹模态框，嵌套消息循环会把布局重入一遍。默认值放到末尾统一设。
     g_win = ui_edit(parent, "", G_WIN, 0);

@@ -895,6 +895,85 @@ class DataTests(unittest.TestCase):
             finally:
                 self.cur.execute('DELETE FROM '+table+' WHERE charac_no IN ('+','.join(map(str,ids))+')')
 
+    @contextlib.contextmanager
+    def pvp_fixture(self):
+        with self.bubble_fixture() as (ids,mid,_):
+            cid=ids[0]
+            self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_cain.pvp_result WHERE charac_no=%s',(cid,)),0)
+            try:
+                self.cur.execute('INSERT INTO taiwan_cain.pvp_result (charac_no,lose) VALUES (%s,123)',(cid,))
+                yield ids,mid
+            finally:
+                self.cur.execute('DELETE FROM taiwan_cain.pvp_result WHERE charac_no=%s',(cid,))
+
+    def test_pvp_offline_guard_ranges_and_idempotence(self):
+        with self.pvp_fixture() as (ids,mid):
+            cid=ids[0]
+            def values():
+                self.cur.execute('SELECT pvp_grade,win,pvp_point,lose FROM taiwan_cain.pvp_result WHERE charac_no=%s',(cid,))
+                return self.cur.fetchone()
+            for mode in ('','STRICT_ALL_TABLES'):
+                for target in ((37,2147483647,2147483647),(0,0,0)):
+                    for _ in range(2):
+                        result=self.probe('pvp',cid,mid,*target,mode=mode)
+                        self.assertEqual(result.returncode,0,result.stderr)
+                        self.assertEqual(values(),(*target,123))
+                before=values()
+                for target in ((-1,1,2),(38,1,2),(1,-1,2),(1,2,-1)):
+                    self.assertNotEqual(self.probe('pvp',cid,mid,*target,mode=mode).returncode,0)
+                    self.assertEqual(values(),before)
+                self.assertNotEqual(self.probe('pvp',cid,mid+1,0,0,0,mode=mode).returncode,0)
+                self.assertNotEqual(self.probe('pvp',ids[1],mid,0,0,0,mode=mode).returncode,0)  # Missing PVP row.
+                self.assertNotEqual(self.probe('pvp',0,mid,0,0,0,mode=mode).returncode,0)
+                self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s',(cid,))
+                self.assertNotEqual(self.probe('pvp',cid,mid,0,0,0,mode=mode).returncode,0)
+                self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0 WHERE charac_no=%s',(cid,))
+                try:
+                    for status in (1,2):
+                        self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s,m_channel_no=0 WHERE m_id=%s',(status,mid))
+                        self.assertNotEqual(self.probe('pvp',cid,mid,1,2,3,mode=mode).returncode,0)
+                        self.assertEqual(values(),before)
+                finally:
+                    self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s',(mid,))
+
+    def test_pvp_login_changes_while_update_waits_for_table_lock(self):
+        with self.pvp_fixture() as (ids,mid):
+            cid=ids[0]
+            self.cur.execute('SELECT * FROM taiwan_cain.pvp_result WHERE charac_no=%s',(cid,));before=self.cur.fetchone()
+            lock=pymysql.connect(host=self.params['host'],port=int(self.params['port']),
+                                 user=self.params['user'],password=self.params['pwd'],autocommit=True)
+            pending=None
+            try:
+                with lock.cursor() as q:q.execute('LOCK TABLES taiwan_cain.pvp_result WRITE')
+                env=dict(os.environ,**{'DNF_GM_TEST_'+k.upper():v for k,v in self.params.items()})
+                pending=subprocess.Popen([str(PROBE),'pvp-checked',str(cid),str(mid),'17','123','456'],
+                                         cwd=OUT,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                end=time.monotonic()+15
+                while True:
+                    self.cur.execute('SHOW FULL PROCESSLIST')
+                    blocked=any(row[7] and row[7].startswith('UPDATE taiwan_cain.pvp_result') and
+                                ('charac_no='+str(cid)) in row[7] and row[6] and 'lock' in row[6].lower()
+                                for row in self.cur.fetchall())
+                    if blocked:break
+                    if pending.poll() is not None or time.monotonic()>=end:
+                        self.fail('PVP UPDATE did not reach the expected table-lock wait')
+                    time.sleep(.05)
+                # A controlled SQL race; original-game login is tested separately.
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s',(mid,))
+                with lock.cursor() as q:q.execute('UNLOCK TABLES')
+                out,err=pending.communicate(timeout=30)
+                self.assertEqual(pending.returncode,1,(out,err))
+                self.cur.execute('SELECT * FROM taiwan_cain.pvp_result WHERE charac_no=%s',(cid,))
+                self.assertEqual(self.cur.fetchone(),before)
+            finally:
+                with lock.cursor() as q:q.execute('UNLOCK TABLES')
+                lock.close()
+                if pending is not None and pending.poll() is None:
+                    try:pending.communicate(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        pending.kill();pending.communicate()
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s',(mid,))
+
     def test_job_offline_ownership_deletion_and_idempotence(self):
         with self.bubble_fixture() as (ids,mid,_):
             cid=ids[0]

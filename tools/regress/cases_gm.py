@@ -882,6 +882,56 @@ def gm_profession_packed(ctx):
         snap.restore()
 
 
+@core.case("gm.pvp.rank", needs=("gui", "db"), group="always",
+           desc="PVP 保留 35..37 段位、未知当前值及 32 位胜场/胜点")
+def gm_pvp_rank(ctx):
+    cno=_prep(ctx)
+    if not cno or not _offline(ctx,_mid(ctx,cno)):return
+    snap=Snap(ctx)
+    row=snap.take('taiwan_cain.pvp_result','charac_no',cno,('pvp_grade','win','pvp_point'))
+    if row is None:
+        ctx.skip('目标角色缺少 PVP 记录');return
+    def values():return ctx.q('SELECT pvp_grade,win,pvp_point FROM taiwan_cain.pvp_result WHERE charac_no=%s',(cno,))[0]
+    def selected():
+        field=ctx.ctl(G['GRADE']);idx=u.SendMessageW(field,core.CB_GETCURSEL,0,0)
+        return u.SendMessageW(field,0x0150,idx,0) if idx>=0 else -1
+    def reload():
+        core.press(u.GetDlgItem(ctx.main,IDC_DISC),.2)
+        if not ctx.ok('断开完成',core.wait_until(lambda:not u.IsWindowEnabled(u.GetDlgItem(ctx.main,IDC_DISC)),15)):return False
+        core.press(u.GetDlgItem(ctx.main,IDC_CONN),.5)
+        if not ctx.ok('重连完成',core.wait_until(lambda:u.IsWindowEnabled(u.GetDlgItem(ctx.main,IDC_DISC)),25)):return False
+        core.set_text(u.GetDlgItem(ctx.main,108),str(cno))
+        core.press(u.GetDlgItem(ctx.main,109),.3)
+        if not ctx.ok('重新查询目标角色',_conn_ready(ctx)):return False
+        core.click_at(u.GetDlgItem(ctx.main,IDC_CHLIST),40,12,.2)
+        ctx.page(PAGE_GM)
+        return ctx.ok('目标 PVP 已载入',core.wait_until(lambda:selected()==values()[0] and u.IsWindowEnabled(ctx.ctl(G['GRADE'])),15))
+    try:
+        ctx.cur.execute('UPDATE taiwan_cain.pvp_result SET pvp_grade=37,win=2147483647,pvp_point=2147483647 WHERE charac_no=%s',(cno,))
+        if not reload():return
+        ctx.check('37 段位回填',_until(selected,37),37)
+        field=ctx.ctl(G['GRADE'])
+        for grade in (35,36,37):
+            idx=next((i for i in range(u.SendMessageW(field,core.CB_GETCOUNT,0,0)) if u.SendMessageW(field,0x0150,i,0)==grade),None)
+            if not ctx.ok('段位 %d 可选'%grade,idx is not None):return
+            u.SendMessageW(field,core.CB_SETCURSEL,idx,0)
+            u.PostMessageW(u.GetParent(field),core.WM_COMMAND,G['GRADE']|(9<<16),field)
+            target=(grade,2147483647,2147483647)
+            ctx.check('只改段位保留 32 位战绩',_until(values,target),target)
+            time.sleep(.5)
+        # Explicit input uses the same full range as the data entry point.
+        field=ctx.ctl(G['WIN']);core.set_text(field,'12345');_commit(field)
+        ctx.check('胜场输入保存',_until(values,(37,12345,2147483647)),(37,12345,2147483647))
+        core.set_text(field,'2147483647');_commit(field)
+        ctx.check('最大胜场输入保存',_until(values,(37,2147483647,2147483647)),(37,2147483647,2147483647))
+        ctx.cur.execute('UPDATE taiwan_cain.pvp_result SET pvp_grade=99 WHERE charac_no=%s',(cno,))
+        if not reload():return
+        ctx.check('未知段位保留',_until(selected,99),99)
+        ctx.check('未知值显示不写库',values(),(99,2147483647,2147483647))
+    finally:
+        snap.restore()
+
+
 # ================================================================ 数值框「设成多少」与「+多少」
 @core.case("gm.qadd.boxes", needs=("gui", "db", "pvf"), group="manual",
            desc="数值框只收「这次设成多少」：进页面为 0，+ 按钮在当前值上累加")

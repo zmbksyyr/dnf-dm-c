@@ -96,6 +96,9 @@ static int run_probe(int argc, char **argv) {
     } else if ((!strcmp(argv[1], "job") || !strcmp(argv[1], "job-checked")) && argc == 6) {
         ok = strcmp(argv[1], "job-checked") || db_require_offline(&d, c.mid, err);
         if (ok) ok = db_set_job(&d, &c, atoi(argv[4]), atoi(argv[5]), err);
+    } else if ((!strcmp(argv[1], "pvp") || !strcmp(argv[1], "pvp-checked")) && argc == 7) {
+        ok = strcmp(argv[1], "pvp-checked") || db_require_offline(&d, c.mid, err);
+        if (ok) ok = db_set_pvp(&d, &c, atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), err);
     } else if (!strcmp(argv[1], "quest-init") && argc == 4) {
         ok = db_quest_init(&d, &c, err);
     } else if (!strcmp(argv[1], "mail-delete") && argc == 3) {

@@ -1338,9 +1338,32 @@ int db_set_qp(Db *d, const Charac *c, int qp, Err err) {
 }
 
 int db_set_pvp(Db *d, const Charac *c, int grade, int win, int point, Err err) {
-    return db_exec(d, "改 PVP", "taiwan_cain.pvp_result", "charac_no", c->no, err,
-                   "UPDATE taiwan_cain.pvp_result SET pvp_grade=%d,win=%d,pvp_point=%d "
-                   "WHERE charac_no=%u", grade, win, point, c->no);
+    if(grade<0 || grade>37 || win<0 || point<0) {
+        snprintf(err,ERRBUF,"PVP 段位需为 0..37，胜场和胜点需为非负整数；未写入");return 0;
+    }
+    int online=0;
+    if(!db_account_online(d,c->mid,&online,err)) return 0;
+    if(online) {
+        OnlineCommand request;
+        return db_online_pvp_submit(d,c,(u32)grade,(u32)win,(u32)point,&request,err) && db_online_finish(d,&request,err);
+    }
+    if(!db_require_offline(d,c->mid,err)) return 0;
+    Str s={0};MyResult r={0};u64 affected=0;
+    str_catf(&s,"UPDATE taiwan_cain.pvp_result p JOIN taiwan_cain.charac_info c ON c.charac_no=p.charac_no "
+        "SET p.pvp_grade=%d,p.win=%d,p.pvp_point=%d WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 "
+        "AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status<>0)",
+        grade,win,point,c->no,c->mid);
+    int ok=run_aff(d,&s,&affected);
+    if(ok && !affected) {
+        str_clear(&s);
+        str_catf(&s,"SELECT 1 FROM taiwan_cain.pvp_result p JOIN taiwan_cain.charac_info c ON c.charac_no=p.charac_no "
+            "WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 AND p.pvp_grade=%d AND p.win=%d AND p.pvp_point=%d "
+            "AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status<>0)",
+            c->no,c->mid,grade,win,point);
+        ok=select1(d,&s,&r) && r.nrow==1;
+        if(!ok) snprintf(err,ERRBUF,"PVP 未写入：账号已上线、归属变化、角色删除或缺少记录");
+    } else if(!ok) snprintf(err,ERRBUF,"改 PVP：%s",d->err);
+    my_free(&r);str_free(&s);return ok;
 }
 
 int db_no_weight(Db *d, const Charac *c, Err err) {
