@@ -61,10 +61,21 @@ int db_creature_ids(Db *d, Vec *out, Err err) {
 static int mail_drop_where(Db *d, const char *where, Err err) {
     Str s = {0};
     MyResult r = {0};
-    // Hold the selected mails until both attachments and flags have changed.
-    str_catf(&s, "SELECT p.postal_id FROM taiwan_cain_2nd.postal p "
+    // SQL deletion cannot revoke an attachment already cached by the game.
+    // Lock the recipient's live login row together with the selected mails;
+    // this check belongs in the transaction, including bulk/attachment cleanup.
+    str_catf(&s, "SELECT p.postal_id,COALESCE(l.login_status,0) "
+                 "FROM taiwan_cain_2nd.postal p "
+                 "LEFT JOIN taiwan_cain.charac_info c ON c.charac_no=p.receive_charac_no "
+                 "LEFT JOIN taiwan_login.login_account_3 l ON l.m_id=c.m_id "
                  "WHERE p.delete_flag=0 AND %s FOR UPDATE", where);
     int ok = select1(d, &s, &r);
+    for (int i = 0; ok && i < r.nrow; i++) {
+        if (my_i64(&r, i, 1, 1) != 0) {
+            snprintf(err, ERRBUF, "邮件所属账号在线或正在退出，未删除；请退出游戏后重试，避免游戏缓存继续领取附件");
+            ok = 0;
+        }
+    }
     my_free(&r);
     static const char *tables[] = {"user_items", "creature_items"};
     static const char *flags[] = {"avata_flag", "creature_flag"};

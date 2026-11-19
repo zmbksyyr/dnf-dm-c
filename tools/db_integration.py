@@ -159,6 +159,67 @@ class DataTests(unittest.TestCase):
             self.assertEqual(self.one("SELECT COUNT(*) FROM taiwan_cain_2nd.user_items WHERE ui_id=%s", (ui,)), 0)
             self.assertEqual(self.one("SELECT delete_flag FROM taiwan_cain_2nd.postal WHERE postal_id=%s", (postal,)), 1)
 
+    @contextlib.contextmanager
+    def mail_recipient(self):
+        # Own the live-status rows; never change a real account's login state.
+        self.assertEqual(self.one("SELECT COUNT(*) FROM taiwan_cain.charac_info WHERE charac_no=%s OR m_id=%s",
+                                  (TEST_NO, TEST_NO)), 0)
+        self.assertEqual(self.one("SELECT COUNT(*) FROM taiwan_login.login_account_3 WHERE m_id=%s",
+                                  (TEST_NO,)), 0)
+        counter = self.one("SELECT AUTO_INCREMENT FROM information_schema.TABLES "
+                           "WHERE TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME='charac_info'")
+        self.cur.execute("SELECT * FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,))
+        template = list(self.cur.fetchone())
+        cols = [d[0] for d in self.cur.description]
+        template[cols.index('charac_no')] = TEST_NO
+        template[cols.index('m_id')] = TEST_NO
+        template[cols.index('charac_name')] = 'audit_mail'
+        try:
+            self.cur.execute("INSERT INTO taiwan_cain.charac_info (" + ','.join(map(ident, cols)) +
+                             ") VALUES (" + ','.join(['%s'] * len(cols)) + ")", template)
+            self.cur.execute("INSERT INTO taiwan_login.login_account_3 (m_id,login_status,last_login_date) "
+                             "VALUES (%s,0,NOW())", (TEST_NO,))
+            yield
+        finally:
+            self.cur.execute("DELETE FROM taiwan_login.login_account_3 WHERE m_id=%s", (TEST_NO,))
+            self.cur.execute("DELETE FROM taiwan_cain.charac_info WHERE charac_no=%s", (TEST_NO,))
+            if counter:
+                self.cur.execute("ALTER TABLE taiwan_cain.charac_info AUTO_INCREMENT=" + str(counter))
+
+    def test_mail_delete_rejects_online_and_leaving_account(self):
+        with self.mail_recipient(), self.attachment() as (ui, postal):
+            for status in (1, 2):
+                self.cur.execute("UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s",
+                                 (status, TEST_NO))
+                for command, target in (("mail-delete", postal), ("mail-delete-all", TEST_NO)):
+                    with self.subTest(status=status, command=command):
+                        r = self.probe(command, target)
+                        self.assertNotEqual(r.returncode, 0, r.stdout)
+                        self.assertIn("在线或正在退出", r.stderr)
+                        self.assertEqual(self.one("SELECT COUNT(*) FROM taiwan_cain_2nd.user_items WHERE ui_id=%s", (ui,)), 1)
+                        self.assertEqual(self.one("SELECT delete_flag FROM taiwan_cain_2nd.postal WHERE postal_id=%s", (postal,)), 0)
+            self.cur.execute("UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s", (TEST_NO,))
+            r = self.probe("mail-delete", postal)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(self.one("SELECT COUNT(*) FROM taiwan_cain_2nd.user_items WHERE ui_id=%s", (ui,)), 0)
+            self.assertEqual(self.one("SELECT delete_flag FROM taiwan_cain_2nd.postal WHERE postal_id=%s", (postal,)), 1)
+
+    def test_mail_bulk_after_logout_deletes_all_attachments(self):
+        with self.mail_recipient(), self.attachment() as first, self.attachment() as second:
+            self.cur.execute("UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s", (TEST_NO,))
+            r = self.probe("mail-delete-all", TEST_NO)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertIn("在线或正在退出", r.stderr)
+            for ui, postal in (first, second):
+                self.assertEqual(self.one("SELECT COUNT(*) FROM taiwan_cain_2nd.user_items WHERE ui_id=%s", (ui,)), 1)
+                self.assertEqual(self.one("SELECT delete_flag FROM taiwan_cain_2nd.postal WHERE postal_id=%s", (postal,)), 0)
+            self.cur.execute("UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s", (TEST_NO,))
+            r = self.probe("mail-delete-all", TEST_NO)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for ui, postal in (first, second):
+                self.assertEqual(self.one("SELECT COUNT(*) FROM taiwan_cain_2nd.user_items WHERE ui_id=%s", (ui,)), 0)
+                self.assertEqual(self.one("SELECT delete_flag FROM taiwan_cain_2nd.postal WHERE postal_id=%s", (postal,)), 1)
+
     def test_mail_does_not_delete_foreign_owner_attachment(self):
         with self.attachment() as (ui, postal):
             self.cur.execute("UPDATE taiwan_cain_2nd.user_items SET charac_no=%s WHERE ui_id=%s", (TEST_NO - 1, ui))
