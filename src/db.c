@@ -1013,19 +1013,19 @@ int db_save_blob(Db *d, const Charac *c, const char *table, const char *field,
         return 0;
     }
 
-    // 3) 只查长度做校验：整块回读一遍纯属浪费
-    str_catf(&s, "SELECT LENGTH(%s) FROM %s WHERE %s=%u", field, table, key_col, key);
+    // Length alone misses same-size changes made by triggers or storage conversion.
+    str_catf(&s, "SELECT %s FROM %s WHERE %s=%u", field, table, key_col, key);
     if (!select1(d, &s, &r)) {
         snprintf(err, ERRBUF, "%s", d->err);
         str_free(&s);
         db_tx_rollback(d);
         return 0;
     }
-    u64 got = my_u64(&r, 0, 0, 0);
-    my_free(&r);
-    str_free(&s);
-    if (got != (u64)n) {
-        snprintf(err, ERRBUF, "回读校验失败（写入 %llu 字节，库里 %llu），已回滚",
+    size_t got = (size_t)my_len(&r, 0, 0);
+    ok = r.nrow == 1 && my_text(&r, 0, 0) && got == n && (!n || !memcmp(my_text(&r, 0, 0), raw, n));
+    my_free(&r); str_free(&s);
+    if (!ok) {
+        snprintf(err, ERRBUF, "回读校验失败（写入 %llu 字节，库里 %llu，内容不一致），已回滚",
                  (unsigned long long)n, (unsigned long long)got);
         db_tx_rollback(d);
         return 0;
@@ -1033,6 +1033,56 @@ int db_save_blob(Db *d, const Charac *c, const char *table, const char *field,
     if (!db_tx_commit(d, err)) return 0;
     db_undo_flush(0);
     return 1;
+}
+
+int db_save_containers(Db *d, const Charac *c, const Buf packed[6], u32 mask, Err err) {
+    static const char *const tables[6] = {
+        "taiwan_cain_2nd.inventory", "taiwan_cain_2nd.inventory", "taiwan_cain_2nd.inventory",
+        "taiwan_cain_2nd.charac_inven_expand", "taiwan_cain_2nd.charac_inven_expand", "taiwan_cain.account_cargo"
+    };
+    static const char *const fields[6] = {"inventory", "equipslot", "creature", "cargo", "jewel", "cargo"};
+    if (!c->no || !c->mid || !mask || (mask & ~63u) || d->tx_depth) {
+        snprintf(err, ERRBUF, "容器写入缺少目标、选择无效或已有未结束事务，未写入"); return 0;
+    }
+    for (int p = 0; p < 6; p++) if ((mask & (1u << p)) && (!packed[p].p || !packed[p].n)) {
+        snprintf(err, ERRBUF, "容器快照缺失，未写入"); return 0;
+    }
+    Str q = {0}; MyResult r = {0}; int required = 2;
+    str_cat(&q, "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE='InnoDB' AND ("
+        "(TABLE_SCHEMA='taiwan_login' AND TABLE_NAME='login_account_3') OR "
+        "(TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME='charac_info')");
+    if (mask & 7u) { str_cat(&q, " OR (TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME='inventory')"); required++; }
+    if (mask & 24u) { str_cat(&q, " OR (TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME='charac_inven_expand')"); required++; }
+    if (mask & 32u) { str_cat(&q, " OR (TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME='account_cargo')"); required++; }
+    str_cat(&q, ")");
+    int ok = select1(d, &q, &r) && my_i64(&r, 0, 0, 0) == required;
+    my_free(&r); str_clear(&q);
+    if (!ok) { snprintf(err, ERRBUF, "容器写入需要 InnoDB 登录、角色和所选容器表，未写入"); goto finish; }
+    // Lock even an absent login row's gap, so a login cannot slip in while the
+    // edit waits on a character or container row. UI polling is only a snapshot.
+    str_cat(&q, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+    ok = run(d, &q); str_clear(&q);
+    if (!ok) { snprintf(err, ERRBUF, "%s", d->err); goto finish; }
+    if (!db_tx_begin(d, err)) { ok = 0; goto finish; }
+    str_catf(&q, "SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%u FOR UPDATE", c->mid);
+    ok = select1(d, &q, &r);
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    else if (r.nrow && my_i64(&r, 0, 0, -1) != 0) {
+        snprintf(err, ERRBUF, "账号在线或正在退出，请先退出游戏后修改容器，未写入"); ok = 0;
+    }
+    my_free(&r); str_clear(&q);
+    if (ok) {
+        str_catf(&q, "SELECT m_id,delete_flag FROM taiwan_cain.charac_info WHERE charac_no=%u FOR UPDATE", c->no);
+        ok = select1(d, &q, &r) && r.nrow == 1 && my_u64(&r, 0, 0, 0) == c->mid && my_i64(&r, 0, 1, 1) == 0;
+        if (!ok) snprintf(err, ERRBUF, "容器未写入：角色不存在、已删除或账号归属变化");
+        my_free(&r); str_clear(&q);
+    }
+    for (int p = 0; ok && p < 6; p++) if (mask & (1u << p))
+        ok = db_save_blob(d, c, tables[p], fields[p], packed[p].p, packed[p].n, err);
+    if (!ok) db_tx_rollback(d);
+    else ok = db_tx_commit(d, err);
+finish:
+    my_free(&r); str_free(&q); return ok;
 }
 
 // ---------------- 基础信息 ----------------

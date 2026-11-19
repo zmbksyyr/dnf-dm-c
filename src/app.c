@@ -289,28 +289,6 @@ Blob *app_page_blob(int page) {
     }
 }
 
-const char *app_page_table(int page) {
-    switch (page) {
-        case 0:
-        case 1:
-        case 2: return "taiwan_cain_2nd.inventory";
-        case 3:
-        case 4: return "taiwan_cain_2nd.charac_inven_expand";
-        default: return "taiwan_cain.account_cargo";
-    }
-}
-
-const char *app_page_field(int page) {
-    switch (page) {
-        case 0: return "inventory";
-        case 1: return "equipslot";
-        case 2: return "creature";
-        case 3: return "cargo";
-        case 4: return "jewel";
-        default: return "cargo";
-    }
-}
-
 // ---------------- 即时落库 ----------------
 // 页面改完立刻写库（不再有「保存改动」按钮，也不攒草稿）：
 // 内存先改，200ms 内的多次编辑合并成一次写，写完再刷新界面。
@@ -374,19 +352,11 @@ static int w_write(void *argv, Err err) {
     memset(&who, 0, sizeof(who));
     who.no = c->cno;
     who.mid = c->mid;
-    int ok = db_require_offline(&g.db, who.mid, err) && db_tx_begin(&g.db, err);
-    for (int p = 0; ok && p < 6; p++) {
-        if (!(c->mask & (1u << p)) || !c->has[p]) continue;
-        if (!db_save_blob(&g.db, &who, app_page_table(p), app_page_field(p), c->snap[p].p,
-                          c->snap[p].n, err)) {
-            ok = 0;
-            break;
-        }
-    }
-    u32 mask = c->mask;
+    u32 mask = 0;
+    for (int p = 0; p < 6; p++) if ((c->mask & (1u << p)) && c->has[p]) mask |= 1u << p;
+    int ok = db_save_containers(&g.db, &who, c->snap, mask, err);
     w_ctx_free(c);                       // 快照归作业所有，成败都在这里收
-    if (!ok) { db_tx_rollback(&g.db); return 0; }
-    if (!db_tx_commit(&g.db, err)) return 0;
+    if (!ok) return 0;
     g.write_done = mask;
     return 1;
 }

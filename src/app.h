@@ -192,8 +192,6 @@ void app_grab_auto(int on);        // 连续取码总开关（复选框与热键
 
 // 页面数据
 Blob *app_page_blob(int page);
-const char *app_page_table(int page);
-const char *app_page_field(int page);
 
 // 即时落库：改完立刻生效到内存，并在 200ms 后合并写库（不弹确认、不留草稿）
 void app_item_set(int page, int slot, const Item *it);

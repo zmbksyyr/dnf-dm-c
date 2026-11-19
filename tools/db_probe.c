@@ -248,9 +248,20 @@ static int run_probe(int argc, char **argv) {
         ok = db_no_weight(&d, &c, err);
     } else if (!strcmp(argv[1], "equipment-level") && argc == 5) {
         ok = db_unlock_lev_equip(&d, &c, atoi(argv[4]), err);
+    } else if (!strcmp(argv[1], "container-save") && argc == 11) {
+        Buf packed[6] = {0};
+        u32 mask = (u32)strtoul(argv[4], NULL, 10);
+        ok = 1;
+        for (int p = 0; p < 6; p++) if (mask & (1u << p)) {
+            if (!file_read(argv[5 + p], &packed[p])) {
+                snprintf(err, ERRBUF, "cannot read container snapshot %d", p); ok = 0; break;
+            }
+        }
+        if (ok) ok = db_save_containers(&d, &c, packed, mask, err);
+        for (int p = 0; p < 6; p++) buf_free(&packed[p]);
     } else if (!strcmp(argv[1], "item-slot") && argc == 8) {
         CharData data = {0};
-        Buf packed = {0};
+        Buf packed[6] = {0};
         int slot = atoi(argv[4]);
         ok = db_load_data(&d, &c, &data, err);
         if (ok && (slot < 0 || slot >= data.inv.n || !data.inv.ok)) {
@@ -262,10 +273,9 @@ static int run_probe(int argc, char **argv) {
             item_set_id(it, (u32)strtoul(argv[5], NULL, 10));
             item_set_type(it, (u8)atoi(argv[6]));
             item_set_num(it, (u32)strtoul(argv[7], NULL, 10));
-            ok = blob_pack(&data.inv, &packed) &&
-                 db_save_blob(&d, &c, "taiwan_cain_2nd.inventory", "inventory", packed.p, packed.n, err);
+            ok = blob_pack(&data.inv, &packed[0]) && db_save_containers(&d, &c, packed, 1u, err);
         }
-        buf_free(&packed);
+        buf_free(&packed[0]);
         db_free_data(&data);
     } else if (!strcmp(argv[1], "item-mail") && argc == 6) {
         GrantItem g = {0};

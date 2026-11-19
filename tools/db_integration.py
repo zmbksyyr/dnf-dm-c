@@ -234,6 +234,158 @@ class DataTests(unittest.TestCase):
             self.cur.execute("DROP TRIGGER " + ident(name))
 
     @contextlib.contextmanager
+    def container_fixture(self):
+        tables = ('taiwan_cain_2nd.inventory', 'taiwan_cain_2nd.charac_inven_expand', 'taiwan_cain.account_cargo')
+        keys = ('charac_no', 'charac_no', 'm_id')
+        paths = [OUT / ('container-page-%d.bin' % page) for page in range(6)]
+        old = struct.pack('<I', 0) + zlib.compress(bytes(61 * 249))
+        with self.offline_character():
+            for table, key in zip(tables, keys):
+                self.assertEqual(self.one('SELECT COUNT(*) FROM ' + table + ' WHERE ' + key + '=%s', (TEST_NO,)), 0)
+            try:
+                self.cur.execute('INSERT INTO ' + tables[0] + ' (charac_no,inventory,equipslot,creature) VALUES (%s,%s,%s,%s)', (TEST_NO, old, old, old))
+                self.cur.execute('INSERT INTO ' + tables[1] + ' (charac_no,cargo,jewel) VALUES (%s,%s,%s)', (TEST_NO, old, old))
+                self.cur.execute('INSERT INTO ' + tables[2] + ' (m_id,money,capacity,cargo,occ_time) VALUES (%s,0,24,%s,NOW())', (TEST_NO, old))
+                for page, path in enumerate(paths):
+                    item = bytearray(61 * 249)
+                    item[1] = 3
+                    struct.pack_into('<I', item, 2, 3012)
+                    struct.pack_into('<I', item, 7, page + 17)
+                    path.write_bytes(struct.pack('<I', 0) + zlib.compress(item))
+                yield paths
+            finally:
+                for table, key in zip(tables, keys):
+                    self.cur.execute('DELETE FROM ' + table + ' WHERE ' + key + '=%s', (TEST_NO,))
+                for path in paths:
+                    path.unlink(missing_ok=True)
+
+    def container_values(self):
+        self.cur.execute('SELECT inventory,equipslot,creature FROM taiwan_cain_2nd.inventory WHERE charac_no=%s', (TEST_NO,))
+        values = list(self.cur.fetchone())
+        self.cur.execute('SELECT cargo,jewel FROM taiwan_cain_2nd.charac_inven_expand WHERE charac_no=%s', (TEST_NO,))
+        values.extend(self.cur.fetchone())
+        values.append(self.one('SELECT cargo FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,)))
+        return values
+
+    def test_containers_each_page_and_atomic_all_pages(self):
+        for mode in ('', 'STRICT_TRANS_TABLES', 'NO_BACKSLASH_ESCAPES'):
+            with self.subTest(mode=mode), self.container_fixture() as paths:
+                expected = self.container_values()
+                for page in range(6):
+                    for _ in range(2):
+                        result = self.probe('container-save', TEST_NO, TEST_NO, 1 << page, *paths, mode=mode)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        expected[page] = paths[page].read_bytes()
+                        self.assertEqual(self.container_values(), expected)
+                result = self.probe('container-save', TEST_NO, TEST_NO, 63, *paths, mode=mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.container_values(), expected)
+
+    def test_containers_reject_online_deleted_wrong_owner_and_invalid_selection(self):
+        with self.container_fixture() as paths:
+            before = self.container_values()
+            for status in (1, 2, 3):
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s', (status, TEST_NO))
+                result = self.probe('container-save', TEST_NO, TEST_NO, 63, *paths)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn('在线或正在退出', result.stderr)
+                self.assertEqual(self.container_values(), before)
+            self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s', (TEST_NO,))
+            for cno, mid, mask in ((TEST_NO, TEST_NO + 1, 63), (TEST_NO + 1, TEST_NO, 63), (0, TEST_NO, 63), (TEST_NO, 0, 63), (TEST_NO, TEST_NO, 0), (TEST_NO, TEST_NO, 64)):
+                result = self.probe('container-save', cno, mid, mask, *paths)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.container_values(), before)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s', (TEST_NO,))
+            result = self.probe('container-save', TEST_NO, TEST_NO, 63, *paths)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(self.container_values(), before)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0,m_id=%s WHERE charac_no=%s', (TEST_NO + 1, TEST_NO))
+            result = self.probe('container-save', TEST_NO, TEST_NO, 63, *paths)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(self.container_values(), before)
+
+    def test_containers_late_fault_and_same_size_corruption_roll_back_all(self):
+        with self.container_fixture() as paths:
+            before = self.container_values()
+            for body in ("SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit last container failure'",
+                         'SET NEW.cargo=CONCAT(LEFT(NEW.cargo,4),0xff,SUBSTRING(NEW.cargo,6))',
+                         'SET NEW.cargo=LEFT(NEW.cargo,5)'):
+                with self.trigger('taiwan_cain.account_cargo', 'UPDATE', body):
+                    result = self.probe('container-save', TEST_NO, TEST_NO, 63, *paths)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.container_values(), before)
+            result = self.probe('container-save', TEST_NO, TEST_NO, 63, *paths)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.container_values(), [path.read_bytes() for path in paths])
+
+    def test_containers_hold_existing_or_absent_login_lock_during_item_wait(self):
+        for absent in (False, True):
+            with self.subTest(absent=absent), self.container_fixture() as paths:
+                if absent:
+                    self.cur.execute('DELETE FROM taiwan_login.login_account_3 WHERE m_id=%s', (TEST_NO,))
+                params = dict(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+                lock = pymysql.connect(**params)
+                login = pymysql.connect(**params)
+                pending = None
+                try:
+                    lock.begin()
+                    with lock.cursor() as query:
+                        query.execute('SELECT charac_no FROM taiwan_cain_2nd.inventory WHERE charac_no=%s FOR UPDATE', (TEST_NO,))
+                    env = dict(os.environ, **{'DNF_GM_TEST_' + key.upper(): value for key, value in self.params.items()})
+                    pending = subprocess.Popen([str(PROBE), 'container-save', str(TEST_NO), str(TEST_NO), '63', *map(str, paths)], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    deadline = time.monotonic() + 15
+                    waiting = 'SELECT inventory FROM taiwan_cain_2nd.inventory WHERE charac_no=' + str(TEST_NO) + ' FOR UPDATE'
+                    while not self.one('SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO=%s', (waiting,)):
+                        self.assertIsNone(pending.poll(), 'container write exited before item lock')
+                        self.assertLess(time.monotonic(), deadline, 'container item-lock wait missing')
+                        time.sleep(.05)
+                    change = ('INSERT INTO taiwan_login.login_account_3 (m_id,login_status) VALUES (%s,1)' if absent else 'UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s')
+                    with login.cursor() as query:
+                        query.execute('SET SESSION innodb_lock_wait_timeout=1')
+                        with self.assertRaises(pymysql.err.OperationalError) as blocked:
+                            query.execute(change, (TEST_NO,))
+                        self.assertEqual(blocked.exception.args[0], 1205)
+                    lock.commit()
+                    out, err = pending.communicate(timeout=20)
+                    self.assertEqual(pending.returncode, 0, (out, err))
+                    self.assertEqual(self.container_values(), [path.read_bytes() for path in paths])
+                    with login.cursor() as query:
+                        query.execute(change, (TEST_NO,))
+                finally:
+                    lock.rollback()
+                    if pending is not None and pending.poll() is None:
+                        pending.kill(); pending.communicate(timeout=10)
+                    lock.close(); login.close()
+
+    def test_containers_recheck_login_after_account_wait(self):
+        with self.container_fixture() as paths:
+            before = self.container_values()
+            lock = pymysql.connect(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+            pending = None
+            try:
+                lock.begin()
+                with lock.cursor() as query:
+                    query.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s', (TEST_NO,))
+                env = dict(os.environ, **{'DNF_GM_TEST_' + key.upper(): value for key, value in self.params.items()})
+                pending = subprocess.Popen([str(PROBE), 'container-save', str(TEST_NO), str(TEST_NO), '63', *map(str, paths)], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                waiting = 'SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=' + str(TEST_NO) + ' FOR UPDATE'
+                deadline = time.monotonic() + 15
+                while not self.one('SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO=%s', (waiting,)):
+                    self.assertIsNone(pending.poll(), 'container write exited before account wait')
+                    self.assertLess(time.monotonic(), deadline, 'container account-lock wait missing')
+                    time.sleep(.05)
+                lock.commit()
+                out, err = pending.communicate(timeout=20)
+                self.assertNotEqual(pending.returncode, 0, (out, err))
+                self.assertIn('在线或正在退出', err.decode('utf8'))
+                self.assertEqual(self.container_values(), before)
+            finally:
+                lock.rollback()
+                if pending is not None and pending.poll() is None:
+                    pending.kill(); pending.communicate(timeout=10)
+                lock.close()
+
+    @contextlib.contextmanager
     def attachment(self):
         tables = ("taiwan_cain_2nd.user_items", "taiwan_cain_2nd.postal")
         counters = [self.one("SELECT AUTO_INCREMENT FROM information_schema.TABLES "

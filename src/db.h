@@ -117,6 +117,9 @@ int  db_read_charac(Db *d, u32 no, Charac *out, Err err);            // 名字/�
 int  db_read_state(Db *d, const Charac *c, CharData *out, Err err);  // 金币/复活币/点券/PVP/SP/QP
 int  db_save_blob(Db *d, const Charac *c, const char *table, const char *field,
                   const void *raw, size_t n, Err err);
+// UI page order: inventory, equipslot, creature, cargo, jewel, account cargo.
+// Owns the transaction; holds login and character locks through all selected writes.
+int  db_save_containers(Db *d, const Charac *c, const Buf packed[6], u32 mask, Err err);
 
 // 基础信息
 int  db_set_name(Db *d, const Charac *c, const char *name, Err err);
