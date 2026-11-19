@@ -165,8 +165,8 @@ int db_online_billing_submit(Db *d,u32 mid,OnlineCommand *request,Err err) {
     if(!online) return 1; // The next login loads the committed billing balance.
     Str s={0};MyResult r={0};
     str_catf(&s,"SELECT COALESCE(c.cera,0),COALESCE(p.cera_point,0) FROM d_taiwan.accounts a "
-        "LEFT JOIN taiwan_billing.cash_cera c ON c.account=a.UID "
-        "LEFT JOIN taiwan_billing.cash_cera_point p ON p.account=a.UID WHERE a.UID=%u",mid);
+        "LEFT JOIN taiwan_billing.cash_cera c ON c.account='%u' "
+        "LEFT JOIN taiwan_billing.cash_cera_point p ON p.account='%u' WHERE a.UID=%u",mid,mid,mid);
     int ok=select1(d,&s,&r);
     if(!ok) snprintf(err,ERRBUF,"读取点券余额：%s",d->err);
     else if(r.nrow!=1) {snprintf(err,ERRBUF,"点券账号不存在或账单记录不唯一");ok=0;}

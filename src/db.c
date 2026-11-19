@@ -1364,35 +1364,98 @@ finish:
 }
 
 // 点券分两张表存，必须同生同死：扣了没加比不扣更糟
-int db_set_cera(Db *d, const Charac *c, u64 cera, u64 point, Err err) {
-    // cash_cera / cash_cera_point 也是懒建的（账号没充过点券就没有行），
-    // 和 account_cargo / charac_quest_shop 一个毛病：光 UPDATE 会 0 行报失败。
-    // 改成有行则改、无行则建。用事务包住两张表，要么都改要么都不改。
-    if (!db_tx_begin(d, err)) return 0;
-    Str s = {0};
-    str_catf(&s,
-             "INSERT INTO taiwan_billing.cash_cera (account,cera) VALUES (%u,%llu) "
-             "ON DUPLICATE KEY UPDATE cera=VALUES(cera)",
-             c->mid, (unsigned long long)cera);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) {
-        snprintf(err, ERRBUF, "改点券：%s", d->err);
-        db_tx_rollback(d);
-        return 0;
+int db_change_cera(Db *d, const Charac *c, u64 cera, u64 point, unsigned fields, int add, Err err) {
+    if (!c->no || !c->mid || cera > UINT32_MAX || point > UINT32_MAX || !fields || (fields & ~3u) || d->tx_depth) {
+        snprintf(err, ERRBUF, "点券目标无效、余额超出 32 位范围或事务未结束，未写入"); return 0;
     }
-    str_catf(&s,
-             "INSERT INTO taiwan_billing.cash_cera_point (account,cera_point) VALUES (%u,%llu) "
-             "ON DUPLICATE KEY UPDATE cera_point=VALUES(cera_point)",
-             c->mid, (unsigned long long)point);
-    ok = run(d, &s);
-    str_free(&s);
-    if (!ok) {
-        snprintf(err, ERRBUF, "改赠送点券：%s", d->err);
-        db_tx_rollback(d);
-        return 0;
+    Str s = {0}; MyResult r = {0};
+    str_cat(&s, "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE='InnoDB' AND "
+        "CONCAT(TABLE_SCHEMA,'.',TABLE_NAME) IN ('taiwan_login.login_account_3',"
+        "'taiwan_cain.charac_info','taiwan_billing.cash_cera','taiwan_billing.cash_cera_point')");
+    int ok = select1(d, &s, &r) && my_i64(&r, 0, 0, 0) == 4;
+    my_free(&r); str_clear(&s);
+    if (!ok) { snprintf(err, ERRBUF, "点券写入需要 InnoDB 登录、角色及两张余额表，未写入"); goto finish; }
+    str_cat(&s, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+    ok = run(d, &s); str_clear(&s);
+    if (!ok) { snprintf(err, ERRBUF, "%s", d->err); goto finish; }
+    if (!db_tx_begin(d, err)) { ok = 0; goto finish; }
+    OnlineCommand request = {0};
+    int online = 0;
+    // Hold the login row, or its missing-key gap, while either billing row waits.
+    str_catf(&s, "SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%u FOR UPDATE", c->mid);
+    ok = select1(d, &s, &r);
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    else if (r.nrow) {
+        i64 status = my_i64(&r, 0, 0, -1);
+        online = status > 0;
+        if (status < 0) { snprintf(err, ERRBUF, "账号在线或正在退出，无法确认点券刷新，请先退出游戏后修改，未写入"); ok = 0; }
     }
-    return db_tx_commit(d, err);
+    my_free(&r); str_clear(&s);
+    if (ok) {
+        str_catf(&s, "SELECT m_id,delete_flag FROM taiwan_cain.charac_info WHERE charac_no=%u FOR UPDATE", c->no);
+        ok = select1(d, &s, &r) && r.nrow == 1 && my_u64(&r, 0, 0, 0) == c->mid && my_i64(&r, 0, 1, 1) == 0;
+        if (!ok) snprintf(err, ERRBUF, "点券未写入：角色不存在、已删除或账号归属变化");
+        my_free(&r); str_clear(&s);
+    }
+    if (ok && online) {
+        str_cat(&s, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='d_taiwan' "
+            "AND TABLE_NAME='dnf_gm_online_v6' AND ENGINE='InnoDB'");
+        ok = select1(d, &s, &r) && my_i64(&r, 0, 0, 0) == 1;
+        my_free(&r); str_clear(&s);
+        if (!ok) snprintf(err, ERRBUF, "账号在线或正在退出，点券桥接队列缺失或不是 InnoDB；请退出游戏后修改，未写入");
+    }
+    const char *tables[] = {"cash_cera", "cash_cera_point"};
+    const char *columns[] = {"cera", "cera_point"};
+    u64 amounts[] = {cera, point};
+    int existed[2] = {0};
+    for (int i = 0; ok && i < 2; i++) {
+        str_catf(&s, "SELECT %s FROM taiwan_billing.%s WHERE account='%u' FOR UPDATE", columns[i], tables[i], c->mid);
+        ok = select1(d, &s, &r);
+        if (!ok) snprintf(err, ERRBUF, "读取点券余额：%s", d->err);
+        else {
+            existed[i] = r.nrow != 0;
+            u64 before = my_u64(&r, 0, 0, 0);
+            if (fields & (1u << i)) {
+                if (add && before > UINT32_MAX - amounts[i]) {
+                    snprintf(err, ERRBUF, "点券余额增加后超出 32 位范围，两种余额均未写入"); ok = 0;
+                } else if (add) amounts[i] += before;
+            } else amounts[i] = before;
+        }
+        my_free(&r); str_clear(&s);
+    }
+    for (int i = 0; ok && i < 2; i++) {
+        if (!(fields & (1u << i))) continue;
+        // account is VARCHAR. Quote its canonical UID so the primary key,
+        // rather than numeric coercion of every account string, is used.
+        // Supply all required fields for lazy creation; retain existing metadata.
+        str_catf(&s, "INSERT INTO taiwan_billing.%s (account,%s,%sreg_date,mod_date) "
+            "VALUES ('%u',%llu,%sNOW(),NOW()) ON DUPLICATE KEY UPDATE %s=VALUES(%s)",
+            tables[i], columns[i], i ? "" : "mod_tran,", c->mid,
+            (unsigned long long)amounts[i], i ? "" : "0,", columns[i], columns[i]);
+        ok = run(d, &s); str_clear(&s);
+        if (!ok) { snprintf(err, ERRBUF, "改点券余额：%s", d->err); break; }
+    }
+    for (int i = 0; ok && i < 2; i++) {
+        str_catf(&s, "SELECT %s FROM taiwan_billing.%s WHERE account='%u' FOR UPDATE", columns[i], tables[i], c->mid);
+        ok = select1(d, &s, &r) && r.nrow == (existed[i] || (fields & (1u << i)) ? 1 : 0) &&
+            my_u64(&r, 0, 0, 0) == amounts[i];
+        if (!ok) snprintf(err, ERRBUF, "点券余额回读不一致，两张余额表已回滚");
+        my_free(&r); str_clear(&s);
+    }
+    if (ok && online && !db_online_billing_submit(d, c->mid, &request, err)) {
+        Err detail; snprintf(detail, ERRBUF, "%s", err);
+        snprintf(err, ERRBUF, "账号在线或正在退出，点券刷新未提交，余额未写入；请退出游戏后修改；%s", detail); ok = 0;
+    }
+    if (!ok) db_tx_rollback(d);
+    else {
+        ok = db_tx_commit(d, err);
+        if (ok && request.token[0] && !db_online_finish(d, &request, err)) {
+            Err detail; snprintf(detail, ERRBUF, "%s", err);
+            snprintf(err, ERRBUF, "两种点券余额已写入，游戏刷新未确认；请核对当前余额后再操作；%s", detail); ok = 0;
+        }
+    }
+finish:
+    my_free(&r); str_free(&s); return ok;
 }
 
 // ---------------- GM 一键 ----------------

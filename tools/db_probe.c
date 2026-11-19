@@ -77,7 +77,10 @@ static int run_probe(int argc, char **argv) {
     Charac c = {0};
     if (argc > 2) c.no = (u32)strtoul(argv[2], NULL, 10);
     if (argc > 3) c.mid = (u32)strtoul(argv[3], NULL, 10);
-    if (!strcmp(argv[1], "account-money") && (argc == 5 || argc == 6)) {
+    if ((!strcmp(argv[1], "set-billing") || !strcmp(argv[1], "add-billing")) && (argc == 6 || argc == 7)) {
+        ok = db_change_cera(&d, &c, (u64)strtoull(argv[4], NULL, 10), (u64)strtoull(argv[5], NULL, 10),
+                            argc == 7 ? (unsigned)strtoul(argv[6], NULL, 10) : 3u, !strcmp(argv[1], "add-billing"), err);
+    } else if (!strcmp(argv[1], "account-money") && (argc == 5 || argc == 6)) {
         ok = db_set_account_money(&d, &c, (u64)strtoull(argv[4], NULL, 10), argc == 6 ? atoi(argv[5]) : 0, err);
     } else if ((!strcmp(argv[1], "orphan-delete") || !strcmp(argv[1], "purge-orphan")) && argc == 8) {
         u32 invalid = (u32)strtoul(argv[7], NULL, 10);
@@ -222,9 +225,9 @@ static int run_probe(int argc, char **argv) {
     } else if (!strcmp(argv[1], "scalars") && argc == 4) {
         ok = db_set_money(&d, &c, 1234567, err) && db_set_coin(&d, &c, 17, err) &&
              db_set_fatigue(&d, &c, err) && db_set_sp(&d, &c, 1234, 1234, 12, 12, err) &&
-             db_set_qp(&d, &c, 34, err) && db_set_cera(&d, &c, 4567, 5678, err);
+             db_set_qp(&d, &c, 34, err) && db_change_cera(&d, &c, 4567, 5678, 3u, 0, err);
     } else if (!strcmp(argv[1], "cera") && argc == 6) {
-        ok = db_set_cera(&d, &c, strtoull(argv[4], NULL, 10), strtoull(argv[5], NULL, 10), err);
+        ok = db_change_cera(&d, &c, strtoull(argv[4], NULL, 10), strtoull(argv[5], NULL, 10), 3u, 0, err);
     } else if (!strcmp(argv[1], "skill-points") && argc == 8) {
         ok = db_set_sp(&d, &c, atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), err);
     } else if (!strcmp(argv[1], "quest-points") && argc == 5) {

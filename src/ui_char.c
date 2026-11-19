@@ -39,6 +39,7 @@ static int gm_bridge_version(int id) {
         case G_FATIGUE:return 3;
         case G_SP:return 4;
         case G_QP:return 5;
+        case G_CERA:case G_POINT:return 6;
         case G_SLOT:case G_UNLOCK:return 7;
         case G_NOWEIGHT:return 8;
         case G_LEV:return 9;
@@ -231,7 +232,10 @@ static void gm_apply(int kind, const Ctx *c) {
         case K_RENAME: snprintf(g.cur.name, sizeof(g.cur.name), "%s", c->s); break;
         case K_MONEY: g.data.money = c->i1 ? g.data.money+c->u1 : c->u1; break;
         case K_COIN: g.data.coin = c->i1 ? g.data.coin+c->u1 : c->u1; break;
-        case K_CERA: g.data.cera = c->u1; g.data.cera_point = c->u2; break;
+        case K_CERA:
+            if (c->i2 & 1) g.data.cera = c->i1 ? g.data.cera + c->u1 : c->u1;
+            if (c->i2 & 2) g.data.cera_point = c->i1 ? g.data.cera_point + c->u2 : c->u2;
+            break;
         case K_ACCM: g.data.account_money = c->u1; break;
         case K_VIP: snprintf(g.data.vip, sizeof(g.data.vip), "%s", c->s); break;
         case K_PVP:
@@ -710,10 +714,10 @@ static void gm_commit(int id) {
             i64 ce = gm_u32(c_cera), pt = gm_u32(c_point);
             gm_take(c_cera);
             gm_take(c_point);
-            // 只填了一个就只改一个，另一个沿用当前值
-            if (ce == 0) ce = (i64)g.data.cera;
-            if (pt == 0) pt = (i64)g.data.cera_point;
-            if (ce == (i64)g.data.cera && pt == (i64)g.data.cera_point) return;
+            if (!ce && !pt) return;
+            // Leave the untouched balance to the locked database value, not
+            // the UI snapshot, which may predate a purchase or reward.
+            c.i2 = (ce ? 1 : 0) | (pt ? 2 : 0);
             c.u1 = (u64)ce;
             c.u2 = (u64)pt;
             gm_push(K_CERA, &c);
@@ -826,6 +830,12 @@ static void gm_quick_add(int i) {
         c.u1 = kQAdd[i].step;
         c.i1 = 1;
         gm_push(tgt==G_COIN ? K_COIN : K_MONEY, &c);
+        return;
+    }
+    if (tgt == G_CERA || tgt == G_POINT) {
+        Ctx c = {0}; c.i1 = 1; c.i2 = tgt == G_CERA ? 1 : 2;
+        if (tgt == G_CERA) c.u1 = kQAdd[i].step; else c.u2 = kQAdd[i].step;
+        gm_push(K_CERA, &c);
         return;
     }
     HWND e = gm_field(tgt);
@@ -1143,7 +1153,7 @@ static void gm_lock(Page *p) {
             HWND h = GetDlgItem(p->wnd, bx[i].id);
             // 没选角色时不加任何后缀：那时候这些框是"还没东西可改"，不是"在线不能改"
             const char *note=i==0?(gm_available(G_LEV)?"在线可改等级":"退出游戏才能改"):
-                i==1?((caps&3)==3?"在线可改金币、复活币":(caps&1)?"在线可改复活币":(caps&2)?"在线可改金币":"退出游戏才能改"):
+                i==1?((caps&35)?"在线项目可编辑":"退出游戏才能改"):
                  (gm_available(G_GRADE)?"在线可改":"退出游戏才能改");
             char *t = !g.char_ok || edit?fmt_new("%s",bx[i].base):fmt_new("%s（%s）",bx[i].base,note);
             WCHAR w[96];
@@ -1280,7 +1290,7 @@ static void gm_build(HWND parent) {
            "角色在线时改了会被服务端存档覆盖");
     ui_tip(parent, c_cera,
            "填「设成多少点券」，点到别处写库，框随即回 0；留 0 = 这一项不改。"
-           "点券和赠送点券是同一条 UPDATE，只填一个就只改那一个");
+           "两种余额一起提交，只填一项时保留另一项实际余额。在线时确认游戏刷新后完成");
 
     // 快捷按钮上只有「+数量」：点一下在「当前值」上加，不经过输入框
     ui_tip(parent, s_qadd[0], fmt_new("在当前等级上加 10 级（封顶 %d）；在线须在城镇，确认原游戏存档后完成",
@@ -1288,8 +1298,8 @@ static void gm_build(HWND parent) {
     ui_tip(parent, s_qadd[1], "在实际余额上加 1000 万；在线时确认游戏存档，超过游戏金币上限则不发放");
     ui_tip(parent, s_qadd[2], "在当前复活币上加 100，立刻写库；不动输入框");
     ui_tip(parent, s_qadd[3], "在当前账号金币上加 1000 万，立刻写库；不动输入框");
-    ui_tip(parent, s_qadd[4], "在当前点券上加 1 万，立刻写库；赠送点券一起提交");
-    ui_tip(parent, s_qadd[5], "在当前赠送点券上加 1 万，立刻写库；点券一起提交");
+    ui_tip(parent, s_qadd[4], "在实际点券余额上加 1 万，保留赠送点券；在线时确认游戏刷新");
+    ui_tip(parent, s_qadd[5], "在实际赠送点券余额上加 1 万，保留点券；在线时确认游戏刷新");
     ui_tip(parent, s_qadd[6], "在当前胜场上加 100，立刻写库；不动输入框");
     ui_tip(parent, s_qadd[7], "在当前胜点上加 1000，立刻写库；不动输入框");
 

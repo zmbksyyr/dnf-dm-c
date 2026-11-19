@@ -420,6 +420,222 @@ class DataTests(unittest.TestCase):
                     pending.communicate(timeout=10)
                 lock.close()
 
+    @contextlib.contextmanager
+    def billing_fixture(self):
+        with self.offline_character():
+            for table in ('cash_cera', 'cash_cera_point'):
+                self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_billing.' + table +
+                                          ' WHERE account=%s', (str(TEST_NO),)), 0)
+            try:
+                self.cur.execute("INSERT INTO taiwan_billing.cash_cera VALUES (%s,3,9876,'2001-02-03','2001-02-04')", (str(TEST_NO),))
+                self.cur.execute("INSERT INTO taiwan_billing.cash_cera_point VALUES (%s,5,'2001-02-03','2001-02-04')", (str(TEST_NO),))
+                yield
+            finally:
+                for table in ('cash_cera', 'cash_cera_point'):
+                    self.cur.execute('DELETE FROM taiwan_billing.' + table + ' WHERE account=%s', (str(TEST_NO),))
+
+    def billing_values(self):
+        result = []
+        for table in ('cash_cera', 'cash_cera_point'):
+            self.cur.execute('SELECT * FROM taiwan_billing.' + table + ' WHERE account=%s', (str(TEST_NO),))
+            result.append(self.cur.fetchall())
+        return result
+
+    def test_billing_edit_range_modes_lazy_rows_and_preserved_metadata(self):
+        for mode in ('', 'STRICT_TRANS_TABLES', 'NO_BACKSLASH_ESCAPES'):
+            with self.subTest(mode=mode), self.billing_fixture():
+                before = self.billing_values()
+                for amount in (0, 17, 4294967295, 0):
+                    for _ in range(2):
+                        r = self.probe('set-billing', TEST_NO, TEST_NO, amount, amount, mode=mode)
+                        self.assertEqual(r.returncode, 0, r.stderr)
+                        for old, new in zip(before, self.billing_values()):
+                            self.assertEqual(new[0], (old[0][0], amount, *old[0][2:]))
+                for amounts in ((4294967296, 1), (1, 4294967296)):
+                    r = self.probe('set-billing', TEST_NO, TEST_NO, *amounts, mode=mode)
+                    self.assertNotEqual(r.returncode, 0, r.stdout)
+                # Either table may be missing, or both may be absent.
+                for tables in [('cash_cera',), ('cash_cera_point',), ('cash_cera', 'cash_cera_point')]:
+                    for table in tables:
+                        self.cur.execute('DELETE FROM taiwan_billing.' + table + ' WHERE account=%s', (str(TEST_NO),))
+                    r = self.probe('set-billing', TEST_NO, TEST_NO, 123, 456, mode=mode)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    state = self.billing_values()
+                    self.assertEqual([rows[0][1] for rows in state], [123, 456])
+                    self.assertEqual(state[0][0][2], 0)
+                    for table in tables:
+                        self.assertEqual(self.one('SELECT DATE(reg_date)=CURRENT_DATE() AND DATE(mod_date)=CURRENT_DATE() FROM taiwan_billing.' + table + ' WHERE account=%s', (str(TEST_NO),)), 1)
+
+    def test_billing_edit_rejects_online_stale_deleted_missing_targets(self):
+        with self.billing_fixture():
+            before = self.billing_values()
+            for status in (1, 2, 3, -1):
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s', (status, TEST_NO))
+                r = self.probe('set-billing', TEST_NO, TEST_NO, 123, 456)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertIn('在线或正在退出', r.stderr)
+            self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s', (TEST_NO,))
+            for cid, mid in ((0, TEST_NO), (TEST_NO, 0), (TEST_NO + 1, TEST_NO), (TEST_NO, TEST_NO + 1)):
+                r = self.probe('set-billing', cid, mid, 123, 456)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s', (TEST_NO,))
+            self.assertNotEqual(self.probe('set-billing', TEST_NO, TEST_NO, 123, 456).returncode, 0)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0,m_id=m_id+1 WHERE charac_no=%s', (TEST_NO,))
+            self.assertNotEqual(self.probe('set-billing', TEST_NO, TEST_NO, 123, 456).returncode, 0)
+            self.assertEqual(self.billing_values(), before)
+            for table in ('cash_cera', 'cash_cera_point'):
+                self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_billing.' + table + ' WHERE account=%s', (str(TEST_NO + 1),)), 0)
+
+    def test_billing_edit_faults_and_readback_roll_back_both_tables(self):
+        with self.billing_fixture():
+            before = self.billing_values()
+            for table, column in [('cash_cera', 'cera'), ('cash_cera_point', 'cera_point')]:
+                for body in ("SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit billing failure'", 'SET NEW.' + column + '=OLD.' + column):
+                    with self.trigger('taiwan_billing.' + table, 'UPDATE', body):
+                        r = self.probe('set-billing', TEST_NO, TEST_NO, 123, 456)
+                    self.assertNotEqual(r.returncode, 0, r.stdout)
+                    self.assertEqual(self.billing_values(), before)
+            with self.trigger('taiwan_billing.cash_cera_point', 'UPDATE', 'UPDATE taiwan_billing.cash_cera SET cera=17 WHERE account=NEW.account'):
+                r = self.probe('set-billing', TEST_NO, TEST_NO, 123, 456)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertEqual(self.billing_values(), before)
+            for table in ('cash_cera', 'cash_cera_point'):
+                self.cur.execute('DELETE FROM taiwan_billing.' + table + ' WHERE account=%s', (str(TEST_NO),))
+            with self.trigger('taiwan_billing.cash_cera_point', 'INSERT', 'SET NEW.cera_point=17'):
+                r = self.probe('set-billing', TEST_NO, TEST_NO, 123, 456)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertEqual(self.billing_values(), [(), ()])
+
+    def test_billing_edit_nontransactional_refusal_and_string_account_key(self):
+        with self.billing_fixture():
+            for table in ('cash_cera', 'cash_cera_point'):
+                before = self.billing_values()
+                self.cur.execute('ALTER TABLE taiwan_billing.' + table + ' ENGINE=MyISAM')
+                try:
+                    r = self.probe('set-billing', TEST_NO, TEST_NO, 123, 456)
+                    self.assertNotEqual(r.returncode, 0, r.stdout)
+                    self.assertIn('InnoDB', r.stderr)
+                    self.assertEqual(self.billing_values(), before)
+                finally:
+                    self.cur.execute('ALTER TABLE taiwan_billing.' + table + ' ENGINE=InnoDB')
+            alias = '0' + str(TEST_NO)
+            self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_billing.cash_cera WHERE account=%s', (alias,)), 0)
+            try:
+                self.cur.execute("INSERT INTO taiwan_billing.cash_cera VALUES (%s,999,55,'2001-02-03','2001-02-04')", (alias,))
+                r = self.probe('set-billing', TEST_NO, TEST_NO, 123, 456)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.one('SELECT cera FROM taiwan_billing.cash_cera WHERE account=%s', (alias,)), 999)
+            finally:
+                self.cur.execute('DELETE FROM taiwan_billing.cash_cera WHERE account=%s', (alias,))
+
+    def test_billing_edit_holds_login_lock_during_role_and_both_balance_waits(self):
+        for absent in (False, True):
+            for target in ('role', 'cash_cera', 'cash_cera_point'):
+                with self.subTest(absent=absent, target=target), self.billing_fixture():
+                    if absent:
+                        self.cur.execute('DELETE FROM taiwan_login.login_account_3 WHERE m_id=%s', (TEST_NO,))
+                    params = dict(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+                    lock = pymysql.connect(**params); login = pymysql.connect(**params); pending = None
+                    try:
+                        lock.begin()
+                        with lock.cursor() as query:
+                            query.execute('SELECT 1 FROM ' + ('taiwan_cain.charac_info WHERE charac_no=%s' if target == 'role' else 'taiwan_billing.' + target + ' WHERE account=%s') + ' FOR UPDATE', (TEST_NO if target == 'role' else str(TEST_NO),))
+                        env = dict(os.environ, **{'DNF_GM_TEST_' + key.upper(): value for key, value in self.params.items()})
+                        pending = subprocess.Popen([str(PROBE), 'set-billing', str(TEST_NO), str(TEST_NO), '123', '456'], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        prefix = 'SELECT m_id,delete_flag FROM taiwan_cain.charac_info' if target == 'role' else 'SELECT ' + ('cera' if target == 'cash_cera' else 'cera_point') + ' FROM taiwan_billing.' + target + ' '
+                        deadline = time.monotonic() + 20
+                        while True:
+                            self.cur.execute('SHOW FULL PROCESSLIST')
+                            if any(row[7] and row[7].startswith(prefix) for row in self.cur.fetchall()): break
+                            self.assertIsNone(pending.poll(), 'billing write exited before lock wait')
+                            self.assertLess(time.monotonic(), deadline, 'billing target wait missing')
+                            time.sleep(.05)
+                        change = 'INSERT INTO taiwan_login.login_account_3 (m_id,login_status) VALUES(%s,1)' if absent else 'UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s'
+                        with login.cursor() as query:
+                            query.execute('SET SESSION innodb_lock_wait_timeout=1')
+                            with self.assertRaises(pymysql.err.OperationalError) as blocked: query.execute(change, (TEST_NO,))
+                            self.assertEqual(blocked.exception.args[0], 1205)
+                        lock.commit(); out, err = pending.communicate(timeout=30)
+                        self.assertEqual(pending.returncode, 0, (out, err))
+                        self.assertEqual([rows[0][1] for rows in self.billing_values()], [123, 456])
+                        with login.cursor() as query: query.execute(change, (TEST_NO,))
+                    finally:
+                        lock.rollback()
+                        if pending is not None and pending.poll() is None: pending.kill(); pending.communicate(timeout=10)
+                        lock.close(); login.close()
+
+    def test_billing_edit_rechecks_online_state_after_login_wait(self):
+        with self.billing_fixture():
+            before = self.billing_values()
+            lock = pymysql.connect(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+            pending = None
+            try:
+                lock.begin()
+                with lock.cursor() as query: query.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s', (TEST_NO,))
+                env = dict(os.environ, **{'DNF_GM_TEST_' + key.upper(): value for key, value in self.params.items()})
+                pending = subprocess.Popen([str(PROBE), 'set-billing', str(TEST_NO), str(TEST_NO), '123', '456'], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                waiting = 'SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=' + str(TEST_NO) + ' FOR UPDATE'
+                deadline = time.monotonic() + 20
+                while not self.one('SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO=%s', (waiting,)):
+                    self.assertIsNone(pending.poll()); self.assertLess(time.monotonic(), deadline, 'billing login lock missing'); time.sleep(.05)
+                lock.commit(); out, err = pending.communicate(timeout=30)
+                self.assertNotEqual(pending.returncode, 0, out)
+                self.assertIn('在线或正在退出', err.decode('utf8'))
+                self.assertEqual(self.billing_values(), before)
+            finally:
+                lock.rollback()
+                if pending is not None and pending.poll() is None: pending.kill(); pending.communicate(timeout=10)
+                lock.close()
+
+    def test_billing_edit_masked_set_and_concurrent_add_use_locked_balance(self):
+        with self.billing_fixture():
+            r = self.probe('set-billing', TEST_NO, TEST_NO, 123, 0, 1)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual([rows[0][1] for rows in self.billing_values()], [123, 5])
+            self.cur.execute('UPDATE taiwan_billing.cash_cera_point SET cera_point=333 WHERE account=%s', (str(TEST_NO),))
+            r = self.probe('add-billing', TEST_NO, TEST_NO, 10, 0, 1)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual([rows[0][1] for rows in self.billing_values()], [133, 333])
+            results = []
+            workers = [threading.Thread(target=lambda: results.append(self.probe('add-billing', TEST_NO, TEST_NO, 7, 11))) for _ in range(6)]
+            for worker in workers: worker.start()
+            for worker in workers: worker.join(60); self.assertFalse(worker.is_alive())
+            self.assertEqual(len(results), 6)
+            self.assertTrue(all(r.returncode == 0 for r in results), [(r.returncode, r.stderr) for r in results])
+            self.assertEqual([rows[0][1] for rows in self.billing_values()], [175, 399])
+            for amounts in [(4294967295, 0), (0, 4294967295)]:
+                before = self.billing_values()
+                r = self.probe('add-billing', TEST_NO, TEST_NO, *amounts)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertEqual(self.billing_values(), before)
+            for table in ('cash_cera', 'cash_cera_point'):
+                self.cur.execute('DELETE FROM taiwan_billing.' + table + ' WHERE account=%s', (str(TEST_NO),))
+            r = self.probe('set-billing', TEST_NO, TEST_NO, 123, 0, 1)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(self.billing_values()[1], ())
+            before = self.billing_values()
+            for fields in (0, 4, 7):
+                self.assertNotEqual(self.probe('set-billing', TEST_NO, TEST_NO, 1, 2, fields).returncode, 0)
+                self.assertEqual(self.billing_values(), before)
+
+    def test_billing_edit_online_nontransactional_queue_refuses_before_write(self):
+        exists = self.one("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='d_taiwan' AND TABLE_NAME='dnf_gm_online_v6'")
+        if not exists:
+            self.cur.execute('CREATE TABLE d_taiwan.dnf_gm_online_v6 (token CHAR(32) PRIMARY KEY) ENGINE=MyISAM')
+        else:
+            self.assertEqual(self.one("SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA='d_taiwan' AND TABLE_NAME='dnf_gm_online_v6'"), 'InnoDB')
+            self.cur.execute('ALTER TABLE d_taiwan.dnf_gm_online_v6 ENGINE=MyISAM')
+        try:
+            with self.billing_fixture():
+                before = self.billing_values()
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s', (TEST_NO,))
+                r = self.probe('set-billing', TEST_NO, TEST_NO, 123, 456)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertIn('InnoDB', r.stderr)
+                self.assertEqual(self.billing_values(), before)
+        finally:
+            self.cur.execute('ALTER TABLE d_taiwan.dnf_gm_online_v6 ENGINE=InnoDB' if exists else 'DROP TABLE d_taiwan.dnf_gm_online_v6')
+
     def test_containers_each_page_and_atomic_all_pages(self):
         for mode in ('', 'STRICT_TRANS_TABLES', 'NO_BACKSLASH_ESCAPES'):
             with self.subTest(mode=mode), self.container_fixture() as paths:
