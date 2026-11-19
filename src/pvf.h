@@ -55,6 +55,7 @@ typedef struct {
     StrTab strings;
     IdTab  items;        // it_id → 名称
     IdTab  jobs;         // job → 名称
+    IdTab  grows;        // (job << 4) | 转职分支 → 名称
     StrTab seals;        // 下标 = 封印 id
     u32   *exp;
     int    nexp;
@@ -125,6 +126,7 @@ typedef struct {
 
 int pvf_quest_materials(Pvf *p, QuestMat **out);   // 返回条数，*out 由调用方 free
 const char *pvf_job_name(const Pvf *p, int job);
+const char *pvf_grow_name(const Pvf *p, int job, int branch);
 const char *pvf_seal_name(const Pvf *p, int id);
 int         pvf_is_equip(const Pvf *p, u32 id);
 int         pvf_item_count(const Pvf *p);

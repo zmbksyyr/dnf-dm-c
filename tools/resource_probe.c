@@ -49,8 +49,8 @@ int main(int argc, char **argv) {
                 buf_free(&data);
             }
         }
-        const IdTab *tables[] = {&p.jobs, &p.cre};
-        const char *labels[] = {"JOB", "CREATURE"};
+        const IdTab *tables[] = {&p.jobs, &p.cre, &p.grows};
+        const char *labels[] = {"JOB", "CREATURE", "GROW"};
         for (int k = 0; k < COUNT_OF(tables); k++) {
             const IdTab *table = tables[k];
             for (int i = 0; i < table->n; i++) {

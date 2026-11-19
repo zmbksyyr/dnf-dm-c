@@ -828,6 +828,60 @@ def gm_form_fields(ctx):
         snap.restore()
 
 
+@core.case("gm.profession.packed", needs=("gui", "db"), group="always",
+           desc="转职/觉醒按 packed byte 回填，换职业保留 grow，修改觉醒保留独立高位")
+def gm_profession_packed(ctx):
+    cno = _prep(ctx)
+    if not cno or not _offline(ctx, _mid(ctx,cno)):
+        return
+    snap=Snap(ctx)
+    try:
+        snap.take("taiwan_cain.charac_info","charac_no",cno,("job","grow_type"))
+        ctx.page(PAGE_GM)
+        def selected(cid):
+            field=ctx.ctl(cid);index=u.SendMessageW(field,core.CB_GETCURSEL,0,0)
+            return u.SendMessageW(field,0x0150,index,0) if index>=0 else -1
+        def choose(cid,value):
+            field=ctx.ctl(cid)
+            index=next((i for i in range(u.SendMessageW(field,core.CB_GETCOUNT,0,0))
+                        if u.SendMessageW(field,0x0150,i,0)==value),None)
+            if not ctx.ok("下拉包含值 %d"%value,index is not None):return False
+            u.SendMessageW(field,core.CB_SETCURSEL,index,0)
+            u.PostMessageW(u.GetParent(field),core.WM_COMMAND,cid|(9<<16),field)
+            return True
+        column=ctx.q1("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME='charac_info' AND COLUMN_NAME='grow_type'")
+        signed='tinyint' in column and 'unsigned' not in column
+        def stored(raw):return raw-256 if signed and raw>127 else raw
+        def reload():
+            # Re-selecting the already selected row intentionally keeps the GM draft.
+            core.press(u.GetDlgItem(ctx.main,IDC_DISC),.2)
+            if not ctx.ok("断开完成",core.wait_until(lambda:not u.IsWindowEnabled(u.GetDlgItem(ctx.main,IDC_DISC)),15)):return False
+            core.press(u.GetDlgItem(ctx.main,IDC_CONN),.5)
+            if not ctx.ok("重连完成",core.wait_until(lambda:u.IsWindowEnabled(u.GetDlgItem(ctx.main,IDC_DISC)),25)):return False
+            core.set_text(u.GetDlgItem(ctx.main,108),str(cno))
+            core.press(u.GetDlgItem(ctx.main,109),.3)
+            if not ctx.ok("搜索载入最新数据",_conn_ready(ctx)):return False
+            core.click_at(u.GetDlgItem(ctx.main,IDC_CHLIST),40,12,.1)
+            return True
+        for raw in (17,33,145,86,255):
+            ctx.cur.execute("UPDATE taiwan_cain.charac_info SET job=0,grow_type=%s WHERE charac_no=%s",(stored(raw),cno))
+            if not reload():return
+            ctx.check("原 grow %d 回填"%raw,_until(lambda:selected(G['GROW']),raw,15),raw)
+            if not choose(G['JOB'],1):return
+            ctx.check("只改职业保留 grow %d"%raw,
+                      _until(lambda:ctx.q("SELECT job,grow_type FROM taiwan_cain.charac_info WHERE charac_no=%s",(cno,))[0],(1,stored(raw))),(1,stored(raw)))
+            time.sleep(.4)
+        # Starting from a known one-awakening branch with an independent high bit.
+        ctx.cur.execute("UPDATE taiwan_cain.charac_info SET job=0,grow_type=%s WHERE charac_no=%s",(stored(145),cno))
+        if not reload():return
+        ctx.check("高位起点回填",_until(lambda:selected(G['GROW']),145,15),145)
+        if choose(G['GROW'],162):
+            ctx.check("分支 2 / 二觉保留 bit 7",_until(lambda:ctx.q1("SELECT grow_type FROM taiwan_cain.charac_info WHERE charac_no=%s",(cno,)),stored(162)),stored(162))
+        ctx.shot("profession-packed")
+    finally:
+        snap.restore()
+
+
 # ================================================================ 数值框「设成多少」与「+多少」
 @core.case("gm.qadd.boxes", needs=("gui", "db", "pvf"), group="manual",
            desc="数值框只收「这次设成多少」：进页面为 0，+ 按钮在当前值上累加")

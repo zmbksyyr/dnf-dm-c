@@ -72,14 +72,10 @@ static int  s_scan_open;         // 扫完自动弹窗（首次点按钮时）
 static volatile LONG s_scan_live;
 static HWND s_slv, s_sinfo;
 
-// 职业/觉醒都做成下拉：值→文字，避免让人对着裸数字猜
-// 职业名沿用参考工具（x/2026.3.14GMTOOL源码）的叫法：6 号职业叫「刺客」而不是「盗贼」
-// 职业数必须和 app_job_text 里的 kJ 列表一致（PVF 未加载时显示的就是那 11 个名）。
+// Base job and packed grow_type are separate fields in the original game.
 enum { JOB_N = 11 };
-static char kJobBuf[JOB_N][32];
-static const char *kJobLbl[JOB_N];
-
-static const char *kGrowList[] = {"未觉醒", "一次觉醒", "二次觉醒", "三次觉醒", "四次觉醒"};
+static char kJobBuf[JOB_N + 1][96];
+static const char *kJobLbl[JOB_N + 1];
 
 // 段位 0~34：与参考实现（PVPRankList）一致，34 是最高的「斗神」
 static char kPvpBuf[35][40];
@@ -94,11 +90,44 @@ static void pvp_labels(void) {
 }
 
 // PVF 里的职业名比内置表准，加载了就换过来
-static void job_labels(void) {
+static void job_fill(int current) {
     for (int i = 0; i < JOB_N; i++) {
-        snprintf(kJobBuf[i], sizeof(kJobBuf[i]), "%s", app_job_text(i));
+        snprintf(kJobBuf[i], sizeof(kJobBuf[i]), "%d · %s", i, app_job_text(i));
         kJobLbl[i] = kJobBuf[i];
     }
+    int n = JOB_N, sel = current;
+    if (current < 0 || current >= JOB_N) {
+        snprintf(kJobBuf[n], sizeof(kJobBuf[n]), "职业 %d（保留）", current);
+        kJobLbl[n] = kJobBuf[n]; sel = n++;
+    }
+    ui_combo_fill(c_job, kJobLbl, n, sel);
+    for (int i = 0; i < n; i++)
+        SendMessageW(c_job, CB_SETITEMDATA, (WPARAM)i, i < JOB_N ? (LPARAM)i : (LPARAM)current);
+}
+
+static void grow_fill(int job, int current) {
+    // Bits 0..3 are the branch, 4..6 the awakening stage; bit 7 is independent.
+    // Keep unknown current values selectable and preserve bit 7 when editing.
+    static const char *stages[] = {"未觉醒", "一觉", "二觉"};
+    char labels[19][160]; const char *items[19]; int values[19], n = 0, sel = -1;
+    for (int stage = 0; stage < 3; stage++) for (int branch = 0; branch <= 5; branch++) {
+        if (!branch && stage) continue;
+        int value = (current & 0x80) | (stage << 4) | branch;
+        const char *name = g.pvf_ok ? pvf_grow_name(&g.pvf, job, branch) : "";
+        if (!branch) snprintf(labels[n], sizeof(labels[n]), "未转职");
+        else if (*name) snprintf(labels[n], sizeof(labels[n]), "%s · %s", name, stages[stage]);
+        else snprintf(labels[n], sizeof(labels[n]), "分支 %d · %s", branch, stages[stage]);
+        items[n] = labels[n]; values[n] = value;
+        if (value == current) sel = n;
+        n++;
+    }
+    if (sel < 0) {
+        snprintf(labels[n], sizeof(labels[n]), "当前值 %d（保留）", current);
+        items[n] = labels[n]; values[n] = current; sel = n++;
+    }
+    ui_combo_fill(c_grow, items, n, sel);
+    for (int i = 0; i < n; i++) SendMessageW(c_grow, CB_SETITEMDATA, (WPARAM)i, (LPARAM)values[i]);
+    SendMessageW(c_grow, CB_SETDROPPEDWIDTH, (WPARAM)ui_scale(280), 0);
 }
 
 static void scan_show(void);
@@ -106,6 +135,7 @@ static void scan_show(void);
 // 职业名只有 PVF 加载后才会变；每次 reload 都 CB_RESETCONTENT 重填会让下拉框闪一下，
 // 还会把用户正展开的列表收起来。只在来源变了时重建。
 static int s_job_src = -1;
+static char s_job_fp[33];
 
 // ---- 失焦写库的发送队列 ----
 // 一次只能跑一个写任务（共用一条连接）。字段失焦时把「要写的值」抄进队列立刻排队，
@@ -238,10 +268,9 @@ static void gm_reload(Page *p) {
     }
     // 职业下拉的选项来自 PVF：来源变了要重建，重建后选中项回到 0，所以必须重填
     int src = g.pvf_ok ? 1 : 0;
-    if (src != s_job_src) {
+    if (src != s_job_src || (src && strcmp(s_job_fp, g.pvf.fp))) {
         s_job_src = src;
-        job_labels();
-        ui_combo_fill(c_job, kJobLbl, JOB_N, 0);
+        snprintf(s_job_fp, sizeof(s_job_fp), "%s", src ? g.pvf.fp : "");
         s_refill = 1;
     }
     if (!g.char_ok) return;              // 没选角色：控件由 gm_lock 置灰，无需回填
@@ -251,8 +280,8 @@ static void gm_reload(Page *p) {
     // 交完框自己清回 0（见 gm_commit）。把当前值填进来会让人以为「框里是什么
     // 库里就是什么」，其实这框只管这一次的设定。当前值看左边角色信息。
     ui_set_int(c_lev, 0);
-    ui_combo_set(c_job, g.cur.job >= 0 && g.cur.job < JOB_N ? g.cur.job : 0);
-    ui_combo_set(c_grow, g.cur.grow >= 0 && g.cur.grow < COUNT_OF(kGrowList) ? g.cur.grow : 0);
+    job_fill(g.cur.job);
+    grow_fill(g.cur.job, g.cur.grow);
     ui_set_i64(c_money, 0);
     ui_set_i64(c_coin, 0);
     ui_set_i64(c_cera, 0);
@@ -700,10 +729,14 @@ static void gm_commit(int id) {
         }
         case G_JOB:
         case G_GROW: {
-            int j = ui_combo_sel(c_job), gr = ui_combo_sel(c_grow);
-            if (j < 0) j = 0;
-            if (gr < 0) gr = 0;
+            HWND field = id == G_JOB ? c_job : c_grow;
+            int sel = ui_combo_sel(field);
+            if (sel < 0) { gm_refill(); return; }
+            int value = (int)SendMessageW(field, CB_GETITEMDATA, (WPARAM)sel, 0);
+            int j = id == G_JOB ? value : g.cur.job;
+            int gr = id == G_GROW ? value : g.cur.grow;
             if (j == g.cur.job && gr == g.cur.grow) return;
+            if (id == G_JOB) grow_fill(j, gr);
             c.i1 = j;
             c.i2 = gr;
             gm_push(K_JOB, &c);
@@ -1047,7 +1080,7 @@ static void gm_layout(Page *p, int w, int h) {
 
     GmRow role[2] = {
         {"角色名", c_name, NULL, "等级", c_lev, s_qadd[0]},
-        {"职业",   c_job,  NULL, "觉醒", c_grow, NULL},
+        {"职业",   c_job,  NULL, "转职 / 觉醒", c_grow, NULL},
     };
     // VIP 单独占一行，点券与赠送点券拆成两个带标签的框：
     // 原先两者挤在右半格共用一个「点券 / 赠送」标题，插进 VIP 后那半格就成了三个控件，
@@ -1130,12 +1163,12 @@ static void gm_build(HWND parent) {
     // 下限 0：框里恒为 0 表示「这次没有要设的值」，等级也走这条 —— 若下限卡 1，
     // 用户点一下空框再离开，ui_num 会把 0 兜成 1，等于把角色打成 1 级。
     ui_num(c_lev, 0, gm_lev_max());
-    job_labels();
     c_job = ui_combo(parent, G_JOB, 1);
-    ui_combo_fill(c_job, kJobLbl, JOB_N, 0);
+    job_fill(0);
     s_job_src = g.pvf_ok ? 1 : 0;       // 建页时已按当前来源填过，reload 不必重填
+    snprintf(s_job_fp, sizeof(s_job_fp), "%s", g.pvf_ok ? g.pvf.fp : "");
     c_grow = ui_combo(parent, G_GROW, 1);
-    ui_combo_fill(c_grow, kGrowList, COUNT_OF(kGrowList), 0);
+    grow_fill(0, 0);
     // 创建顺序就是 Tab 顺序：这几行必须和视觉上的行列一致
     // （金币/复活币 → 账号金币/VIP → 点券/赠送点券），建反了 Tab 会在同一行里左右乱跳
     c_money = ui_edit(parent, "", G_MONEY, 0);

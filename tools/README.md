@@ -42,6 +42,9 @@ python tools\compare_item.py --build
 职业定向回归为 `DataTests.test_job_offline_ownership_deletion_and_idempotence` 与
 `DataTests.test_job_login_changes_while_update_waits_for_table_lock`，覆盖归属、删除、在线、
 合法／非法幂等与调用方检查后上线的受控 SQL 竞态；保留编号夹具会在退出时清理。
+`DataTests.test_job_packed_byte_storage_and_readback` 覆盖完整字节的 SQL 存储、
+详情与列表读回、严格模式、重复写入和越界拒绝；`gm.profession.packed` 验证实际下拉框
+回填、只改职业保留原值，以及修改转职／觉醒时保留独立高位。
 
 `DataTests.test_live_bubble_skips_inactive_accounts_without_rewarding_or_mutating_them`
 单独验证真实游戏桥接对残留在线标记的处理：须显式设置 `DNF_GM_TEST_LIVE_BRIDGE=1`，

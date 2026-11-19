@@ -204,7 +204,7 @@ static void charac_core(Charac *c, const MyResult *r, int i) {
     c->no = (u32)my_u64(r, i, 0, 0);
     cp_game_text(c->name, sizeof(c->name), r, i, 1);
     c->job = (int)my_i64(r, i, 2, 0);
-    c->grow = (int)my_i64(r, i, 3, 0);
+    c->grow = (u8)my_i64(r, i, 3, 0);
     c->lev = (int)my_i64(r, i, 4, 0);
     c->mid = (u32)my_u64(r, i, 5, 0);
 }
@@ -838,7 +838,7 @@ int db_read_charac(Db *d, u32 no, Charac *out, Err err) {
     }
     cp_game_text(out->name, sizeof(out->name), &r, 0, 0);
     out->job = (int)my_i64(&r, 0, 1, 0);
-    out->grow = (int)my_i64(&r, 0, 2, 0);
+    out->grow = (u8)my_i64(&r, 0, 2, 0);
     out->lev = (int)my_i64(&r, 0, 3, 0);
     my_free(&r);
     return 1;
@@ -1100,20 +1100,34 @@ int db_set_name(Db *d, const Charac *c, const char *name, Err err) {
 }
 
 int db_set_job(Db *d, const Charac *c, int job, int grow, Err err) {
+    if (grow < 0 || grow > 255) {
+        snprintf(err, ERRBUF, "转职/觉醒字节超出 0..255，未写入");
+        return 0;
+    }
     if (!db_require_offline(d, c->mid, err)) return 0;
     Str s = {0}; MyResult r = {0}; u64 affected = 0;
+    // Original databases use signed TINYINT; some installations change it to unsigned.
+    str_cat(&s, "SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='taiwan_cain' "
+                "AND TABLE_NAME='charac_info' AND COLUMN_NAME='grow_type'");
+    if (!select1(d, &s, &r) || r.nrow != 1) {
+        snprintf(err, ERRBUF, "无法确认转职/觉醒字段类型，未写入：%s", d->err);
+        my_free(&r); str_free(&s); return 0;
+    }
+    const char *type = my_text(&r, 0, 0);
+    int stored = grow > 127 && strstr(type, "tinyint") && !strstr(type, "unsigned") ? grow - 256 : grow;
+    my_free(&r); str_clear(&s);
     // The caller's earlier offline check may be stale by the time this write runs.
     str_catf(&s, "UPDATE taiwan_cain.charac_info c SET c.job=%d,c.grow_type=%d "
                 "WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 AND NOT EXISTS "
                 "(SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status<>0)",
-                job, grow, c->no, c->mid);
+                job, stored, c->no, c->mid);
     int ok = run_aff(d, &s, &affected);
     if (ok && !affected) {
         str_clear(&s);
         str_catf(&s, "SELECT 1 FROM taiwan_cain.charac_info c "
                     "WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 AND c.job=%d AND c.grow_type=%d "
                     "AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l "
-                    "WHERE l.m_id=c.m_id AND l.login_status<>0)", c->no, c->mid, job, grow);
+                    "WHERE l.m_id=c.m_id AND l.login_status<>0)", c->no, c->mid, job, stored);
         ok = select1(d, &s, &r) && r.nrow == 1;
         if (!ok) snprintf(err, ERRBUF, "职业/觉醒未写入：账号已上线、归属变化或角色已删除");
     } else if (!ok) snprintf(err, ERRBUF, "改职业/觉醒：%s", d->err);

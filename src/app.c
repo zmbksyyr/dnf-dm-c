@@ -503,8 +503,8 @@ int app_attach_kind(u32 id) {
 }
 
 const char *app_job_text(int job) {
-    static const char *kJ[] = {"未转职", "鬼剑士", "格斗家", "神枪手", "魔法师", "圣职者",
-                               "刺客",   "男法师", "缔造者", "黑暗武士", "影舞者"};
+    static const char *kJ[] = {"鬼剑士", "格斗家（女）", "神枪手（男）", "魔法师（女）", "圣职者",
+                               "神枪手（女）", "暗夜使者", "格斗家（男）", "魔法师（男）", "黑暗武士", "缔造者"};
     if (g.pvf_ok) {
         const char *n = pvf_job_name(&g.pvf, job);
         if (*n) return n;

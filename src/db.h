@@ -121,6 +121,7 @@ int  db_save_blob(Db *d, const Charac *c, const char *table, const char *field,
 // 基础信息
 int  db_set_name(Db *d, const Charac *c, const char *name, Err err);
 int  db_name_taken(Db *d, const char *name, u32 except_no);
+// grow is a raw byte (0..255); signed/unsigned SQL storage is handled internally.
 int  db_set_job(Db *d, const Charac *c, int job, int grow, Err err);
 // exp 为匹配 PVF 的累计经验下限；两张角色表在同一事务内更新。
 // 不猜测曲线、不夹断经验，不支持负值表示保留。

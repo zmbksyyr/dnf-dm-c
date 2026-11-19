@@ -926,6 +926,33 @@ class DataTests(unittest.TestCase):
                 finally:
                     self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s',(mid,))
 
+    def test_job_packed_byte_storage_and_readback(self):
+        column=self.one("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='taiwan_cain' "
+                        "AND TABLE_NAME='charac_info' AND COLUMN_NAME='grow_type'")
+        signed_byte='tinyint' in column and 'unsigned' not in column
+        with self.bubble_fixture() as (ids,mid,_):
+            cid=ids[0]
+            def values():
+                self.cur.execute('SELECT job,grow_type FROM taiwan_cain.charac_info WHERE charac_no=%s',(cid,))
+                return self.cur.fetchone()
+            for mode in ('','STRICT_ALL_TABLES'):
+                for raw in (0,17,33,127,128,145,162,255):
+                    with self.subTest(mode=mode,raw=raw):
+                        stored=raw-256 if signed_byte and raw>127 else raw
+                        for _ in range(2):
+                            r=self.probe('job',cid,mid,7,raw,mode=mode)
+                            self.assertEqual(r.returncode,0,r.stderr)
+                            self.assertEqual(values(),(7,stored))
+                        r=self.probe('read-job',cid,mid,mode=mode)
+                        self.assertEqual(r.returncode,0,r.stderr)
+                        self.assertIn('read_job=7 grow='+str(raw),r.stdout)
+                        self.assertIn('list_job=7 grow='+str(raw),r.stdout)
+                before=values()
+                for raw in (-1,256):
+                    r=self.probe('job',cid,mid,7,raw,mode=mode)
+                    self.assertNotEqual(r.returncode,0)
+                    self.assertEqual(values(),before)
+
     def test_job_login_changes_while_update_waits_for_table_lock(self):
         with self.bubble_fixture() as (ids,mid,_):
             cid=ids[0]

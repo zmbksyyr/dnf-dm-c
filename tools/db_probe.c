@@ -114,6 +114,16 @@ static int run_probe(int argc, char **argv) {
     } else if (!strcmp(argv[1], "read-name") && argc == 4) {
         ok = db_read_charac(&d, c.no, &c, err);
         if (ok) printf("name=%s\n", c.name);
+    } else if (!strcmp(argv[1], "read-job") && argc == 4) {
+        ok = db_read_charac(&d, c.no, &c, err);
+        if (ok) printf("read_job=%d grow=%d\n", c.job, c.grow);
+        Vec found; vec_init(&found, sizeof(Charac));
+        if (ok) ok = db_list_chars(&d, &found, 100, argv[2], err);
+        for (int i = 0; ok && i < found.n; i++) {
+            const Charac *row = VEC_AT(&found, Charac, i);
+            if (row->no == c.no) printf("list_job=%d grow=%d\n", row->job, row->grow);
+        }
+        vec_free(&found);
     } else if (!strcmp(argv[1], "search-name") && argc == 3) {
         Vec found;
         vec_init(&found, sizeof(Charac));

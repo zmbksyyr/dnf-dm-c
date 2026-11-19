@@ -2,7 +2,7 @@
 #include "pvf.h"
 
 #define XOR_KEY 0x81A79011u
-#define CACHE_MAGIC "PVFC9\0"   // 9：文本区判码页，修正旧乱码缓存
+#define CACHE_MAGIC "PVFCA\0"   // A：职业及转职名称取自 [growtype name]
 #define CACHE_MAGIC_LEN 6
 
 // ---------------- 解密 ----------------
@@ -719,11 +719,42 @@ static void build_dicts(Pvf *p, PvfProg prog) {
     if (prog.pct) *prog.pct = 8;
     if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "解析职业");
     idtab_free(&p->jobs);
+    idtab_free(&p->grows);
     {
         IdBuild ib;
+        IdBuild grows;
         ib_init(&ib, &p->jobs);
-        lst_into_idtab(p, "character/character.lst", "character", &ib, NULL);
+        ib_init(&grows, &p->grows);
+        const Leaf *lf = pvf_find(p, "character/character.lst");
+        Buf data = {0}; Vec pairs; vec_init(&pairs, sizeof(LstPair));
+        if (lf && pvf_read(p, lf, &data)) parse_lst(p, &data, "character", &pairs);
+        for (int i = 0; i < pairs.n; i++) {
+            const LstPair *lp = VEC_AT(&pairs, LstPair, i);
+            const Leaf *sub = pvf_find(p, lp->path);
+            if (!sub || !pvf_read(p, sub, &data) || data.n < 7) continue;
+            int branch = -1; Str tmp = {0};
+            for (size_t j = 2; j + 5 <= data.n; j += 5) {
+                u8 t = data.p[j]; u32 v = rd32(data.p + j + 1);
+                const char *s;
+                if (t >= 5 && t <= 8) s = stab_get(&p->strings, (int)v);
+                else if (t == 9 && j + 10 <= data.n) {
+                    j += 5;
+                    s = nstr_value(p, v, stab_get(&p->strings, (int)rd32(data.p + j + 1)), &tmp);
+                } else continue;
+                if (is_seg_name(s)) {
+                    if (branch >= 0) break;
+                    if (!strcmp(s, "[growtype name]")) branch = 0;
+                } else if (branch >= 0 && branch < 16) {
+                    if (!branch) ib_add(&ib, lp->id, s, 0);
+                    ib_add(&grows, (lp->id << 4) | (u32)branch, s, 0);
+                    branch++;
+                }
+            }
+            str_free(&tmp);
+        }
+        buf_free(&data); vec_free(&pairs);
         ib_sort(&ib);
+        ib_sort(&grows);
     }
 
     if (prog.stage) snprintf(prog.stage, (size_t)prog.stage_cap, "解析宠物");
@@ -857,6 +888,7 @@ static void save_cache(Pvf *p) {
     for (int i = 0; i < p->items.n; i++) buf_put32(&b, p->stk ? p->stk[i] : 0);
     write_idtab(&b, &p->cre);
     write_idtab(&b, &p->jobs);
+    write_idtab(&b, &p->grows);
     write_stab(&b, &p->seals);
     buf_put32(&b, (u32)p->nexp);
     for (int i = 0; i < p->nexp; i++) buf_put32(&b, p->exp[i]);
@@ -979,6 +1011,7 @@ static int load_cache(Pvf *p) {
     }
     read_idtab(&r, &p->cre);
     read_idtab(&r, &p->jobs);
+    read_idtab(&r, &p->grows);
     read_stab(&r, &p->seals);
     p->nexp = (int)r_u32(&r);
     if (r.ok && p->nexp >= 0 && p->nexp <= 10000) {
@@ -1093,6 +1126,7 @@ void pvf_close(Pvf *p) {
     p->ileaf = NULL;
     idtab_free(&p->cre);
     idtab_free(&p->jobs);
+    idtab_free(&p->grows);
     stab_free(&p->seals);
     stab_free(&p->avatar_hidden);
     idtab_free(&p->nstr);
@@ -1160,6 +1194,11 @@ const char *pvf_kind_name(int kind) {
 const char *pvf_job_name(const Pvf *p, int job) {
     if (!p || !p->opened) return "";
     return idtab_get(&p->jobs, (u32)job);
+}
+
+const char *pvf_grow_name(const Pvf *p, int job, int branch) {
+    if (!p || !p->opened || job < 0 || branch < 0 || branch > 15) return "";
+    return idtab_get(&p->grows, ((u32)job << 4) | (u32)branch);
 }
 
 const char *pvf_seal_name(const Pvf *p, int id) {
