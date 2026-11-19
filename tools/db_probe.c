@@ -93,6 +93,9 @@ static int run_probe(int argc, char **argv) {
         ok = db_clone_char(&d, &c, name, sizeof(name), &new_no, &nt, &nr, &log, err);
         str_free(&log);
         if (ok) printf("new_no=%u\n", new_no);
+    } else if ((!strcmp(argv[1], "job") || !strcmp(argv[1], "job-checked")) && argc == 6) {
+        ok = strcmp(argv[1], "job-checked") || db_require_offline(&d, c.mid, err);
+        if (ok) ok = db_set_job(&d, &c, atoi(argv[4]), atoi(argv[5]), err);
     } else if (!strcmp(argv[1], "quest-init") && argc == 4) {
         ok = db_quest_init(&d, &c, err);
     } else if (!strcmp(argv[1], "mail-delete") && argc == 3) {

@@ -39,6 +39,10 @@ python tools\compare_item.py --build
 建触发器权限；用例在 finally 中清理临时记录、触发器与自增计数。
 只在测试库执行，并与 GUI 回归、游戏服务和其他写入者错开。
 
+职业定向回归为 `DataTests.test_job_offline_ownership_deletion_and_idempotence` 与
+`DataTests.test_job_login_changes_while_update_waits_for_table_lock`，覆盖归属、删除、在线、
+合法／非法幂等与调用方检查后上线的受控 SQL 竞态；保留编号夹具会在退出时清理。
+
 `DataTests.test_live_bubble_skips_inactive_accounts_without_rewarding_or_mutating_them`
 单独验证真实游戏桥接对残留在线标记的处理：须显式设置 `DNF_GM_TEST_LIVE_BRIDGE=1`，
 仅在独立副本、原游戏桥接运行且其他账号全部离线时执行。它创建并清理保留编号的

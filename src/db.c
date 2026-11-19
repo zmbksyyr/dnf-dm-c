@@ -1100,9 +1100,24 @@ int db_set_name(Db *d, const Charac *c, const char *name, Err err) {
 }
 
 int db_set_job(Db *d, const Charac *c, int job, int grow, Err err) {
-    return db_exec(d, "改职业/觉醒", "taiwan_cain.charac_info", "charac_no", c->no, err,
-                   "UPDATE taiwan_cain.charac_info SET job=%d,grow_type=%d WHERE charac_no=%u",
-                   job, grow, c->no);
+    if (!db_require_offline(d, c->mid, err)) return 0;
+    Str s = {0}; MyResult r = {0}; u64 affected = 0;
+    // The caller's earlier offline check may be stale by the time this write runs.
+    str_catf(&s, "UPDATE taiwan_cain.charac_info c SET c.job=%d,c.grow_type=%d "
+                "WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 AND NOT EXISTS "
+                "(SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status<>0)",
+                job, grow, c->no, c->mid);
+    int ok = run_aff(d, &s, &affected);
+    if (ok && !affected) {
+        str_clear(&s);
+        str_catf(&s, "SELECT 1 FROM taiwan_cain.charac_info c "
+                    "WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 AND c.job=%d AND c.grow_type=%d "
+                    "AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l "
+                    "WHERE l.m_id=c.m_id AND l.login_status<>0)", c->no, c->mid, job, grow);
+        ok = select1(d, &s, &r) && r.nrow == 1;
+        if (!ok) snprintf(err, ERRBUF, "职业/觉醒未写入：账号已上线、归属变化或角色已删除");
+    } else if (!ok) snprintf(err, ERRBUF, "改职业/觉醒：%s", d->err);
+    my_free(&r); str_free(&s); return ok;
 }
 
 // 等级和累计经验同步更新；PVF 下标和字段范围由调用方校准。

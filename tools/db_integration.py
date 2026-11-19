@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
+import time
 import unittest
 import zlib
 
@@ -893,6 +894,76 @@ class DataTests(unittest.TestCase):
                     self.assertEqual(self.one('SELECT COUNT(*) FROM '+table+' WHERE charac_no=%s',(ids[-1],)),0)
             finally:
                 self.cur.execute('DELETE FROM '+table+' WHERE charac_no IN ('+','.join(map(str,ids))+')')
+
+    def test_job_offline_ownership_deletion_and_idempotence(self):
+        with self.bubble_fixture() as (ids,mid,_):
+            cid=ids[0]
+            def values():
+                self.cur.execute('SELECT job,grow_type FROM taiwan_cain.charac_info WHERE charac_no=%s',(cid,))
+                return self.cur.fetchone()
+            for mode in ('','STRICT_ALL_TABLES'):
+                for want in ((0,0),(1,2)):
+                    for _ in range(2):
+                        r=self.probe('job',cid,mid,*want,mode=mode)
+                        self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(values(),want)
+                before=values()
+                for want in (before,(0,0)):
+                    r=self.probe('job',cid,mid+1,*want,mode=mode)
+                    self.assertNotEqual(r.returncode,0);self.assertEqual(values(),before)
+                    r=self.probe('job',ids[-1],mid,*want,mode=mode)
+                    self.assertNotEqual(r.returncode,0)
+                self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s',(cid,))
+                for want in (before,(0,0)):
+                    r=self.probe('job',cid,mid,*want,mode=mode)
+                    self.assertNotEqual(r.returncode,0);self.assertEqual(values(),before)
+                self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0 WHERE charac_no=%s',(cid,))
+                try:
+                    for status in (1,2):
+                        self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s',(status,mid))
+                        for want in (before,(0,0)):
+                            r=self.probe('job',cid,mid,*want,mode=mode)
+                            self.assertNotEqual(r.returncode,0);self.assertEqual(values(),before)
+                finally:
+                    self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s',(mid,))
+
+    def test_job_login_changes_while_update_waits_for_table_lock(self):
+        with self.bubble_fixture() as (ids,mid,_):
+            cid=ids[0]
+            self.cur.execute('SELECT job,grow_type FROM taiwan_cain.charac_info WHERE charac_no=%s',(cid,))
+            before=self.cur.fetchone();target=1 if before[1]!=1 else 2
+            lock=pymysql.connect(host=self.params['host'],port=int(self.params['port']),
+                                 user=self.params['user'],password=self.params['pwd'],autocommit=True)
+            pending=None
+            try:
+                with lock.cursor() as q:q.execute('LOCK TABLES taiwan_cain.charac_info WRITE')
+                env=dict(os.environ,**{'DNF_GM_TEST_'+k.upper():v for k,v in self.params.items()})
+                pending=subprocess.Popen([str(PROBE),'job-checked',str(cid),str(mid),str(before[0]),str(target)],
+                                         cwd=OUT,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                end=time.monotonic()+15
+                while True:
+                    self.cur.execute('SHOW FULL PROCESSLIST')
+                    blocked=any(r[7] and r[7].startswith('UPDATE taiwan_cain.charac_info') and
+                                ('charac_no='+str(cid)) in r[7] and r[6] and 'lock' in r[6].lower()
+                                for r in self.cur.fetchall())
+                    if blocked:break
+                    if pending.poll() is not None or time.monotonic()>=end:
+                        self.fail('job UPDATE did not reach the expected table-lock wait')
+                    time.sleep(.05)
+                # Controlled SQL race, not a replacement for a real game login test.
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s',(mid,))
+                with lock.cursor() as q:q.execute('UNLOCK TABLES')
+                out,err=pending.communicate(timeout=30)
+                self.assertEqual(pending.returncode,1,(out,err))
+                self.cur.execute('SELECT job,grow_type FROM taiwan_cain.charac_info WHERE charac_no=%s',(cid,))
+                self.assertEqual(self.cur.fetchone(),before)
+            finally:
+                with lock.cursor() as q:q.execute('UNLOCK TABLES')
+                lock.close()
+                if pending is not None and pending.poll() is None:
+                    try:pending.communicate(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        pending.kill();pending.communicate()
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s',(mid,))
 
     def test_skill_points_wire_range_and_offline_guards(self):
         table='taiwan_cain_2nd.skill'
