@@ -12,9 +12,9 @@ void db_online_capabilities(Db *d, Vec *chars) {
     // this database connection stays open. Nothing is installed by this probe.
     Str s={0};MyResult r={0};u32 hosts=0,queues=0;
     str_cat(&s,"SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='d_taiwan' "
-               "AND TABLE_NAME REGEXP '^dnf_gm_(hosts|online)_v([1-9]|10)$'");
+               "AND TABLE_NAME REGEXP '^dnf_gm_(hosts|online)_v([1-9]|1[01])$'");
     int ok=select1(d,&s,&r);
-    if(ok) for(int i=0;i<r.nrow;i++) for(int v=1;v<=10;v++) {
+    if(ok) for(int i=0;i<r.nrow;i++) for(int v=1;v<=11;v++) {
         char name[40];snprintf(name,sizeof(name),"dnf_gm_hosts_v%d",v);
         if(!strcmp(my_text(&r,i,0),name)) hosts|=1u<<(v-1);
         snprintf(name,sizeof(name),"dnf_gm_online_v%d",v);
@@ -25,7 +25,7 @@ void db_online_capabilities(Db *d, Vec *chars) {
     if(ok && available) {
         str_cat(&s,"SELECT l.m_id,BIT_OR(h.cap) FROM taiwan_login.login_account_3 l JOIN (");
         int first=1;
-        for(int v=1;v<=10;v++) if(available&(1u<<(v-1))) {
+        for(int v=1;v<=11;v++) if(available&(1u<<(v-1))) {
             if(!first) str_cat(&s," UNION ALL ");
             str_catf(&s,"SELECT channel_no,%u AS cap FROM d_taiwan.dnf_gm_hosts_v%d "
                 "WHERE seen>DATE_SUB(NOW(6),INTERVAL 5 SECOND)",1u<<(v-1),v);
@@ -63,10 +63,11 @@ static int online_submit(Db *d, const Charac *c, u32 amount, const u32 *extra, c
     if(!ok || strlen(request->token)!=32) goto failed;
     str_catf(&s,"INSERT INTO d_taiwan.dnf_gm_online_v%d "
         "(token,m_id,charac_no,operation,amount%s,created,expires,updated) ",version,
-        version==6?",amount_point":version==9?",amount_exp":version==10?",amount_win,amount_point":extra?",amount_sp2,amount_tp,amount_tp2":"");
+        version==6?",amount_point":version==9?",amount_exp":version==10?",amount_win,amount_point":
+        version==11?",amount_slot":extra?",amount_sp2,amount_tp,amount_tp2":"");
     if(c->no) {
         str_catf(&s,"SELECT '%s',c.m_id,c.charac_no,'%s',%u",request->token,operation,amount);
-        if(version==9) str_catf(&s,",%u",extra[0]);
+        if(version==9 || version==11) str_catf(&s,",%u",extra[0]);
         else if(version==10) str_catf(&s,",%u,%u",extra[0],extra[1]);
         else if(extra) str_catf(&s,",%u,%u,%u",extra[0],extra[1],extra[2]);
         str_catf(&s,",NOW(6),DATE_ADD(NOW(6),INTERVAL 20 SECOND),NOW(6) "
@@ -147,6 +148,14 @@ int db_online_pvp_submit(Db *d,const Charac *c,u32 grade,u32 win,u32 point,Onlin
     return online_submit(d,c,grade,extra,"set_pvp_record",10,request,err);
 }
 
+int db_online_quest_ready_submit(Db *d,const Charac *c,int slot,u32 id,OnlineCommand *request,Err err) {
+    if(!c->no || slot<1 || slot>20 || !id || id>=30000) {
+        snprintf(err,ERRBUF,"在线任务槽位或编号无效");return 0;
+    }
+    u32 extra=(u32)slot;
+    return online_submit(d,c,id,&extra,"ready_quest",11,request,err);
+}
+
 // Called inside the billing transaction, after its writes. Keep the reload
 // request invisible to the game until those balances commit together.
 int db_online_billing_submit(Db *d,u32 mid,OnlineCommand *request,Err err) {
@@ -170,7 +179,7 @@ int db_online_billing_submit(Db *d,u32 mid,OnlineCommand *request,Err err) {
 }
 
 int db_online_finish(Db *d, OnlineCommand *request, Err err) {
-    int version=request->version>=1 && request->version<=10?request->version:1;
+    int version=request->version>=1 && request->version<=11?request->version:1;
     Str s={0};MyResult r={0};
     u64 deadline=now_ms()+22000;
     int stopped=0,ok=0;

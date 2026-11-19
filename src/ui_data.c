@@ -578,6 +578,10 @@ static struct { int slot; u32 id; } q_shown[20];
 static int q_shown_n;
 static u32 q_shown_cno;
 
+static int quest_ready_available(void) {
+    return g.char_ok && (!g.cur.online || (g.cur.online_caps & (1u<<10)));
+}
+
 static void quest_enrich(void) {
     if (!g.pvf_ok) {
         for (int i = 0; i < g.quests.n; i++) {
@@ -625,7 +629,7 @@ static int quest_work(void *ctx, Err err) {
         InterlockedOr(&s_lists_dirty, L_QUESTS);
         return ok;
     }
-    if (c->kind != D_QSEND && !db_require_offline(&g.db, who.mid, err)) return 0;
+    if (c->kind != D_QSEND && c->kind != D_QSLOT && !db_require_offline(&g.db, who.mid, err)) return 0;
     if (c->kind == D_QUESTCLR) return db_clear_quests(&g.db, &who, err);
     if (c->kind == D_QINIT) return db_quest_init(&g.db, &who, err);
     if (c->kind == D_QSLOT) {
@@ -670,7 +674,7 @@ static void quest_fill(void) {
     q_shown_n = g.quests.n; q_shown_cno = g.cur.no;
     ui_batch(q_list, 0);
     ui_text(q_info, fmt_new("%s · 共 %d 条任务记录%s", g.cur.name, g.quests.n,
-                            g.cur.online ? " · 修改任务请先退出游戏" : ""));
+                            g.cur.online && !quest_ready_available() ? " · 修改任务请先退出游戏" : ""));
 }
 
 static void quest_reload(Page *p) {
@@ -709,7 +713,7 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (!g.char_ok) return 0;
-    if (g.cur.online && id != Q_SEND) {
+    if (g.cur.online && id != Q_SEND && (id != Q_DONE || !quest_ready_available())) {
         app_status("修改任务请先退出游戏，未写入"); return 0;
     }
     if (id == Q_RESET) {
@@ -817,9 +821,10 @@ static void quest_layout(Page *p, int w, int h) {
 static void quest_lock(Page *p) {
     (void)p;
     int read_ids[] = {Q_REFRESH, Q_LIST, Q_SEND};
-    int edit_ids[] = {Q_CLEAR, Q_DROP, Q_DONE, Q_PURGE, Q_RESET};
+    int edit_ids[] = {Q_CLEAR, Q_DROP, Q_PURGE, Q_RESET};
     for (int i = 0; i < COUNT_OF(read_ids); i++) ui_enable(GetDlgItem(p->wnd, read_ids[i]), g.char_ok);
     for (int i = 0; i < COUNT_OF(edit_ids); i++) ui_enable(GetDlgItem(p->wnd, edit_ids[i]), g.char_ok && !g.cur.online);
+    ui_enable(GetDlgItem(p->wnd, Q_DONE), quest_ready_available());
 }
 
 static void quest_build(HWND parent) {

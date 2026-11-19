@@ -536,6 +536,15 @@ int db_set_quest_slot(Db *d, const Charac *c, int slot, u32 expected_id, u32 id,
     if (slot < 1 || slot > 20 || purge_n < 0 || (purge_n && !purge_ids)) {
         snprintf(err, ERRBUF, "任务槽位或材料参数无效"); return 0;
     }
+    int online=0;
+    if (!db_account_online(d, c->mid, &online, err)) return 0;
+    if (online) {
+        if (!expected_id || id!=expected_id || trigger || purge_n) {
+            snprintf(err, ERRBUF, "此项任务修改需先退出游戏，未写入"); return 0;
+        }
+        OnlineCommand request;
+        return db_online_quest_ready_submit(d, c, slot, id, &request, err) && db_online_finish(d, &request, err);
+    }
     if (!db_quest_write_begin(d, c, err)) return 0;
     Str s = {0}; MyResult r = {0};
     str_catf(&s, "SELECT play_%d FROM taiwan_cain.new_charac_quest WHERE charac_no=%u FOR UPDATE", slot, c->no);

@@ -23,6 +23,7 @@ int  db_online_equipment_submit(Db *d, const Charac *c, u32 amount, int level, O
 int  db_online_weight_submit(Db *d, const Charac *c, OnlineCommand *request, Err err);
 int  db_online_level_submit(Db *d, const Charac *c, u32 level, u32 exp, OnlineCommand *request, Err err);
 int  db_online_pvp_submit(Db *d, const Charac *c, u32 grade, u32 win, u32 point, OnlineCommand *request, Err err);
+int  db_online_quest_ready_submit(Db *d, const Charac *c, int slot, u32 id, OnlineCommand *request, Err err);
 int  db_online_billing_submit(Db *d, u32 mid, OnlineCommand *request, Err err);
 int  db_online_finish(Db *d, OnlineCommand *request, Err err);
 int  db_online_character_submit(Db *d, u32 mid, OnlineCommand *request, Err err);

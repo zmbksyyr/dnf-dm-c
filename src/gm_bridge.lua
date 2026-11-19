@@ -33,6 +33,7 @@ local database_work = function(encoded)
             {version=8, suffix='v8', field='inven_weight', operations="'raise_inventory_weight'"},
             {version=9, suffix='v9', operations="'set_character_level'"},
             {version=10, suffix='v10', field='pvp_grade', operations="'set_pvp_record'"},
+            {version=11, suffix='v11', operations="'ready_quest'"},
         }
         if cfg.owner == '' then
             for _, queue in ipairs(queues) do
@@ -55,6 +56,7 @@ local database_work = function(encoded)
                     amount_win INT UNSIGNED NOT NULL, amount_point INT UNSIGNED NOT NULL,
                     before_win INT UNSIGNED NULL, after_win INT UNSIGNED NULL,
                     before_point INT UNSIGNED NULL, after_point INT UNSIGNED NULL,]] end
+                if queue.version==11 then extra_columns='amount_slot INT UNSIGNED NOT NULL,' end
                 exec(string.format([[CREATE TABLE IF NOT EXISTS dnf_gm_hosts_%s (
                     channel_no INT UNSIGNED PRIMARY KEY, owner CHAR(32) CHARACTER SET ascii NOT NULL,
                     seen DATETIME(6) NOT NULL) ENGINE=InnoDB]], queue.suffix))
@@ -155,6 +157,16 @@ local database_work = function(encoded)
                     WHERE q.owner=%s AND q.state='applied' AND
                     ((q.operation='open_equipment_slots' AND s.add_slot_flag=q.after_value) OR
                      (q.operation='unlock_equipment_level' AND m.max_equip_level=q.after_value))]],pending_table,owner))
+            elseif queue.version==11 then
+                local ids,triggers='CASE q.amount_slot','CASE q.amount_slot'
+                for slot=1,20 do
+                    ids=ids..string.format(' WHEN %d THEN i.play_%d',slot,slot)
+                    triggers=triggers..string.format(' WHEN %d THEN i.play_%d_trigger',slot,slot)
+                end
+                exec(string.format([[UPDATE %s q JOIN taiwan_cain.new_charac_quest i ON i.charac_no=q.charac_no
+                    SET q.state='done',q.note='saved',q.updated=NOW(6)
+                    WHERE q.owner=%s AND q.state='applied' AND (%s END)=q.amount AND (%s END)=0]],
+                    pending_table,owner,ids,triggers))
             elseif queue.version~=6 then
                 exec(string.format([[UPDATE %s q JOIN %s i ON i.charac_no=q.charac_no
                     SET q.state='done',q.note='saved',q.updated=NOW(6)
@@ -176,7 +188,7 @@ local database_work = function(encoded)
                 WHERE state='pending' AND expires<NOW(6)]],pending_table))
             local extra_fields=queue.version==4 and ',q.amount_sp2,q.amount_tp,q.amount_tp2' or
                 queue.version==6 and ',q.amount_point' or queue.version==9 and ',q.amount_exp' or
-                queue.version==10 and ',q.amount_win,q.amount_point' or ''
+                queue.version==10 and ',q.amount_win,q.amount_point' or queue.version==11 and ',q.amount_slot' or ''
             local pending = rows(string.format([[SELECT q.token,q.m_id,q.charac_no,q.operation,q.amount%s
                 FROM %s q JOIN taiwan_login.login_account_3 l ON l.m_id=q.m_id
                 WHERE q.state='pending' AND q.expires>NOW(6) AND l.login_status>=1 AND l.m_channel_no=%d
@@ -276,6 +288,11 @@ void DNF_GM_RefreshMaxLevel(CUser *);
 const int *DNF_GM_PvpRead(CUser *);
 int *DNF_GM_PvpWrite(CUser *);
 void DNF_GM_SendPvp(CUser *);
+const char *DNF_GM_QuestRead(CUser *);
+bool DNF_GM_QuestCondition(const char *,int);
+bool DNF_GM_GetQuestFlag(CUser *);
+void DNF_GM_SetQuestFlag(CUser *,bool);
+void DNF_GM_QuestAction(CUser *,int,int,int,int);
 ]]
 symbols.alias('DNF_GM_GetCoin', '_ZNK10CInventory7GetCoinEv')
 symbols.alias('DNF_GM_SetCoin', '_ZN10CInventory7SetCoinEj')
@@ -331,6 +348,11 @@ symbols.alias('DNF_GM_RefreshMaxLevel','_ZN5CUser21CalcurateUserMaxLevelEv')
 symbols.alias('DNF_GM_PvpRead','_ZNK15CUserCharacInfo13getPVPResultREv')
 symbols.alias('DNF_GM_PvpWrite','_ZN15CUserCharacInfo13getPVPResultWEv')
 symbols.alias('DNF_GM_SendPvp','_ZN5CUser15send_pvp_recordEv')
+symbols.alias('DNF_GM_QuestRead','_ZNK5CUser18getCurCharacQuestREv')
+symbols.alias('DNF_GM_QuestCondition','_ZN9UserQuest21check_quest_conditionEi')
+symbols.alias('DNF_GM_GetQuestFlag','_ZN5CUser14getGmQuestFlagEv')
+symbols.alias('DNF_GM_SetQuestFlag','_ZN5CUser14setGmQuestFlagEb')
+symbols.alias('DNF_GM_QuestAction','_ZN5CUser12quest_actionEiiii')
 
 local function inventory_weight(ptr,write)
     local data=write and ffi.C.DNF_GM_PropertiesWrite(ptr) or ffi.C.DNF_GM_PropertiesRead(ptr)
@@ -400,6 +422,7 @@ end,function(encoded)
         local weight = req.version==8 and req.operation=='raise_inventory_weight'
         local level = req.version==9 and req.operation=='set_character_level'
         local pvp = req.version==10 and req.operation=='set_pvp_record'
+        local ready_quest = req.version==11 and req.operation=='ready_quest'
         local waiting=false
         if req.operation=='inspect' and req.version==1 then
             if user and user:GetState()>=3 and user:GetCharacNo()>0 then
@@ -465,6 +488,35 @@ end,function(encoded)
                     if ok then receipt.state,receipt.note='applied','save_queued' end
                 else receipt.note='quest_points_limit' end
             end
+        elseif ready_quest and user and user:GetState()==3 and user:GetCharacNo()==tonumber(req.charac_no) then
+            local id,slot=tonumber(req.amount),tonumber(req.amount_slot)
+            if id>=1 and id<30000 and slot>=1 and slot<=20 then
+                local data=ffi.C.DNF_GM_QuestRead(user.fptr)
+                -- Original quest loader/save use 20 IDs and 20 packed counters.
+                local ids=ffi.cast('const unsigned int *',data+0x7538)
+                local triggers=ffi.cast('const unsigned int *',data+0x7588)
+                local matches=0
+                for n=0,19 do if tonumber(ids[n])==id then matches=matches+1 end end
+                if tonumber(ids[slot-1])~=id or matches~=1 then receipt.note='quest_slot_changed'
+                elseif not ffi.C.DNF_GM_QuestCondition(data,id) then receipt.note='quest_condition'
+                else
+                    receipt.before,receipt.after=tonumber(triggers[slot-1]),0
+                    receipt.state,receipt.note='unknown','quest_update_incomplete'
+                    local flag=ffi.C.DNF_GM_GetQuestFlag(user.fptr)
+                    -- No yield while the original GM flag is set. The original
+                    -- action updates counters, sends command 35 and APC notice.
+                    -- Preflight above avoids its clear-before-condition failure.
+                    ffi.C.DNF_GM_SetQuestFlag(user.fptr,true)
+                    local ok=pcall(function()ffi.C.DNF_GM_QuestAction(user.fptr,35,id,0,0)end)
+                    ffi.C.DNF_GM_SetQuestFlag(user.fptr,flag)
+                    if ok then ok=pcall(function()
+                        assert(ffi.C.DNF_GM_GetQuestFlag(user.fptr)==flag,'quest GM flag not restored')
+                        assert(tonumber(ids[slot-1])==id and tonumber(triggers[slot-1])==0,'quest readback differs')
+                        ffi.C.DNF_GM_UpdateData(user.fptr)
+                    end)end
+                    if ok then receipt.state,receipt.note='applied','save_queued' end
+                end
+            else receipt.note='quest_limit' end
         elseif pvp and user and user:GetState()==3 and user:GetCharacNo()==tonumber(req.charac_no) then
             local grade,win,point=tonumber(req.amount),tonumber(req.amount_win),tonumber(req.amount_point)
             if grade and grade>=0 and grade<=37 and grade%1==0 and
@@ -598,7 +650,7 @@ end,function(encoded)
                 end)
                 if ok then receipt.state,receipt.note='applied','save_queued' end
             else receipt.note='fatigue_limit' end
-        elseif not money and not coin and not fatigue and not skills and not quest_points and not equipment_slots and not equipment_level and not weight and not level and not pvp then receipt.note='unsupported_operation'
+        elseif not money and not coin and not fatigue and not skills and not quest_points and not equipment_slots and not equipment_level and not weight and not level and not pvp and not ready_quest then receipt.note='unsupported_operation'
         elseif (money or coin) and user and user:GetState()>=3 and user:GetCharacNo()==tonumber(req.charac_no) then
             local inventory = user:GetCurCharacInvenR()
             if inventory then
