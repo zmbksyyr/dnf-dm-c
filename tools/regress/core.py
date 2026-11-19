@@ -429,20 +429,21 @@ def seed_test_char_slot(cur, mid, cno):
     cur.execute("SELECT info FROM taiwan_cain.charac_view WHERE m_id=%s", (mid,))
     raw = bytes(cur.fetchone()[0])
     plain = bytearray(zlib.decompress(raw[4:]))
-    if not plain or len(plain) % 296:
-        raise ValueError("test fixture requires a valid 296-byte character view")
-    for offset in range(0, len(plain), 296):
+    if not plain or len(plain) % 148:
+        raise ValueError("test fixture requires a valid 148-byte character view")
+    for offset in range(0, len(plain), 148):
         if struct.unpack_from('<I', plain, offset)[0] == cno:
             return
-    offset = next((i for i in range(0, len(plain), 296) if not any(plain[i:i+296])), None)
+    offset = next((i for i in range(0, len(plain), 148) if not any(plain[i:i+148])), None)
     if offset is None:
         raise ValueError("test fixture requires a free character slot")
     cur.execute("SELECT charac_name,job,grow_type,lev FROM taiwan_cain.charac_info WHERE charac_no=%s", (cno,))
     name, job, grow, lev = cur.fetchone()
     struct.pack_into('<I', plain, offset, cno)
-    encoded = name.encode('utf-8')[:19].decode('utf-8', 'ignore').encode('utf-8')
+    encoded = name.encode('utf-8')[:20].decode('utf-8', 'ignore').encode('utf-8')
     plain[offset+4:offset+4+len(encoded)] = encoded
-    plain[offset+24:offset+27] = bytes((job, grow, lev))
+    plain[offset+24:offset+26] = bytes((job, grow))
+    struct.pack_into('<H', plain, offset+26, lev)
     plain[offset+100] = 93
     cur.execute("UPDATE taiwan_cain.charac_view SET info=%s WHERE m_id=%s",
                 (raw[:4] + zlib.compress(plain), mid))

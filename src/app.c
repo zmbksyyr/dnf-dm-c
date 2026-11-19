@@ -1374,7 +1374,7 @@ int app_db_restore(const char *path) {
 
 // ---------------- 角色克隆 ----------------
 typedef struct {
-    char name[64];
+    Charac who;
 } CloneCtx;
 static CloneCtx g_clc;
 
@@ -1385,14 +1385,13 @@ static int w_clone_char(void *ctx, Err err) {
     int nt = 0;
     u64 nr = 0;
     Str log = {0};
-    int ok = db_clone_char(&g.db, &g.cur, nm, sizeof(nm), &no, &nt, &nr, &log, err);
+    int ok = db_clone_char(&g.db, &c->who, nm, sizeof(nm), &no, &nt, &nr, &log, err);
     // 逐表的键策略先落日志：新角色少了哪几张表，事后只能从这里看出来
     if (log.n) app_log_block(log.p);
     str_free(&log);
     if (!ok) return 0;
-    app_log("克隆角色 · %s → %s（charac_no=%u）· %d 张表 / %llu 行", g.cur.name, nm, no, nt,
+    app_log("克隆角色 · %s → %s（charac_no=%u）· %d 张表 / %llu 行", c->who.name, nm, no, nt,
             (unsigned long long)nr);
-    snprintf(c->name, sizeof(c->name), "%s", nm);
     g.lists_ready = 0;        // 新角色得进角色列表，下次轮询会重拉
     return 1;
 }
@@ -1401,12 +1400,14 @@ void app_clone_char(void) {
     if (!g.db_ok) { app_info("请先连接数据库。"); return; }
     if (!g.char_ok) { app_info("请先选择角色。"); return; }
     if (!app_act_idle()) { app_info("上一个操作还在进行，等它完成再做"); return; }
+    if (g.cur.online) { app_info("请先退出游戏后克隆角色。"); return; }
+    g_clc.who = g.cur;
     if (!app_confirm(fmt_new(
             "把「%s」完整复制一份？\n\n"
-            "新角色会自动取名（原名截到 18 字 + 数字后缀），\n"
+            "新角色会自动取名（原名前 18 字节 + 数字后缀），\n"
             "背包 / 穿戴 / 仓库 / 技能 / 任务 / 时装宠物全部一起复制。\n"
             "整个过程是一个事务，中途出错会整体回滚。",
-            g.cur.name)))
+            g_clc.who.name)))
         return;
     app_act("克隆角色", w_clone_char, &g_clc);
 }

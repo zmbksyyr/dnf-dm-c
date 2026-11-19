@@ -1377,37 +1377,202 @@ class DataTests(unittest.TestCase):
                              [v for c, v in zip(cols, row) if c != 'm_id'] + [self.mid])
 
     def test_full_clone_view_rolls_back(self):
-        slot = bytearray(296); struct.pack_into('<I', slot, 0, self.cno)
+        slot = bytearray(148); struct.pack_into('<I', slot, 0, self.cno)
         with self.clone_view(bytes(slot) * 4) as original_ids:
             r = self.probe("clone", self.cno, self.mid)
             self.assertNotEqual(r.returncode, 0, r.stdout)
             self.cur.execute("SELECT charac_no FROM taiwan_cain.charac_info")
             self.assertEqual({r[0] for r in self.cur.fetchall()}, original_ids)
 
+    @contextlib.contextmanager
+    def owned_clone(self, slots=4):
+        self.cur.execute('SELECT * FROM taiwan_cain.charac_view WHERE m_id=%s', (self.mid,))
+        template = list(self.cur.fetchone())
+        columns = [column[0] for column in self.cur.description]
+        self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_cain.charac_view WHERE m_id=%s', (TEST_NO,)), 0)
+        with self.container_fixture():
+            original = self.cno, self.mid
+            try:
+                self.cno = self.mid = TEST_NO
+                plain = bytearray(148 * slots)
+                struct.pack_into('<I', plain, 148 * (slots - 1), TEST_NO)
+                plain[148 * (slots - 1) + 100] = 99
+                plain[148 * (slots - 1) + 27] = 255
+                template[columns.index('m_id')] = TEST_NO
+                template[columns.index('info')] = struct.pack('<I', len(plain)) + zlib.compress(plain)
+                template[columns.index('charac_count')] = 1
+                self.cur.execute('INSERT INTO taiwan_cain.charac_view (' + ','.join(map(ident, columns)) + ') VALUES (' + ','.join(['%s'] * len(columns)) + ')', template)
+                with self.clone_view(plain) as original_ids:
+                    yield original_ids
+            finally:
+                self.cur.execute('DELETE FROM taiwan_cain.charac_view WHERE m_id=%s', (TEST_NO,))
+                self.cno, self.mid = original
+
+    def clone_ids(self):
+        self.cur.execute('SELECT charac_no FROM taiwan_cain.charac_info')
+        return {row[0] for row in self.cur.fetchall()}
+
+    def test_clone_rejects_online_deleted_wrong_owner_and_missing_source(self):
+        with self.owned_clone() as ids:
+            view = self.one('SELECT info FROM taiwan_cain.charac_view WHERE m_id=%s', (TEST_NO,))
+            for status in (1, 2, 3):
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s', (status, TEST_NO))
+                result = self.probe('clone', TEST_NO, TEST_NO)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn('在线或正在退出', result.stderr)
+                self.assertEqual(self.clone_ids(), ids)
+            self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s', (TEST_NO,))
+            for cno, mid in ((TEST_NO, TEST_NO + 1), (TEST_NO + 1, TEST_NO), (0, TEST_NO), (TEST_NO, 0)):
+                result = self.probe('clone', cno, mid)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.clone_ids(), ids)
+            for assignments in ('delete_flag=1', 'delete_flag=0,m_id=' + str(TEST_NO + 1)):
+                self.cur.execute('UPDATE taiwan_cain.charac_info SET ' + assignments + ' WHERE charac_no=%s', (TEST_NO,))
+                result = self.probe('clone', TEST_NO, TEST_NO)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.clone_ids(), ids)
+                self.assertEqual(self.one('SELECT info FROM taiwan_cain.charac_view WHERE m_id=%s', (TEST_NO,)), view)
+
+    def test_clone_final_view_failure_and_readback_roll_back_all_copies(self):
+        with self.owned_clone() as ids:
+            before = self.container_values()
+            view = self.one('SELECT info FROM taiwan_cain.charac_view WHERE m_id=%s', (TEST_NO,))
+            for body in ("SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit clone view failure'", 'SET NEW.info=OLD.info', 'SET NEW.charac_count=OLD.charac_count'):
+                with self.trigger('taiwan_cain.charac_view', 'UPDATE', body):
+                    result = self.probe('clone', TEST_NO, TEST_NO)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.clone_ids(), ids)
+                self.assertEqual(self.container_values(), before)
+                self.assertEqual(self.one('SELECT info FROM taiwan_cain.charac_view WHERE m_id=%s', (TEST_NO,)), view)
+            result = self.probe('clone', TEST_NO, TEST_NO)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_clone_preserves_container_bytes_and_twenty_byte_name_slot(self):
+        with self.owned_clone(slots=12):
+            result = self.probe('rename', TEST_NO, TEST_NO, '六字中文名字12')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            expected = self.container_values()
+            for suffix in range(2, 11):
+                result = self.probe('clone', TEST_NO, TEST_NO, mode='NO_BACKSLASH_ESCAPES')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                new_no = int(next(line.split('=')[1] for line in result.stdout.splitlines() if line.startswith('new_no=')))
+                name = ('六字中文名字' + str(suffix)).encode()
+                stored = bytes.fromhex(self.one('SELECT HEX(CONVERT(charac_name USING latin1)) FROM taiwan_cain.charac_info WHERE charac_no=%s', (new_no,)))
+                self.assertEqual(stored, name)
+                self.cur.execute('SELECT inventory,equipslot,creature FROM taiwan_cain_2nd.inventory WHERE charac_no=%s', (new_no,))
+                self.assertEqual(list(self.cur.fetchone()), expected[:3])
+                self.cur.execute('SELECT cargo,jewel FROM taiwan_cain_2nd.charac_inven_expand WHERE charac_no=%s', (new_no,))
+                self.assertEqual(list(self.cur.fetchone()), expected[3:5])
+                self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,)), 1)
+                view = zlib.decompress(self.one('SELECT info FROM taiwan_cain.charac_view WHERE m_id=%s', (TEST_NO,))[4:])
+                slots = [view[offset:offset + 148] for offset in range(0, len(view), 148) if struct.unpack_from('<I', view, offset)[0] == new_no]
+                self.assertEqual(len(slots), 1)
+                self.assertEqual(slots[0][4:24].split(b'\0')[0], name)
+                self.assertEqual(slots[0][100], 99)
+                self.cur.execute('SELECT job,grow_type,lev FROM taiwan_cain.charac_info WHERE charac_no=%s', (new_no,))
+                job, grow, level = self.cur.fetchone()
+                self.assertEqual(tuple(slots[0][24:26]), (job, grow))
+                self.assertEqual(struct.unpack_from('<H', slots[0], 26)[0], level)
+                self.assertEqual(self.one('SELECT charac_count FROM taiwan_cain.charac_view WHERE m_id=%s', (TEST_NO,)), suffix)
+
+    def test_clone_nontransactional_extension_rolls_back_without_writing_it(self):
+        table = 'taiwan_cain_2nd.codex_clone_nontransactional'
+        self.assertEqual(self.one("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME='codex_clone_nontransactional'"), 0)
+        self.cur.execute('CREATE TABLE ' + table + ' (charac_no INT PRIMARY KEY,value INT) ENGINE=MyISAM')
+        try:
+            with self.owned_clone() as ids:
+                self.cur.execute('INSERT INTO ' + table + ' VALUES (%s,17)', (TEST_NO,))
+                result = self.probe('clone', TEST_NO, TEST_NO)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn('InnoDB', result.stderr)
+                self.assertEqual(self.clone_ids(), ids)
+                self.cur.execute('SELECT * FROM ' + table)
+                self.assertEqual(self.cur.fetchall(), ((TEST_NO, 17),))
+        finally:
+            self.cur.execute('DROP TABLE ' + table)
+
+    def test_clone_holds_existing_or_absent_login_lock_during_view_wait(self):
+        for absent in (False, True):
+            with self.subTest(absent=absent), self.owned_clone():
+                if absent:
+                    self.cur.execute('DELETE FROM taiwan_login.login_account_3 WHERE m_id=%s', (TEST_NO,))
+                params = dict(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+                lock = pymysql.connect(**params); login = pymysql.connect(**params); pending = None
+                try:
+                    lock.begin()
+                    with lock.cursor() as query:
+                        query.execute('SELECT info FROM taiwan_cain.charac_view WHERE m_id=%s FOR UPDATE', (TEST_NO,))
+                    env = dict(os.environ, **{'DNF_GM_TEST_' + key.upper(): value for key, value in self.params.items()})
+                    pending = subprocess.Popen([str(PROBE), 'clone', str(TEST_NO), str(TEST_NO)], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    waiting = 'SELECT info FROM taiwan_cain.charac_view WHERE m_id=' + str(TEST_NO) + ' FOR UPDATE'
+                    deadline = time.monotonic() + 20
+                    while not self.one('SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO=%s', (waiting,)):
+                        self.assertIsNone(pending.poll(), 'clone exited before view wait')
+                        self.assertLess(time.monotonic(), deadline, 'clone view-lock wait missing')
+                        time.sleep(.05)
+                    change = ('INSERT INTO taiwan_login.login_account_3 (m_id,login_status) VALUES (%s,1)' if absent else 'UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s')
+                    with login.cursor() as query:
+                        query.execute('SET SESSION innodb_lock_wait_timeout=1')
+                        with self.assertRaises(pymysql.err.OperationalError) as blocked:
+                            query.execute(change, (TEST_NO,))
+                        self.assertEqual(blocked.exception.args[0], 1205)
+                    lock.commit(); out, err = pending.communicate(timeout=30)
+                    self.assertEqual(pending.returncode, 0, (out, err))
+                    with login.cursor() as query: query.execute(change, (TEST_NO,))
+                finally:
+                    lock.rollback()
+                    if pending is not None and pending.poll() is None: pending.kill(); pending.communicate(timeout=10)
+                    lock.close(); login.close()
+
+    def test_clone_rechecks_login_after_waiting_for_account(self):
+        with self.owned_clone() as ids:
+            lock = pymysql.connect(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+            pending = None
+            try:
+                lock.begin()
+                with lock.cursor() as query:
+                    query.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s', (TEST_NO,))
+                env = dict(os.environ, **{'DNF_GM_TEST_' + key.upper(): value for key, value in self.params.items()})
+                pending = subprocess.Popen([str(PROBE), 'clone', str(TEST_NO), str(TEST_NO)], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                waiting = 'SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=' + str(TEST_NO) + ' FOR UPDATE'
+                deadline = time.monotonic() + 15
+                while not self.one('SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO=%s', (waiting,)):
+                    self.assertIsNone(pending.poll(), 'clone exited before account wait')
+                    self.assertLess(time.monotonic(), deadline, 'clone account-lock wait missing')
+                    time.sleep(.05)
+                lock.commit(); out, err = pending.communicate(timeout=20)
+                self.assertNotEqual(pending.returncode, 0, (out, err))
+                self.assertIn('在线或正在退出', err.decode('utf8'))
+                self.assertEqual(self.clone_ids(), ids)
+            finally:
+                lock.rollback()
+                if pending is not None and pending.poll() is None: pending.kill(); pending.communicate(timeout=10)
+                lock.close()
+
     def test_clone_missing_source_slot_rolls_back(self):
-        with self.clone_view(bytearray(296 * 3)) as original_ids:
+        with self.clone_view(bytearray(148 * 3)) as original_ids:
             r = self.probe("clone", self.cno, self.mid)
             self.assertNotEqual(r.returncode, 0, "a missing source slot must not invent unknown template bytes")
             self.cur.execute("SELECT charac_no FROM taiwan_cain.charac_info")
             self.assertEqual({row[0] for row in self.cur.fetchall()}, original_ids)
 
     def test_clone_uses_selected_source_slot(self):
-        plain = bytearray(296 * 4)
+        plain = bytearray(148 * 4)
         struct.pack_into('<I', plain, 0, TEST_NO); plain[100] = 17
-        struct.pack_into('<I', plain, 296 * 3, self.cno); plain[296 * 3 + 100] = 99
+        struct.pack_into('<I', plain, 148 * 3, self.cno); plain[148 * 3 + 100] = 99
         with self.clone_view(plain):
             r = self.probe("clone", self.cno, self.mid)
             self.assertEqual(r.returncode, 0, r.stderr)
             new_no = int(next(s.split('=')[1] for s in r.stdout.splitlines() if s.startswith('new_no=')))
             blob = self.one("SELECT info FROM taiwan_cain.charac_view WHERE m_id=%s", (self.mid,))
             slots = zlib.decompress(blob[4:])
-            found = [slots[i:i+296] for i in range(0,len(slots),296) if struct.unpack_from('<I',slots,i)[0] == new_no]
+            found = [slots[i:i+148] for i in range(0,len(slots),148) if struct.unpack_from('<I',slots,i)[0] == new_no]
             self.assertEqual(len(found), 1)
             self.assertEqual(found[0][100], 99)
 
     def test_clone_name_slot_uses_original_game_bytes(self):
         before = self.one("SELECT HEX(charac_name) FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,))
-        plain = bytearray(296 * 4)
+        plain = bytearray(148 * 4)
         struct.pack_into('<I', plain, 0, self.cno)
         try:
             r = self.probe('rename', self.cno, self.mid, '编码克隆')
@@ -1420,7 +1585,7 @@ class DataTests(unittest.TestCase):
                 self.assertTrue(name.decode('utf8').startswith('编码克隆'))
                 blob = self.one('SELECT info FROM taiwan_cain.charac_view WHERE m_id=%s', (self.mid,))
                 slots = zlib.decompress(blob[4:])
-                found = [slots[i+4:i+24].split(b'\0')[0] for i in range(0, len(slots), 296)
+                found = [slots[i+4:i+24].split(b'\0')[0] for i in range(0, len(slots), 148)
                          if struct.unpack_from('<I', slots, i)[0] == new_no]
                 self.assertEqual(found, [name])
         finally:
@@ -1446,7 +1611,7 @@ class DataTests(unittest.TestCase):
         self.cur.execute('SELECT * FROM taiwan_cain_2nd.inventory WHERE charac_no=%s', (self.cno,))
         inv_before = self.cur.fetchone()
         inv_cols = [d[0] for d in self.cur.description]
-        plain = bytearray(296 * 4)
+        plain = bytearray(148 * 4)
         struct.pack_into('<I', plain, 0, self.cno)
         try:
             with self.clone_view(plain):

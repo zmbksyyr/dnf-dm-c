@@ -689,9 +689,9 @@ typedef struct {
 } CharTab;
 
 // charac_view：账号的角色槽位视图，客户端的角色列表照着它画。
-// 槽定长 296 字节：+0 charac_no(u32)、+4 名字(20)、+24 job、+25 grow_type、
-// +26 lev。布局是从库里现存的原生槽逐字节量出来的，不是猜的。
-#define CV_SLOT 296
+// 原 ELF 的 DB_Login 和 CUser::SetCharacInfo：步长 0x94，+0 编号(u32)、
+// +4 名字(20)、+24 job、+25 grow_type、+26 lev(u16)。来源见 docs/audit.md。
+#define CV_SLOT 148
 #define CV_NAME 20
 
 // 把某个角色补回账号的槽位视图。缺槽的角色在 charac_info 里明明有行，
@@ -768,14 +768,14 @@ static int view_sync_char(Db *d, u32 mid, u32 cno, u32 template_no, Err err) {
     wr32(slot + 0, cno);
     memset(slot + 4, 0, CV_NAME);
     size_t nl = strlen(name);
-    if (nl >= CV_NAME) {
-        nl = CV_NAME - 1;
+    if (nl > CV_NAME) {
+        nl = CV_NAME;
         while (nl && ((u8)name[nl] & 0xC0) == 0x80) nl--;
     }
     memcpy(slot + 4, name, nl);
     slot[24] = (u8)job;
     slot[25] = (u8)grow;
-    slot[26] = (u8)lev;
+    wr16(slot + 26, (u16)lev);
 
     Buf pk = {0};
     zlib_pack(plain.p, plain.n, &pk);
@@ -805,6 +805,17 @@ static int view_sync_char(Db *d, u32 mid, u32 cno, u32 template_no, Err err) {
         }
     } else if (!ok) {
         snprintf(err, ERRBUF, "写回角色槽位失败：%s", d->err);
+    }
+    if (ok) {
+        str_clear(&u);
+        str_catf(&u, "SELECT info,charac_count,(SELECT COUNT(*) FROM taiwan_cain.charac_info "
+                     "WHERE m_id=%u AND delete_flag=0) FROM taiwan_cain.charac_view WHERE m_id=%u FOR UPDATE", mid, mid);
+        MyResult check = {0};
+        ok = select1(d, &u, &check) && check.nrow == 1 && my_text(&check, 0, 0) &&
+             (size_t)my_len(&check, 0, 0) == out.n && !memcmp(my_text(&check, 0, 0), out.p, out.n) &&
+             my_u64(&check, 0, 1, 0) == my_u64(&check, 0, 2, 1);
+        my_free(&check);
+        if (!ok) snprintf(err, ERRBUF, "角色槽位回读不一致，未提交");
     }
     str_free(&u);
     buf_free(&out);
@@ -1105,6 +1116,16 @@ static int clone_rows(Db *d, const char *dbn, const char *tb, const char *keycol
         return 2;
     }
 
+    // Do not write a nontransactional table after promising all-or-nothing cloning.
+    // Earlier InnoDB copies remain rollbackable if a later table cannot participate.
+    str_catf(&q, "SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s'", dbn, tb);
+    ok = select1(d, &q, &r) && r.nrow == 1 && my_text(&r, 0, 0) && !strcmp(my_text(&r, 0, 0), "InnoDB");
+    my_free(&r); str_free(&q);
+    if (!ok) {
+        snprintf(err, ERRBUF, "克隆需要 InnoDB 表 %s.%s，未提交", dbn, tb);
+        vec_free_strs(&names); vec_free(&ais); return 0;
+    }
+
     Str ins = {0}, sel = {0};
     str_catf(&ins, "INSERT INTO `%s`.`%s` (", dbn, tb);
     int first = 1;
@@ -1136,57 +1157,56 @@ static int clone_rows(Db *d, const char *dbn, const char *tb, const char *keycol
     return ok ? 1 : 0;
 }
 
+static int clone_begin(Db *d, const Charac *c, char *base, int cap, Err err) {
+    if (!c->no || !c->mid || d->tx_depth) {
+        snprintf(err, ERRBUF, "克隆缺少角色／账号编号或已有未结束事务，未写入"); return 0;
+    }
+    Str q = {0};
+    MyResult r = {0};
+    str_cat(&q, "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE='InnoDB' AND "
+        "((TABLE_SCHEMA='taiwan_login' AND TABLE_NAME='login_account_3') OR "
+        "(TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME IN('charac_info','charac_view')))");
+    int ok = select1(d, &q, &r) && my_u64(&r, 0, 0, 0) == 3;
+    my_free(&r); str_clear(&q);
+    if (!ok) { snprintf(err, ERRBUF, "克隆需要 InnoDB 登录、角色和槽位表，未写入"); goto done; }
+    if (!set_names(d, db_cs_name(d->charset))) { snprintf(err, ERRBUF, "%s", d->err); ok = 0; goto done; }
+    str_cat(&q, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+    ok = run(d, &q); str_clear(&q);
+    if (!ok) { snprintf(err, ERRBUF, "%s", d->err); goto done; }
+    if (!db_tx_begin(d, err)) { ok = 0; goto done; }
+    str_catf(&q, "SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%u FOR UPDATE", c->mid);
+    ok = select1(d, &q, &r);
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    else if (r.nrow && my_i64(&r, 0, 0, -1) != 0) {
+        snprintf(err, ERRBUF, "账号在线或正在退出，请先退出游戏后克隆，未写入"); ok = 0;
+    }
+    my_free(&r); str_clear(&q);
+    if (ok) {
+        str_catf(&q, "SELECT m_id,delete_flag,charac_name FROM taiwan_cain.charac_info WHERE charac_no=%u FOR UPDATE", c->no);
+        ok = select1(d, &q, &r) && r.nrow == 1 && my_u64(&r, 0, 0, 0) == c->mid && my_i64(&r, 0, 1, 1) == 0;
+        if (ok) cp_game_text(base, cap, &r, 0, 2);
+        else snprintf(err, ERRBUF, "克隆未写入：源角色不存在、已删除或账号归属变化");
+    }
+    if (!ok) db_tx_rollback(d);
+done:
+    my_free(&r); str_free(&q); return ok;
+}
+
 int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
                   int *tables, u64 *rows, Str *log, Err err) {
     if (tables) *tables = 0;
     if (rows) *rows = 0;
     if (out_no) *out_no = 0;
     if (out_name && cap > 0) out_name[0] = 0;
-
-    // 源角色必须存在、且没被删
-    Str q = {0};
-    MyResult r = {0};
-    str_catf(&q, "SELECT delete_flag FROM taiwan_cain.charac_info WHERE charac_no=%u", c->no);
-    if (!select1(d, &q, &r)) {
-        snprintf(err, ERRBUF, "%s", d->err);
-        my_free(&r);
-        str_free(&q);
-        return 0;
-    }
-    if (!r.nrow) {
-        snprintf(err, ERRBUF, "源角色 charac_no=%u 不存在", c->no);
-        my_free(&r);
-        str_free(&q);
-        return 0;
-    }
-    int deleted = (int)my_u64(&r, 0, 0, 0);
-    my_free(&r);
-    if (deleted) {
-        str_free(&q);
-        snprintf(err, ERRBUF, "源角色已删除，不能克隆");
-        return 0;
-    }
-
+    char base[64] = "";
+    if (!clone_begin(d, c, base, sizeof(base), err)) return 0;
     // Reserve two wire bytes for a numeric suffix, preserving UTF-8 boundaries.
-    str_clear(&q);
-    str_catf(&q, "SELECT charac_name FROM taiwan_cain.charac_info WHERE charac_no=%u",
-             c->no);
-    if (!select1(d, &q, &r) || !r.nrow) {
-        snprintf(err, ERRBUF, "读源角色名失败：%s", d->err);
-        my_free(&r);
-        str_free(&q);
-        return 0;
-    }
-    char base[64];
-    cp_game_text(base, sizeof(base), &r, 0, 0);
     size_t prefix = strlen(base);
     if (prefix > 18) {
         prefix = 18;
         while (prefix && ((u8)base[prefix] & 0xc0u) == 0x80u) prefix--;
         base[prefix] = 0;
     }
-    my_free(&r);
-    str_free(&q);
     if (!base[0]) snprintf(base, sizeof(base), "Clone");
 
     char cand[64];
@@ -1197,16 +1217,11 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
     }
     if (!found) {
         snprintf(err, ERRBUF, "「%s」加 2~99 的后缀都被占了，先改个名再克隆", base);
+        db_tx_rollback(d);
         return 0;
     }
 
     Str s = {0};
-    str_cat(&s, "BEGIN");
-    if (!run(d, &s)) {
-        snprintf(err, ERRBUF, "开启事务失败：%s", d->err);
-        str_free(&s);
-        return 0;
-    }
 
     int ok = 1;
     int nt = 0;
@@ -1215,7 +1230,6 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
 
     // 1) charac_info：charac_no 是自增列会被跳过，唯一要覆盖的就是 charac_name
     {
-        set_names(d, db_cs_name(d->charset));
         Str expr = {0};
         game_text_literal(&expr, cand);
         CloneOvr ovr[1] = {{"charac_name", str_c(&expr)}};
@@ -1295,19 +1309,8 @@ int db_clone_char(Db *d, const Charac *c, char *out_name, int cap, u32 *out_no,
     // as character restore; a missing, corrupt or full view must abort cloning.
     if (ok) ok = view_sync_char(d, c->mid, new_no, c->no, err);
 
-    str_clear(&s);
-    if (ok) {
-        str_cat(&s, "COMMIT");
-        if (!run(d, &s)) {
-            snprintf(err, ERRBUF, "提交事务失败：%s", d->err);
-            ok = 0;
-        }
-    }
-    if (!ok) {
-        str_clear(&s);
-        str_cat(&s, "ROLLBACK");
-        run(d, &s);
-    }
+    if (ok) ok = db_tx_commit(d, err);
+    else db_tx_rollback(d);
     str_free(&s);
     if (!ok) return 0;
 

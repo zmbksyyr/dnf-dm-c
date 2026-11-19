@@ -1155,7 +1155,7 @@ static void gm_lock(Page *p) {
     ui_enable(GetDlgItem(p->wnd, G_RESTORE), g.db_ok);
     ui_enable(GetDlgItem(p->wnd, G_CDUMP), g.db_ok && g.char_ok);
     ui_enable(GetDlgItem(p->wnd, G_SCANBAD), g.db_ok);
-    ui_enable(GetDlgItem(p->wnd, G_CLONE), g.db_ok && g.char_ok);
+    ui_enable(GetDlgItem(p->wnd, G_CLONE), g.db_ok && g.char_ok && !g.cur.online);
 }
 
 static void gm_build(HWND parent) {

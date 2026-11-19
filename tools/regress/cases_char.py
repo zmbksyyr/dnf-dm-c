@@ -27,7 +27,7 @@ G_NAME, G_LEV, G_JOB, G_CLONE = 1801, 1802, 1803, 1828
 WM_KILLFOCUS = 0x0008
 CBN_SELENDOK = 9
 LVM_GETHEADER = 0x101F
-CV_SLOT = 296                       # charac_view.info 的槽位长度
+CV_SLOT = 148                       # charac_view.info 的槽位长度
 
 # 库表
 CHARAC_INFO = "taiwan_cain.charac_info"
@@ -301,7 +301,7 @@ def _view_restore(ctx, mid, view):
 
 
 def _slot_of(raw, no):
-    """把 charac_view.info 解成 296 字节槽位，返回 no 所在槽的 (索引, 名字字节)。"""
+    """把 charac_view.info 解成 148 字节槽位，返回 no 所在槽的 (索引, 名字字节)。"""
     plain = zlib.decompress(bytes(raw)[4:])
     for k in range(len(plain) // CV_SLOT):
         q = plain[k * CV_SLOT:(k + 1) * CV_SLOT]
