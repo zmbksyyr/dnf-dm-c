@@ -1293,10 +1293,45 @@ int db_no_weight(Db *d, const Charac *c, Err err) {
                    c->no);
 }
 
+static int change_equipment(Db *d, const Charac *c, int value, int level, Err err) {
+    int online=0;
+    if(!db_account_online(d,c->mid,&online,err)) return 0;
+    if(online) {
+        OnlineCommand request;
+        return db_online_equipment_submit(d,c,(u32)value,level,&request,err) && db_online_finish(d,&request,err);
+    }
+    if(!db_require_offline(d,c->mid,err)) return 0;
+    const char *table=level?"charac_manage_info":"charac_stat";
+    const char *field=level?"max_equip_level":"add_slot_flag";
+    Str s={0};MyResult r={0};u64 affected=0;
+    if(level) {
+        // The lazily created management row also holds tag/striker choices.
+        str_catf(&s,"INSERT INTO taiwan_cain.charac_manage_info (charac_no,max_equip_level) "
+            "SELECT c.charac_no,%d FROM taiwan_cain.charac_info c WHERE c.charac_no=%u AND c.m_id=%u "
+            "AND c.delete_flag=0 AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l "
+            "WHERE l.m_id=c.m_id AND l.login_status>=1) ON DUPLICATE KEY UPDATE max_equip_level=VALUES(max_equip_level)",
+            value,c->no,c->mid);
+    } else {
+        str_catf(&s,"UPDATE taiwan_cain.charac_stat s JOIN taiwan_cain.charac_info c ON c.charac_no=s.charac_no "
+            "SET s.add_slot_flag=%d WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 "
+            "AND NOT EXISTS (SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status>=1)",
+            value,c->no,c->mid);
+    }
+    int ok=run_aff(d,&s,&affected);
+    if(ok && !affected) {
+        str_clear(&s);
+        str_catf(&s,"SELECT 1 FROM taiwan_cain.%s s JOIN taiwan_cain.charac_info c ON c.charac_no=s.charac_no "
+            "WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 AND s.%s=%d AND NOT EXISTS "
+            "(SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status>=1)",
+            table,c->no,c->mid,field,value);
+        ok=select1(d,&s,&r) && r.nrow==1;
+        if(!ok) snprintf(err,ERRBUF,"装备设置未写入：账号已上线、归属变化或角色记录缺失");
+    } else if(!ok) snprintf(err,ERRBUF,"改装备设置：%s",d->err);
+    my_free(&r);str_free(&s);return ok;
+}
+
 int db_open_equip_slot(Db *d, const Charac *c, Err err) {
-    return db_exec(d, "开装备槽", "taiwan_cain.charac_stat", "charac_no", c->no, err,
-                   "UPDATE taiwan_cain.charac_stat SET add_slot_flag=3 WHERE charac_no=%u",
-                   c->no);
+    return change_equipment(d,c,3,0,err);
 }
 
 // 行可能不存在（角色从没碰过装备等级管理），所以用「有行则改、无行则建」，
@@ -1314,14 +1349,7 @@ int db_open_equip_slot(Db *d, const Charac *c, Err err) {
 int db_unlock_lev_equip(Db *d, const Charac *c, int lev_max, Err err) {
     int lv = lev_max;
     if (lv < 1 || lv > 255) lv = 85;          // 调用方没传就退回默认，别把 0 写进去
-    Str s = {0};
-    str_catf(&s, "INSERT INTO taiwan_cain.charac_manage_info (charac_no,max_equip_level) "
-                 "VALUES (%u,%d) ON DUPLICATE KEY UPDATE max_equip_level=VALUES(max_equip_level)",
-             c->no, lv);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "解锁装备等级：%s", d->err);
-    return ok;
+    return change_equipment(d,c,lv,1,err);
 }
 
 int db_max_expert(Db *d, const Charac *c, Err err) {

@@ -14,6 +14,7 @@ int  db_online_money_submit(Db *d, const Charac *c, u32 amount, int add, OnlineC
 int  db_online_fatigue_submit(Db *d, const Charac *c, OnlineCommand *request, Err err);
 int  db_online_skill_submit(Db *d, const Charac *c, u32 sp, u32 sp2, u32 tp, u32 tp2, OnlineCommand *request, Err err);
 int  db_online_qp_submit(Db *d, const Charac *c, u32 qp, OnlineCommand *request, Err err);
+int  db_online_equipment_submit(Db *d, const Charac *c, u32 amount, int level, OnlineCommand *request, Err err);
 int  db_online_billing_submit(Db *d, u32 mid, OnlineCommand *request, Err err);
 int  db_online_finish(Db *d, OnlineCommand *request, Err err);
 int  db_online_character_submit(Db *d, u32 mid, OnlineCommand *request, Err err);

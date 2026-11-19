@@ -160,7 +160,7 @@ class DataTests(unittest.TestCase):
             self.assertEqual(self.one("SELECT delete_flag FROM taiwan_cain_2nd.postal WHERE postal_id=%s", (postal,)), 1)
 
     @contextlib.contextmanager
-    def mail_recipient(self):
+    def offline_character(self):
         # Own the live-status rows; never change a real account's login state.
         self.assertEqual(self.one("SELECT COUNT(*) FROM taiwan_cain.charac_info WHERE charac_no=%s OR m_id=%s",
                                   (TEST_NO, TEST_NO)), 0)
@@ -187,7 +187,7 @@ class DataTests(unittest.TestCase):
                 self.cur.execute("ALTER TABLE taiwan_cain.charac_info AUTO_INCREMENT=" + str(counter))
 
     def test_mail_delete_rejects_online_and_leaving_account(self):
-        with self.mail_recipient(), self.attachment() as (ui, postal):
+        with self.offline_character(), self.attachment() as (ui, postal):
             for status in (1, 2):
                 self.cur.execute("UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s",
                                  (status, TEST_NO))
@@ -205,7 +205,7 @@ class DataTests(unittest.TestCase):
             self.assertEqual(self.one("SELECT delete_flag FROM taiwan_cain_2nd.postal WHERE postal_id=%s", (postal,)), 1)
 
     def test_mail_bulk_after_logout_deletes_all_attachments(self):
-        with self.mail_recipient(), self.attachment() as first, self.attachment() as second:
+        with self.offline_character(), self.attachment() as first, self.attachment() as second:
             self.cur.execute("UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s", (TEST_NO,))
             r = self.probe("mail-delete-all", TEST_NO)
             self.assertNotEqual(r.returncode, 0, r.stdout)
@@ -226,6 +226,63 @@ class DataTests(unittest.TestCase):
             r = self.probe("mail-delete", postal)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(self.one("SELECT COUNT(*) FROM taiwan_cain_2nd.user_items WHERE ui_id=%s", (ui,)), 1)
+
+    @contextlib.contextmanager
+    def equipment_fixture(self):
+        tables = ('taiwan_cain.charac_stat', 'taiwan_cain.charac_manage_info')
+        for table in tables:
+            self.assertEqual(self.one('SELECT COUNT(*) FROM ' + table + ' WHERE charac_no=%s', (TEST_NO,)), 0)
+        with self.offline_character():
+            self.cur.execute('SELECT * FROM taiwan_cain.charac_stat WHERE charac_no=%s', (self.cno,))
+            row = list(self.cur.fetchone()); cols = [d[0] for d in self.cur.description]
+            row[cols.index('charac_no')] = TEST_NO
+            row[cols.index('add_slot_flag')] = 0
+            try:
+                self.cur.execute('INSERT INTO taiwan_cain.charac_stat (' + ','.join(map(ident, cols)) +
+                                 ') VALUES (' + ','.join(['%s'] * len(cols)) + ')', row)
+                yield
+            finally:
+                for table in tables:
+                    self.cur.execute('DELETE FROM ' + table + ' WHERE charac_no=%s', (TEST_NO,))
+
+    def test_equipment_slots_offline_ownership_and_missing_record(self):
+        with self.equipment_fixture():
+            for _ in range(2):
+                r = self.probe('equipment-slots', TEST_NO, TEST_NO)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.one('SELECT add_slot_flag FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,)), 3)
+            r = self.probe('equipment-slots', TEST_NO, TEST_NO + 1)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s', (TEST_NO,))
+            r = self.probe('equipment-slots', TEST_NO, TEST_NO)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0 WHERE charac_no=%s', (TEST_NO,))
+            self.cur.execute('DELETE FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,))
+            r = self.probe('equipment-slots', TEST_NO, TEST_NO)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+
+    def test_equipment_level_lazy_row_and_preserved_selection(self):
+        with self.equipment_fixture():
+            r = self.probe('equipment-level', TEST_NO, TEST_NO + 1, 85)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_cain.charac_manage_info WHERE charac_no=%s', (TEST_NO,)), 0)
+            r = self.probe('equipment-level', TEST_NO, TEST_NO, 85)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.cur.execute('UPDATE taiwan_cain.charac_manage_info SET tag_charac_no=17,striker_skill_index=3 WHERE charac_no=%s', (TEST_NO,))
+            for _ in range(2):
+                r = self.probe('equipment-level', TEST_NO, TEST_NO, 70)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.cur.execute('SELECT tag_charac_no,striker_skill_index,max_equip_level FROM taiwan_cain.charac_manage_info WHERE charac_no=%s', (TEST_NO,))
+                self.assertEqual(self.cur.fetchone(), (17, 3, 70))
+
+    def test_equipment_leaving_account_never_falls_back_to_sql(self):
+        with self.equipment_fixture():
+            self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=2 WHERE m_id=%s', (TEST_NO,))
+            for args in [('equipment-slots', TEST_NO, TEST_NO), ('equipment-level', TEST_NO, TEST_NO, 85)]:
+                r = self.probe(*args)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertEqual(self.one('SELECT add_slot_flag FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,)), 0)
+            self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_cain.charac_manage_info WHERE charac_no=%s', (TEST_NO,)), 0)
 
     def test_mail_bulk_failure_rolls_back(self):
         with self.attachment() as (ui, postal):
