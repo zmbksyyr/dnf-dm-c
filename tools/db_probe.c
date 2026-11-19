@@ -101,6 +101,19 @@ static int run_probe(int argc, char **argv) {
         if (ok) ok = db_set_pvp(&d, &c, atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), err);
     } else if (!strcmp(argv[1], "quest-init") && argc == 4) {
         ok = db_quest_init(&d, &c, err);
+    } else if (!strcmp(argv[1], "quest-clear") && argc == 4) {
+        ok = db_clear_quests(&d, &c, err);
+    } else if (!strcmp(argv[1], "quest-slot") && argc >= 8) {
+        u32 purge[4]; int n = argc - 8;
+        if (n <= 4) {
+            for (int i = 0; i < n; i++) purge[i] = (u32)strtoul(argv[8+i], NULL, 10);
+            ok = db_set_quest_slot(&d, &c, atoi(argv[4]), (u32)strtoul(argv[5], NULL, 10),
+                                  (u32)strtoul(argv[6], NULL, 10), (u32)strtoul(argv[7], NULL, 10), purge, n, err);
+        }
+    } else if (!strcmp(argv[1], "quest-export") && argc == 5) {
+        ok = db_export_quest(&d, &c, argv[4], err);
+    } else if (!strcmp(argv[1], "quest-import") && argc == 5) {
+        ok = db_import_quest(&d, &c, argv[4], &nt, err);
     } else if (!strcmp(argv[1], "mail-delete") && argc == 3) {
         ok = db_delete_mail(&d, (u64)strtoull(argv[2], NULL, 10), err);
     } else if (!strcmp(argv[1], "mail-delete-all") && argc == 3) {

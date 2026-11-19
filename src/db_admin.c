@@ -1467,7 +1467,7 @@ static void tpl_lines_free(Vec *v) {
 }
 
 // 取某张表在模版里配好的所有列，拼成 (cols, vals)。返回列数；-1 = 值不合法
-static int tpl_cols(Vec *lines, const char *full, Vec *names, Str *cols, Str *vals, Err err) {
+static int tpl_cols(Vec *lines, const char *full, Vec *names, Str *cols, Str *vals, Str *check, Err err) {
     int n = 0;
     for (int k = 0; k < names->n; k++) {
         const char *cn = str_c(VEC_AT(names, Str, k));
@@ -1491,6 +1491,7 @@ static int tpl_cols(Vec *lines, const char *full, Vec *names, Str *cols, Str *va
         }
         str_catf(cols, "`%s`", cn);
         str_cat(vals, v);
+        str_catf(check, " AND (`%s` <=> %s)", cn, v);
         n++;
     }
     return n;
@@ -1553,9 +1554,7 @@ int db_import_quest(Db *d, const Charac *c, const char *path, int *tables, Err e
     buf_free(&f);
 
     Str s = {0};
-    str_cat(&s, "BEGIN");
-    if (!run(d, &s)) {
-        snprintf(err, ERRBUF, "开启事务失败：%s", d->err);
+    if (!db_quest_write_begin(d, c, err)) {
         str_free(&s);
         tpl_lines_free(&lines);
         return 0;
@@ -1590,8 +1589,8 @@ int db_import_quest(Db *d, const Charac *c, const char *path, int *tables, Err e
         my_free(&r);
         str_free(&q);
 
-        Str cols = {0}, vals = {0};
-        int n = names.n ? tpl_cols(&lines, full, &names, &cols, &vals, err) : 0;
+        Str cols = {0}, vals = {0}, check = {0};
+        int n = names.n ? tpl_cols(&lines, full, &names, &cols, &vals, &check, err) : 0;
         vec_free_strs(&names);
         if (n < 0) {
             ok = 0;
@@ -1613,12 +1612,19 @@ int db_import_quest(Db *d, const Charac *c, const char *path, int *tables, Err e
                     snprintf(err, ERRBUF, "写入 %s 失败：%s", tb, d->err);
                     ok = 0;
                 } else {
-                    nt++;
+                    str_clear(&s);
+                    str_catf(&s, "SELECT 1 FROM `%s`.`%s` WHERE charac_no=%u%s FOR UPDATE",
+                             dbn, tb, c->no, str_c(&check));
+                    ok = select1(d, &s, &r) && r.nrow == 1;
+                    my_free(&r);
+                    if (ok) nt++;
+                    else snprintf(err, ERRBUF, "任务模版 %s 回读不一致，已回滚", tb);
                 }
             }
         }
         str_free(&cols);
         str_free(&vals);
+        str_free(&check);
     }
 
     str_clear(&s);
@@ -1626,18 +1632,8 @@ int db_import_quest(Db *d, const Charac *c, const char *path, int *tables, Err e
         snprintf(err, ERRBUF, "模版里没有可导入的任务数据");
         ok = 0;
     }
-    if (ok) {
-        str_cat(&s, "COMMIT");
-        if (!run(d, &s)) {
-            snprintf(err, ERRBUF, "提交事务失败：%s", d->err);
-            ok = 0;
-        }
-    }
-    if (!ok) {
-        str_clear(&s);
-        str_cat(&s, "ROLLBACK");
-        run(d, &s);
-    }
+    if (ok) ok = db_tx_commit(d, err);
+    else db_tx_rollback(d);
     str_free(&s);
     tpl_lines_free(&lines);
     if (!ok) return 0;

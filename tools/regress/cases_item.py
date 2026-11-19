@@ -1369,6 +1369,9 @@ def _pick_row(lv, idx):
 
 def _refresh_quests(ctx, want, timeout=20.0):
     """点「刷新」逼页面重读任务，直到列表恰好 want 行。"""
+    # The fixture changed SQL directly: an old view with the same row count
+    # is not evidence that the new task rows have loaded.
+    core.press(ctx.ctl(QUEST_REFRESH), 1.0)
     t0 = time.time()
     while time.time() - t0 < timeout:
         if _wait_rows(ctx, QUEST_LIST, want, 1.0):
@@ -1425,7 +1428,7 @@ def quest_drop(ctx):
 
 
 @core.case("item.quest_two_rows", needs=("gui", "db"), group="always",
-           desc="8 轮连点两行不同动作：标记完成与放弃各按自己选中的那一行执行")
+           desc="8 轮连点两行不同动作：设为可交付与放弃各按自己选中的那一行执行")
 def quest_two_rows(ctx):
     """验：动作参数跟着选中的行走，不会串成同一份（串了第 1 行就不会被放弃）。"""
     cno, snap = _quest_prep(ctx)
@@ -1445,14 +1448,14 @@ def quest_two_rows(ctx):
                 ctx.skip("第 %d 轮：任务页没刷出 2 行" % (r + 1))
                 return
             lv = ctx.ctl(QUEST_LIST)
-            # 先选第 2 行标记完成，紧接着选第 1 行放弃
+            # 先选第 2 行设为可交付，紧接着选第 1 行放弃
             if not _pick_row(lv, 1):
                 ctx.skip("第 %d 轮：选不中第 2 行" % (r + 1))
                 return
             core.press(ctx.ctl(QUEST_DONE), 0)
             _confirm_ok(ctx)
             if not _wait_rows(ctx, QUEST_LIST, 2, 15.0):
-                ctx.skip("第 %d 轮：标记完成后列表没回到 2 行" % (r + 1))
+                ctx.skip("第 %d 轮：设为可交付后列表没回到 2 行" % (r + 1))
                 return
             if not _pick_row(lv, 0):
                 ctx.skip("第 %d 轮：选不中第 1 行" % (r + 1))

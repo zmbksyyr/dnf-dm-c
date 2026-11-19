@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
+import threading
 import time
 import unittest
 import zlib
@@ -317,27 +318,226 @@ class DataTests(unittest.TestCase):
             self.assertNotEqual(r.returncode, 0)
             self.assertEqual(self.one("SELECT COUNT(*) FROM taiwan_cain_2nd.user_items WHERE ui_id=%s", (ui,)), 1)
 
+    @contextlib.contextmanager
+    def quest_fixture(self):
+        tables = ('taiwan_cain.new_charac_quest', 'taiwan_cain.charac_quest_shop', 'taiwan_cain_2nd.inventory')
+        with self.offline_character():
+            for table in tables:
+                self.assertEqual(self.one('SELECT COUNT(*) FROM '+table+' WHERE charac_no=%s', (TEST_NO,)), 0)
+            try:
+                for table in tables:
+                    self.cur.execute('SELECT * FROM '+table+' WHERE charac_no=%s', (self.cno,))
+                    row = self.cur.fetchone(); columns = [d[0] for d in self.cur.description]
+                    if row is None:
+                        self.cur.execute('INSERT INTO '+table+' (charac_no) VALUES (%s)', (TEST_NO,))
+                    else:
+                        row = list(row); row[columns.index('charac_no')] = TEST_NO
+                        self.cur.execute('INSERT INTO '+table+' ('+','.join(map(ident, columns))+') VALUES ('+
+                                         ','.join(['%s']*len(row))+')', row)
+                self.cur.execute('UPDATE taiwan_cain.new_charac_quest SET clear_quest=%s,quest_notify=%s,'+
+                                 ','.join('play_%d=%s,play_%d_trigger=%s' % (i, '%s', i, '%s') for i in range(1,21))+
+                                 ' WHERE charac_no=%s',
+                                 (struct.pack('<I',30000)+zlib.compress(b'\x01'*30000), b'\x01'*40)+
+                                 tuple(x for i in range(1,21) for x in (100+i, i))+(TEST_NO,))
+                plain = bytearray(61*4)
+                for slot, (kind, item) in enumerate(((4,12345),(3,12345),(4,23456),(4,12345))):
+                    plain[slot*61+1] = kind
+                    struct.pack_into('<I',plain,slot*61+2,item)
+                    struct.pack_into('<I',plain,slot*61+7,10)
+                self.cur.execute('UPDATE taiwan_cain_2nd.inventory SET inventory=%s WHERE charac_no=%s',
+                                 (struct.pack('<I',len(plain))+zlib.compress(plain), TEST_NO))
+                yield
+            finally:
+                for table in tables:
+                    self.cur.execute('DELETE FROM '+table+' WHERE charac_no=%s', (TEST_NO,))
+
+    def quest_snapshot(self):
+        rows = {}
+        for table in ('taiwan_cain.new_charac_quest','taiwan_cain.charac_quest_shop','taiwan_cain_2nd.inventory'):
+            self.cur.execute('SELECT * FROM '+table+' WHERE charac_no=%s', (TEST_NO,))
+            rows[table] = dict(zip((d[0] for d in self.cur.description), self.cur.fetchone()))
+        return rows
+
     def test_quest_init_nested_transaction(self):
-        table = "taiwan_cain.new_charac_quest"
-        self.assertEqual(self.one("SELECT COUNT(*) FROM " + table + " WHERE charac_no=%s", (TEST_NO,)), 0)
-        self.cur.execute("SELECT * FROM " + table + " WHERE charac_no=%s", (self.cno,))
-        row = list(self.cur.fetchone())
-        cols = [d[0] for d in self.cur.description]
-        row[cols.index("charac_no")] = TEST_NO
-        row[cols.index("clear_quest")] = struct.pack("<I", 30000) + zlib.compress(b'\x01' * 30000)
-        row[cols.index("quest_notify")] = b'\x01' * 40
-        try:
-            self.cur.execute("INSERT INTO " + table + " (" + ",".join(map(ident, cols)) + ") VALUES (" +
-                             ",".join(["%s"] * len(row)) + ")", row)
-            with self.trigger(table, "UPDATE", "BEGIN IF NEW.charac_no=" + str(TEST_NO) +
+        with self.quest_fixture():
+            before = self.quest_snapshot()
+            with self.trigger('taiwan_cain.new_charac_quest', 'UPDATE', 'BEGIN IF NEW.charac_no='+str(TEST_NO)+
                               " AND NEW.quest_notify=UNHEX(REPEAT('00',40)) THEN "
                               "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit blocked quest'; END IF; END"):
-                r = self.probe("quest-init", TEST_NO, self.mid)
+                r = self.probe('quest-init', TEST_NO, TEST_NO)
             self.assertNotEqual(r.returncode, 0)
-            self.cur.execute("SELECT * FROM " + table + " WHERE charac_no=%s", (TEST_NO,))
-            self.assertEqual(self.cur.fetchone(), tuple(row), "an inner BLOB commit must not escape the outer rollback")
-        finally:
-            self.cur.execute("DELETE FROM " + table + " WHERE charac_no=%s", (TEST_NO,))
+            self.assertIn('audit blocked quest', r.stderr, 'must reach the injected write failure')
+            self.assertEqual(self.quest_snapshot(), before, 'nested BLOB writes must roll back with the slots')
+
+    def test_quest_clear_reset_and_exact_readback(self):
+        with self.quest_fixture():
+            before = self.quest_snapshot(); table = 'taiwan_cain.new_charac_quest'
+            for command in ('quest-clear','quest-init'):
+                for _ in range(2):
+                    r = self.probe(command, TEST_NO, TEST_NO)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    after = self.quest_snapshot()
+                    for name in before[table]:
+                        if name.startswith('play_'): self.assertEqual(after[table][name], 0)
+                        elif name == 'clear_quest' and command == 'quest-init':
+                            self.assertEqual(struct.unpack('<I',after[table][name][:4])[0],30000)
+                            self.assertEqual(zlib.decompress(after[table][name][4:]), bytes(30000))
+                        elif name == 'quest_notify' and command == 'quest-init': self.assertEqual(after[table][name], bytes(40))
+                        else: self.assertEqual(after[table][name], before[table][name])
+                    self.assertEqual({k:v for k,v in after.items() if k!=table}, {k:v for k,v in before.items() if k!=table})
+            # A same-length trigger rewrite must be detected, not merely length-checked.
+            with self.trigger(table, 'UPDATE', 'BEGIN IF NEW.charac_no='+str(TEST_NO)+
+                              " THEN SET NEW.quest_notify=UNHEX(CONCAT('01',REPEAT('00',39))); END IF; END"):
+                before = self.quest_snapshot()
+                r = self.probe('quest-init', TEST_NO, TEST_NO)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn('回读不一致', r.stderr)
+                self.assertEqual(self.quest_snapshot(), before)
+
+    def test_quest_slot_stale_selection_and_atomic_purge(self):
+        with self.quest_fixture():
+            table='taiwan_cain.new_charac_quest'; inventory='taiwan_cain_2nd.inventory'
+            for _ in range(2):
+                r=self.probe('quest-slot',TEST_NO,TEST_NO,2,102,102,0)
+                self.assertEqual(r.returncode,0,r.stderr)
+            before=self.quest_snapshot()
+            self.assertEqual(before[table]['play_2'],102);self.assertEqual(before[table]['play_2_trigger'],0)
+            for slot,expected in ((0,101),(21,101),(1,999)):
+                r=self.probe('quest-slot',TEST_NO,TEST_NO,slot,expected,0,0,12345)
+                self.assertNotEqual(r.returncode,0);self.assertEqual(self.quest_snapshot(),before)
+            with self.trigger(inventory,'UPDATE',"SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit blocked purge'"):
+                r=self.probe('quest-slot',TEST_NO,TEST_NO,1,101,0,0,12345)
+            self.assertNotEqual(r.returncode,0);self.assertIn('audit blocked purge',r.stderr)
+            self.assertEqual(self.quest_snapshot(),before,'failed purge must restore the abandoned quest')
+            r=self.probe('quest-slot',TEST_NO,TEST_NO,1,101,0,0,12345)
+            self.assertEqual(r.returncode,0,r.stderr);after=self.quest_snapshot()
+            self.assertEqual((after[table]['play_1'],after[table]['play_1_trigger']),(0,0))
+            self.assertEqual({k:v for k,v in after[table].items() if k not in ('play_1','play_1_trigger')},
+                             {k:v for k,v in before[table].items() if k not in ('play_1','play_1_trigger')})
+            raw=zlib.decompress(before[inventory]['inventory'][4:]);want=bytes(61)+raw[61:183]+bytes(61)
+            self.assertEqual(zlib.decompress(after[inventory]['inventory'][4:]),want)
+            self.assertEqual(after['taiwan_cain.charac_quest_shop'],before['taiwan_cain.charac_quest_shop'])
+
+    def test_quest_guards_cover_all_entry_points(self):
+        with self.quest_fixture():
+            path=OUT/'quest-guard-template.ini'
+            r=self.probe('quest-export',TEST_NO,TEST_NO,path);self.assertEqual(r.returncode,0,r.stderr)
+            commands=[('quest-slot',1,101,0,0,12345),('quest-clear',),('quest-init',),('quest-import',path)]
+            before=self.quest_snapshot()
+            try:
+                for command,*args in commands:
+                    for cid,mid in ((TEST_NO,TEST_NO+1),(0,TEST_NO),(TEST_NO+1,TEST_NO)):
+                        r=self.probe(command,cid,mid,*args);self.assertNotEqual(r.returncode,0,r.stdout)
+                        self.assertEqual(self.quest_snapshot(),before)
+                    self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s',(TEST_NO,))
+                    r=self.probe(command,TEST_NO,TEST_NO,*args);self.assertNotEqual(r.returncode,0)
+                    self.assertEqual(self.quest_snapshot(),before)
+                    self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0 WHERE charac_no=%s',(TEST_NO,))
+                    for status in (1,2,-1):
+                        self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s',(status,TEST_NO))
+                        r=self.probe(command,TEST_NO,TEST_NO,*args);self.assertNotEqual(r.returncode,0,r.stdout)
+                        self.assertEqual(self.quest_snapshot(),before)
+                    self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s',(TEST_NO,))
+            finally:
+                path.unlink(missing_ok=True)
+
+    def test_quest_import_rollback_and_clamped_value(self):
+        with self.quest_fixture():
+            path=OUT/'quest-rollback-template.ini';before=self.quest_snapshot()
+            try:
+                path.write_text('# DNF GM 任务模版 v1\n[taiwan_cain.new_charac_quest]\nplay_1=555\n'
+                                '[taiwan_cain.charac_quest_shop]\nqp=777\n',encoding='utf8')
+                with self.trigger('taiwan_cain.charac_quest_shop','INSERT',
+                                  "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit blocked import'"):
+                    r=self.probe('quest-import',TEST_NO,TEST_NO,path)
+                self.assertNotEqual(r.returncode,0);self.assertIn('audit blocked import',r.stderr)
+                self.assertEqual(self.quest_snapshot(),before,'the second table failure must restore both deleted rows')
+                path.write_text('# DNF GM 任务模版 v1\n[taiwan_cain.charac_quest_shop]\nqp=-1\n',encoding='utf8')
+                r=self.probe('quest-import',TEST_NO,TEST_NO,path,mode='')
+                self.assertNotEqual(r.returncode,0,'silent unsigned clamping must fail readback')
+                self.assertEqual(self.quest_snapshot(),before)
+                r=self.probe('quest-export',TEST_NO,TEST_NO,path);self.assertEqual(r.returncode,0,r.stderr)
+                for _ in range(2):
+                    r=self.probe('quest-import',TEST_NO,TEST_NO,path);self.assertEqual(r.returncode,0,r.stderr)
+                    self.assertEqual(self.quest_snapshot(),before)
+            finally:
+                path.unlink(missing_ok=True)
+
+    def test_quest_login_change_while_waiting_for_account_lock(self):
+        with self.quest_fixture():
+            path=OUT/'quest-race-template.ini'
+            r=self.probe('quest-export',TEST_NO,TEST_NO,path);self.assertEqual(r.returncode,0,r.stderr)
+            before=self.quest_snapshot()
+            commands=[('quest-slot',1,101,0,0,12345),('quest-clear',),('quest-init',),('quest-import',path)]
+            lock=pymysql.connect(host=self.params['host'],port=int(self.params['port']),user=self.params['user'],
+                                 password=self.params['pwd'],autocommit=False)
+            try:
+                for command,*args in commands:
+                    pending=None
+                    try:
+                        with lock.cursor() as q:q.execute('SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%s FOR UPDATE',(TEST_NO,))
+                        env=dict(os.environ,**{'DNF_GM_TEST_'+k.upper():v for k,v in self.params.items()})
+                        pending=subprocess.Popen([str(PROBE),command,str(TEST_NO),str(TEST_NO),*map(str,args)],
+                                                 cwd=OUT,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                        deadline=time.monotonic()+10
+                        while time.monotonic()<deadline:
+                            if self.one("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO LIKE %s",
+                                        ('SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id='+str(TEST_NO)+' FOR UPDATE',)):break
+                            self.assertIsNone(pending.poll());time.sleep(.05)
+                        else:self.fail('quest write never reached the controlled login race')
+                        with lock.cursor() as q:q.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s',(TEST_NO,))
+                        lock.commit();out,err=pending.communicate(timeout=30)
+                        self.assertNotEqual(pending.returncode,0,out)
+                        self.assertIn('在线或正在退出',err.decode('utf8'))
+                        self.assertEqual(self.quest_snapshot(),before)
+                    finally:
+                        lock.rollback()
+                        if pending is not None and pending.poll() is None:pending.communicate(timeout=30)
+                        self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s',(TEST_NO,))
+            finally:
+                lock.close();path.unlink(missing_ok=True)
+
+    def test_quest_login_waits_until_edit_commits_even_without_login_row(self):
+        with self.quest_fixture():
+            for missing in (False, True):
+                if missing:self.cur.execute('DELETE FROM taiwan_login.login_account_3 WHERE m_id=%s',(TEST_NO,))
+                lock=pymysql.connect(host=self.params['host'],port=int(self.params['port']),user=self.params['user'],
+                                     password=self.params['pwd'],autocommit=False)
+                pending=None;thread=None;done=threading.Event();errors=[]
+                try:
+                    with lock.cursor() as q:q.execute('SELECT play_1 FROM taiwan_cain.new_charac_quest WHERE charac_no=%s FOR UPDATE',(TEST_NO,))
+                    env=dict(os.environ,**{'DNF_GM_TEST_'+k.upper():v for k,v in self.params.items()})
+                    pending=subprocess.Popen([str(PROBE),'quest-slot',str(TEST_NO),str(TEST_NO),'1','101','101','0'],
+                                             cwd=OUT,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                    query='SELECT play_1 FROM taiwan_cain.new_charac_quest WHERE charac_no='+str(TEST_NO)+' FOR UPDATE'
+                    deadline=time.monotonic()+10
+                    while time.monotonic()<deadline:
+                        if self.one('SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO=%s',(query,)):break
+                        self.assertIsNone(pending.poll());time.sleep(.05)
+                    else:self.fail('quest write did not reach the controlled row lock')
+                    def login():
+                        db=None
+                        try:
+                            db=pymysql.connect(host=self.params['host'],port=int(self.params['port']),user=self.params['user'],
+                                               password=self.params['pwd'],autocommit=True,read_timeout=20)
+                            with db.cursor() as q:
+                                if missing:q.execute('INSERT INTO taiwan_login.login_account_3 (m_id,login_status,last_login_date) VALUES (%s,1,NOW())',(TEST_NO,))
+                                else:q.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s',(TEST_NO,))
+                        except Exception as exc:errors.append(str(exc))
+                        finally:
+                            if db:db.close()
+                            done.set()
+                    thread=threading.Thread(target=login);thread.start()
+                    self.assertFalse(done.wait(.3),'login must not pass a task edit holding the account lock')
+                    lock.commit();out,err=pending.communicate(timeout=30)
+                    self.assertEqual(pending.returncode,0,err.decode('utf8'))
+                    self.assertTrue(done.wait(10));self.assertFalse(errors,errors)
+                    self.assertEqual(self.one('SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%s',(TEST_NO,)),1)
+                finally:
+                    lock.rollback();lock.close()
+                    if pending is not None and pending.poll() is None:pending.communicate(timeout=30)
+                    if thread is not None:thread.join(timeout=25)
+                    self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s',(TEST_NO,))
 
     def test_truncated_character_backup_is_rejected(self):
         path = OUT / "truncated-character.sql"

@@ -16,7 +16,7 @@ enum { D_PETS = 1, D_PETNAME, D_PETFULL, D_PETEXPIRE, D_PETDEL };
 // 完美清除还会顺带清掉背包里为它攒的任务材料。
 typedef struct {
     int  slot;
-    u32  id, trigger;
+    u32  expected_id, id, trigger;
     int  purge;               // 是否连带清材料
     u32  purge_id[4];
     int  purge_n;
@@ -574,6 +574,9 @@ enum { D_QUESTS = 30, D_QUESTCLR, D_QSLOT, D_QSEND, D_QPURGE, D_QINIT };
 
 static HWND q_list, q_info;
 static HWND q_sep;
+static struct { int slot; u32 id; } q_shown[20];
+static int q_shown_n;
+static u32 q_shown_cno;
 
 static void quest_enrich(void) {
     if (!g.pvf_ok) {
@@ -626,10 +629,8 @@ static int quest_work(void *ctx, Err err) {
     if (c->kind == D_QUESTCLR) return db_clear_quests(&g.db, &who, err);
     if (c->kind == D_QINIT) return db_quest_init(&g.db, &who, err);
     if (c->kind == D_QSLOT) {
-        if (!db_set_quest_slot(&g.db, &who, c->q.slot, c->q.id, c->q.trigger, err)) return 0;
-        if (c->q.purge && c->q.purge_n)
-            return db_purge_quest_items(&g.db, &who, c->q.purge_id, c->q.purge_n, NULL, err);
-        return 1;
+        return db_set_quest_slot(&g.db, &who, c->q.slot, c->q.expected_id, c->q.id, c->q.trigger,
+                                 c->q.purge_id, c->q.purge ? c->q.purge_n : 0, err);
     }
     if (c->kind == D_QSEND) {
         for (int i = 0; i < c->send_n; i++)
@@ -643,19 +644,33 @@ static int quest_work(void *ctx, Err err) {
 static void quest_fill(void) {
     // PVF 解析留在这里：它是内存映射 + 有 LRU 缓存，放后台线程会和界面抢
     quest_enrich();
-    ui_rows_clear(q_list);
+    int selected = ui_row_sel(q_list), selected_slot = 0; u32 selected_id = 0;
+    if (q_shown_cno == g.cur.no && selected >= 0 && selected < q_shown_n) {
+        selected_slot = q_shown[selected].slot; selected_id = q_shown[selected].id;
+    }
+    int same = q_shown_cno == g.cur.no && q_shown_n == g.quests.n;
+    for (int i = 0; same && i < g.quests.n; i++) {
+        QuestRow *r = VEC_AT(&g.quests, QuestRow, i);
+        same = q_shown[i].slot == r->slot && q_shown[i].id == r->id;
+    }
     ui_batch(q_list, 1);
+    if (!same) ui_rows_clear(q_list);
     for (int i = 0; i < g.quests.n; i++) {
         QuestRow *r = VEC_AT(&g.quests, QuestRow, i);
         char slot[16], id[16], tr[16];
         fmt(slot, sizeof(slot), "%d", r->slot);
         fmt(id, sizeof(id), "%u", r->id);
-        fmt(tr, sizeof(tr), "%s", r->trigger ? "进行中" : "已完成");
+        fmt(tr, sizeof(tr), "%s", r->trigger ? "进行中" : "可交付");
         const char *cells[5] = {slot, id, r->name[0] ? r->name : "—", r->need[0] ? r->need : "", tr};
-        ui_row_add(q_list, cells, 5, (LPARAM)i);
+        if (same) ui_row_set(q_list, i, cells, 5);
+        else ui_row_add(q_list, cells, 5, (LPARAM)i);
+        q_shown[i].slot = r->slot; q_shown[i].id = r->id;
+        if (!same && r->slot == selected_slot && r->id == selected_id) ui_row_sel_set(q_list, i);
     }
+    q_shown_n = g.quests.n; q_shown_cno = g.cur.no;
     ui_batch(q_list, 0);
-    ui_text(q_info, fmt_new("%s · 共 %d 条任务记录", g.cur.name, g.quests.n));
+    ui_text(q_info, fmt_new("%s · 共 %d 条任务记录%s", g.cur.name, g.quests.n,
+                            g.cur.online ? " · 修改任务请先退出游戏" : ""));
 }
 
 static void quest_reload(Page *p) {
@@ -693,10 +708,12 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         quest_reload(p);
         return 0;
     }
+    if (!g.char_ok) return 0;
+    if (g.cur.online && id != Q_SEND) {
+        app_status("修改任务请先退出游戏，未写入"); return 0;
+    }
     if (id == Q_RESET) {
-        if (!app_confirm("把任务数据初始化成刚建号的状态？\n\n"
-                         "槽位、完成表、通知表都会清零。写前有撤销快照，"
-                         "但还是建议先备份一次角色。"))
+        if (!app_confirm("重置任务进度？进行中任务、完成记录和通知记录将清零。"))
             return 0;
         dc.kind = D_QINIT;
         quest_rerun();
@@ -704,7 +721,7 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (id == Q_CLEAR) {
-        if (!app_confirm("清空该角色的全部任务记录？")) return 0;
+        if (!app_confirm("放弃该角色全部进行中的任务？已完成任务的记录保留。")) return 0;
         dc.kind = D_QUESTCLR;
         quest_rerun();
         data_act("清空任务", quest_work);
@@ -722,21 +739,23 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
                 return 0;
             memset(&dc.q, 0, sizeof(dc.q));
             dc.q.slot = r->slot;
+            dc.q.expected_id = r->id;
             dc.kind = D_QSLOT;
             data_act("放弃任务", quest_work);
             quest_rerun();
             return 0;
         }
         if (id == Q_DONE) {
-            if (!app_confirm(fmt_new("把任务「%s」(%u) 标记为完成？\n"
-                                     "需要交物品的任务，请改用「补发材料」。",
+            if (!app_confirm(fmt_new("把任务「%s」(%u) 设为可交付？\n"
+                                     "仍需在游戏内交付领取奖励；缺少物品请用「补发材料」。",
                                      r->name[0] ? r->name : "?", r->id)))
                 return 0;
             memset(&dc.q, 0, sizeof(dc.q));
             dc.q.slot = r->slot;
+            dc.q.expected_id = r->id;
             dc.q.id = r->id;
             dc.kind = D_QSLOT;
-            data_act("标记完成", quest_work);
+            data_act("设为可交付", quest_work);
             quest_rerun();
             return 0;
         }
@@ -765,6 +784,7 @@ static LRESULT quest_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             return 0;
         memset(&dc.q, 0, sizeof(dc.q));
         dc.q.slot = r->slot;
+        dc.q.expected_id = r->id;
         dc.q.purge = 1;
         dc.q.purge_n = r->nneed;
         for (int k = 0; k < r->nneed; k++) dc.q.purge_id[k] = r->need_id[k];
@@ -783,7 +803,7 @@ static void quest_layout(Page *p, int w, int h) {
     ui_row(&r, p->wnd, pad, pad, rowh);
     ui_add(&r, ui_btn_at(p->wnd, Q_REFRESH, "刷新"), ui_scale(60));
     ui_add(&r, ui_btn_at(p->wnd, Q_DROP, "放弃所选"), ui_scale(70));
-    ui_add(&r, ui_btn_at(p->wnd, Q_DONE, "标记完成"), ui_scale(70));
+    ui_add(&r, ui_btn_at(p->wnd, Q_DONE, "设为可交付"), ui_scale(88));
     ui_add(&r, ui_btn_at(p->wnd, Q_SEND, "补发材料"), ui_scale(70));
     ui_add(&r, ui_btn_at(p->wnd, Q_PURGE, "完美清除"), ui_scale(70));
     ui_add(&r, ui_btn_at(p->wnd, Q_CLEAR, "清空任务"), ui_scale(70));
@@ -796,10 +816,10 @@ static void quest_layout(Page *p, int w, int h) {
 
 static void quest_lock(Page *p) {
     (void)p;
-    int on = g.char_ok;
-    int ids[] = {Q_REFRESH, Q_CLEAR, Q_LIST, Q_DROP, Q_DONE, Q_SEND, Q_PURGE,
-                 Q_RESET};
-    for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
+    int read_ids[] = {Q_REFRESH, Q_LIST, Q_SEND};
+    int edit_ids[] = {Q_CLEAR, Q_DROP, Q_DONE, Q_PURGE, Q_RESET};
+    for (int i = 0; i < COUNT_OF(read_ids); i++) ui_enable(GetDlgItem(p->wnd, read_ids[i]), g.char_ok);
+    for (int i = 0; i < COUNT_OF(edit_ids); i++) ui_enable(GetDlgItem(p->wnd, edit_ids[i]), g.char_ok && !g.cur.online);
 }
 
 static void quest_build(HWND parent) {
@@ -812,12 +832,12 @@ static void quest_build(HWND parent) {
     ui_button(parent, "刷新", Q_REFRESH);
     ui_button(parent, "清空任务", Q_CLEAR);
     ui_button(parent, "放弃所选", Q_DROP);
-    ui_button(parent, "标记完成", Q_DONE);
+    ui_button(parent, "设为可交付", Q_DONE);
     ui_button(parent, "补发材料", Q_SEND);
     ui_button(parent, "完美清除", Q_PURGE);
     ui_button(parent, "任务初始化", Q_RESET);
     ui_tip(parent, GetDlgItem(parent, Q_RESET),
-           "任务进度回到刚建号：槽位、完成表、通知表一起清零（写前有撤销快照）");
+           "重置进行中任务、完成记录和通知记录");
 }
 
 void page_quest_create(Page *p) {

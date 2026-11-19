@@ -1325,6 +1325,7 @@ int app_grant_send(int by_mail) {
 // ---------------- 整库备份 / 还原 ----------------
 typedef struct {
     char path[MAX_PATH];
+    Charac who;
 } DbJobCtx;
 static DbJobCtx g_dbc;
 
@@ -1443,16 +1444,16 @@ void app_clone_char(void) {
 // ---------------- 任务模版 导入 / 导出 ----------------
 static int w_quest_export(void *ctx, Err err) {
     DbJobCtx *c = (DbJobCtx *)ctx;
-    if (!db_export_quest(&g.db, &g.cur, c->path, err)) return 0;
-    app_log("导出任务模版 · %s → %s", g.cur.name, c->path);
+    if (!db_export_quest(&g.db, &c->who, c->path, err)) return 0;
+    app_log("导出任务模版 · %s → %s", c->who.name, c->path);
     return 1;
 }
 
 static int w_quest_import(void *ctx, Err err) {
     DbJobCtx *c = (DbJobCtx *)ctx;
     int nt = 0;
-    if (!db_import_quest(&g.db, &g.cur, c->path, &nt, err)) return 0;
-    app_log("导入任务模版 · %s ← %s（覆盖 %d 张表）", g.cur.name, c->path, nt);
+    if (!db_import_quest(&g.db, &c->who, c->path, &nt, err)) return 0;
+    app_log("导入任务模版 · %s ← %s（覆盖 %d 张表）", c->who.name, c->path, nt);
     return 1;
 }
 
@@ -1461,6 +1462,7 @@ void app_quest_export(void) {
     if (!g.char_ok) { app_info("请先选择角色。"); return; }
     if (!app_act_idle()) { app_info("上一个操作还在进行，等它完成再做"); return; }
     db_quest_tpl_path(g_dbc.path, sizeof(g_dbc.path), &g.cur);
+    g_dbc.who = g.cur;
     app_act("导出任务模版", w_quest_export, &g_dbc);
 }
 
@@ -1469,6 +1471,7 @@ void app_quest_import(const char *path) {
     if (!g.char_ok) { app_info("请先选择角色。"); return; }
     if (!app_act_idle()) { app_info("上一个操作还在进行，等它完成再做"); return; }
     snprintf(g_dbc.path, sizeof(g_dbc.path), "%s", path);
+    g_dbc.who = g.cur;
     app_act("导入任务模版", w_quest_import, &g_dbc);
 }
 

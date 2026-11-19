@@ -440,25 +440,59 @@ int db_list_quests(Db *d, const Charac *c, Vec *out, Err err) {
     return 1;
 }
 
-// 改单个任务槽：slot 从 1 开始。id=0 即放弃该任务。
-int db_set_quest_slot(Db *d, const Charac *c, int slot, u32 id, u32 trigger, Err err) {
-    if (slot < 1 || slot > 20) { snprintf(err, ERRBUF, "槽位超出范围"); return 0; }
-    Str s = {0};
-    str_catf(&s, "UPDATE taiwan_cain.new_charac_quest SET play_%d=%u,play_%d_trigger=%u WHERE charac_no=%u",
-             slot, id, slot, trigger, c->no);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+int db_quest_write_begin(Db *d, const Charac *c, Err err) {
+    if (!c->no || !c->mid) { snprintf(err, ERRBUF, "任务修改缺少角色或账号编号"); return 0; }
+    Str s = {0}; MyResult r = {0};
+    // Both rollback and the account row/gap lock are required. Older MyISAM
+    // installations cannot safely combine a quest edit with inventory/import.
+    str_cat(&s, "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE='InnoDB' AND "
+        "((TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME IN ('charac_info','new_charac_quest','charac_quest_shop')) "
+        "OR (TABLE_SCHEMA='taiwan_login' AND TABLE_NAME='login_account_3') "
+        "OR (TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME='inventory'))");
+    int ok = select1(d, &s, &r) && my_u64(&r, 0, 0, 0) == 5;
+    my_free(&r); str_clear(&s);
+    if (!ok) { snprintf(err, ERRBUF, "任务修改需要完整的 InnoDB 角色、登录、任务和背包表，未写入"); goto finish; }
+    // The absent-login-row case needs a range lock as well. Only this next
+    // transaction changes isolation; the connection's default is preserved.
+    if (!d->tx_depth) {
+        str_cat(&s, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+        ok = run(d, &s); str_clear(&s);
+        if (!ok) { snprintf(err, ERRBUF, "%s", d->err); goto finish; }
+    }
+    if (!db_tx_begin(d, err)) { ok = 0; goto finish; }
+    str_catf(&s, "SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%u FOR UPDATE", c->mid);
+    ok = select1(d, &s, &r);
+    if (ok && r.nrow && my_i64(&r, 0, 0, -1) != 0) {
+        snprintf(err, ERRBUF, "账号在线或正在退出，请先退出游戏后修改任务，未写入"); ok = 0;
+    } else if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    my_free(&r); str_clear(&s);
+    if (ok) {
+        str_catf(&s, "SELECT m_id,delete_flag FROM taiwan_cain.charac_info WHERE charac_no=%u FOR UPDATE", c->no);
+        ok = select1(d, &s, &r) && r.nrow == 1 && my_u64(&r, 0, 0, 0) == c->mid && my_i64(&r, 0, 1, 1) == 0;
+        if (!ok) snprintf(err, ERRBUF, "任务未写入：角色不存在、已删除或账号归属变化");
+    }
+    if (!ok) db_tx_rollback(d);
+finish:
+    my_free(&r); str_free(&s); return ok;
+}
+
+static int quest_save_blob(Db *d, const Charac *c, const char *table, const char *field,
+                           const void *raw, size_t n, Err err) {
+    if (!db_save_blob(d, c, table, field, raw, n, err)) return 0;
+    Str s = {0}; MyResult r = {0};
+    str_catf(&s, "SELECT %s FROM %s WHERE charac_no=%u FOR UPDATE", field, table, c->no);
+    int ok = select1(d, &s, &r) && r.nrow == 1 && my_len(&r, 0, 0) == (int)n &&
+             my_text(&r, 0, 0) && !memcmp(my_text(&r, 0, 0), raw, n);
+    if (!ok) snprintf(err, ERRBUF, "任务相关数据回读不一致，已回滚");
+    my_free(&r); str_free(&s); return ok;
 }
 
 // 放弃任务后，背包里为它攒的任务材料就成了垃圾。
 // 只清 type=4（任务材料）且编号命中的格子，普通材料一律不动。
-int db_purge_quest_items(Db *d, const Charac *c, const u32 *ids, int n, int *removed, Err err) {
-    if (removed) *removed = 0;
+static int quest_purge_items(Db *d, const Charac *c, const u32 *ids, int n, Err err) {
     Str s = {0};
     MyResult r = {0};
-    str_catf(&s, "SELECT inventory FROM taiwan_cain_2nd.inventory WHERE charac_no=%u", c->no);
+    str_catf(&s, "SELECT inventory FROM taiwan_cain_2nd.inventory WHERE charac_no=%u FOR UPDATE", c->no);
     if (!select1(d, &s, &r)) { snprintf(err, ERRBUF, "%s", d->err); str_free(&s); return 0; }
     str_free(&s);
     if (!r.nrow) { my_free(&r); snprintf(err, ERRBUF, "该角色没有背包记录"); return 0; }
@@ -490,15 +524,47 @@ int db_purge_quest_items(Db *d, const Charac *c, const u32 *ids, int n, int *rem
     Buf out = {0};
     if (!blob_pack(&b, &out)) { snprintf(err, ERRBUF, "打包失败"); blob_free(&b); return 0; }
     blob_free(&b);
-    int ok = db_save_blob(d, c, "taiwan_cain_2nd.inventory", "inventory", out.p, out.n, err);
+    int ok = quest_save_blob(d, c, "taiwan_cain_2nd.inventory", "inventory", out.p, out.n, err);
     buf_free(&out);
-    if (ok && removed) *removed = hit;
     return ok;
 }
 
+// The expected quest prevents an old UI selection from editing a reused slot.
+// Abandon and material removal are one edit, never two independent commits.
+int db_set_quest_slot(Db *d, const Charac *c, int slot, u32 expected_id, u32 id, u32 trigger,
+                       const u32 *purge_ids, int purge_n, Err err) {
+    if (slot < 1 || slot > 20 || purge_n < 0 || (purge_n && !purge_ids)) {
+        snprintf(err, ERRBUF, "任务槽位或材料参数无效"); return 0;
+    }
+    if (!db_quest_write_begin(d, c, err)) return 0;
+    Str s = {0}; MyResult r = {0};
+    str_catf(&s, "SELECT play_%d FROM taiwan_cain.new_charac_quest WHERE charac_no=%u FOR UPDATE", slot, c->no);
+    int ok = select1(d, &s, &r) && r.nrow == 1 && my_u64(&r, 0, 0, UINT64_MAX) == expected_id;
+    if (!ok) snprintf(err, ERRBUF, "任务记录缺失或所选槽位已变化，请刷新后重试，未写入");
+    my_free(&r); str_clear(&s);
+    if (ok) {
+        str_catf(&s, "UPDATE taiwan_cain.new_charac_quest SET play_%d=%u,play_%d_trigger=%u WHERE charac_no=%u",
+                 slot, id, slot, trigger, c->no);
+        ok = run(d, &s);
+        if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+        str_clear(&s);
+    }
+    if (ok) {
+        str_catf(&s, "SELECT play_%d,play_%d_trigger FROM taiwan_cain.new_charac_quest WHERE charac_no=%u FOR UPDATE",
+                 slot, slot, c->no);
+        ok = select1(d, &s, &r) && r.nrow == 1 && my_u64(&r, 0, 0, UINT64_MAX) == id &&
+             my_u64(&r, 0, 1, UINT64_MAX) == trigger;
+        if (!ok) snprintf(err, ERRBUF, "任务槽位回读不一致，已回滚");
+    }
+    if (ok && purge_n) ok = quest_purge_items(d, c, purge_ids, purge_n, err);
+    my_free(&r); str_free(&s);
+    if (!ok) { db_tx_rollback(d); return 0; }
+    return db_tx_commit(d, err);
+}
+
 // ---------------- 任务：批量完成 / 初始化 ----------------
-// clear_quest 是固定 30000 字节的 u32 编号表（7500 个位置，0 = 空位）：
-// 任务完成时把编号补进第一个空位。初始化 = 整表清零（新号的形态）。
+// Original CQuestClear indexes 30000 individual bytes by quest ID (1..29999).
+// A completed quest has byte 1; this is not a list of u32 quest IDs.
 #define QUEST_CLEAR_BYTES 30000
 
 static int quest_clear_write(Db *d, const Charac *c, const u8 *raw, Err err) {
@@ -510,7 +576,7 @@ static int quest_clear_write(Db *d, const Charac *c, const u8 *raw, Err err) {
     buf_put32(&out, QUEST_CLEAR_BYTES);
     buf_put(&out, z.p, z.n);
     buf_free(&z);
-    int ok = db_save_blob(d, c, "taiwan_cain.new_charac_quest", "clear_quest",
+    int ok = quest_save_blob(d, c, "taiwan_cain.new_charac_quest", "clear_quest",
                           (const char *)out.p, out.n, err);
     buf_free(&out);
     return ok;
@@ -524,17 +590,27 @@ static int quest_slots_zero(Db *d, const Charac *c, Err err) {
     str_catf(&s, " WHERE charac_no=%u", c->no);
     int ok = run(d, &s);
     if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    if (ok) {
+        MyResult r = {0}; str_clear(&s);
+        str_cat(&s, "SELECT 1 FROM taiwan_cain.new_charac_quest WHERE ");
+        for (int i = 1; i <= 20; i++) str_catf(&s, "play_%d=0 AND play_%d_trigger=0 AND ", i, i);
+        str_catf(&s, "charac_no=%u FOR UPDATE", c->no);
+        ok = select1(d, &s, &r) && r.nrow == 1;
+        if (!ok) snprintf(err, ERRBUF, "任务槽位缺失或回读不一致，已回滚");
+        my_free(&r);
+    }
     str_free(&s);
     return ok;
 }
 
 // 任务初始化：槽位、完成表、通知表全部归零（回到刚建号的形态）
 int db_quest_init(Db *d, const Charac *c, Err err) {
+    if (!db_quest_write_begin(d, c, err)) return 0;
     u8 *zeros = (u8 *)xalloc(QUEST_CLEAR_BYTES);
     memset(zeros, 0, QUEST_CLEAR_BYTES);
     static const u8 notif[40] = {0};
-    int ok = db_tx_begin(d, err) && quest_clear_write(d, c, zeros, err) &&
-             db_save_blob(d, c, "taiwan_cain.new_charac_quest", "quest_notify",
+    int ok = quest_clear_write(d, c, zeros, err) &&
+             quest_save_blob(d, c, "taiwan_cain.new_charac_quest", "quest_notify",
                           (const char *)notif, (int)sizeof(notif), err) &&
              quest_slots_zero(d, c, err);
     free(zeros);
@@ -545,13 +621,7 @@ int db_quest_init(Db *d, const Charac *c, Err err) {
 // 放弃全部进行中的任务：把 20 个槽位清零而不是删行——
 // 服务器期望这行存在，删掉可能让角色再也接不了任务。
 int db_clear_quests(Db *d, const Charac *c, Err err) {
-    Str s = {0};
-    str_cat(&s, "UPDATE taiwan_cain.new_charac_quest SET ");
-    for (int i = 1; i <= 20; i++)
-        str_catf(&s, "%splay_%d=0,play_%d_trigger=0", i > 1 ? "," : "", i, i);
-    str_catf(&s, " WHERE charac_no=%u", c->no);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+    if (!db_quest_write_begin(d, c, err)) return 0;
+    if (!quest_slots_zero(d, c, err)) { db_tx_rollback(d); return 0; }
+    return db_tx_commit(d, err);
 }
