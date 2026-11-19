@@ -1058,7 +1058,7 @@ int db_set_name(Db *d, const Charac *c, const char *name, Err err) {
     // Original ELF reads/writes UTF-8 name bytes through latin1. A normal UTF-8
     // SQL value looks correct to a UTF-8 client but becomes '?' in that session.
     // The wire slot and legacy varchar both allow at most 20 source bytes.
-    if (!name || !utf8_valid((const u8 *)name, (int)strlen(name)) || strlen(name) > 20) {
+    if (!name || !*name || !utf8_valid((const u8 *)name, (int)strlen(name)) || strlen(name) > 20) {
         snprintf(err, ERRBUF, "角色名最多 20 字节，且必须为 UTF-8 中文或文字");
         return 0;
     }
@@ -1072,31 +1072,54 @@ int db_set_name(Db *d, const Charac *c, const char *name, Err err) {
         snprintf(err, ERRBUF, "设置连接字符集：%s", d->err);
         return 0;
     }
-    if (!db_tx_begin(d, err)) return 0;
-    Str value = {0};
-    game_text_literal(&value, name);
-    int ok = db_exec(d, "改角色名", "taiwan_cain.charac_info", "charac_no", c->no, err,
-                     "UPDATE taiwan_cain.charac_info SET charac_name=%s WHERE charac_no=%u",
-                     str_c(&value), c->no);
-    str_free(&value);
-    if (!ok) {
-        db_tx_rollback(d);
+    if (!c->no || !c->mid || d->tx_depth) {
+        snprintf(err, ERRBUF, "改名缺少角色／账号编号或已有未结束事务，未写入");
         return 0;
     }
-    Str q = {0};
+    Str q = {0}, value = {0};
     MyResult r = {0};
-    char got[256] = "";
-    str_catf(&q, "SELECT charac_name FROM taiwan_cain.charac_info WHERE charac_no=%u", c->no);
-    if (select1(d, &q, &r) && r.nrow) cp_game_text(got, sizeof(got), &r, 0, 0);
-    my_free(&r);
-    str_free(&q);
-    if (strcmp(got, name) != 0) {
-        snprintf(err, ERRBUF, "改名没有按原样落库（库里是「%s」），可能超长或含库不支持的字符，已回滚",
-                 got[0] ? got : "");
-        db_tx_rollback(d);
-        return 0;
+    str_cat(&q, "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE='InnoDB' AND "
+        "((TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME='charac_info') "
+        "OR (TABLE_SCHEMA='taiwan_login' AND TABLE_NAME='login_account_3'))");
+    int ok = select1(d, &q, &r) && my_u64(&r, 0, 0, 0) == 2;
+    my_free(&r); str_clear(&q);
+    if (!ok) { snprintf(err, ERRBUF, "改名需要 InnoDB 角色和登录表，未写入"); goto finish; }
+    // Hold the account row (or its gap) through commit. A UI offline snapshot
+    // cannot prevent a login while this edit is queued or waiting on the role.
+    str_cat(&q, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+    ok = run(d, &q); str_clear(&q);
+    if (!ok) { snprintf(err, ERRBUF, "%s", d->err); goto finish; }
+    if (!db_tx_begin(d, err)) { ok = 0; goto finish; }
+    str_catf(&q, "SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%u FOR UPDATE", c->mid);
+    ok = select1(d, &q, &r);
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    else if (r.nrow && my_i64(&r, 0, 0, -1) != 0) {
+        snprintf(err, ERRBUF, "账号在线或正在退出，请先退出游戏后改名，未写入"); ok = 0;
     }
-    return db_tx_commit(d, err);
+    my_free(&r); str_clear(&q);
+    if (ok) {
+        str_catf(&q, "SELECT m_id,delete_flag FROM taiwan_cain.charac_info WHERE charac_no=%u FOR UPDATE", c->no);
+        ok = select1(d, &q, &r) && r.nrow == 1 && my_u64(&r, 0, 0, 0) == c->mid && my_i64(&r, 0, 1, 1) == 0;
+        if (!ok) snprintf(err, ERRBUF, "改名未写入：角色不存在、已删除或账号归属变化");
+        my_free(&r); str_clear(&q);
+    }
+    game_text_literal(&value, name);
+    if (ok) {
+        str_catf(&q, "UPDATE taiwan_cain.charac_info SET charac_name=%s WHERE charac_no=%u AND m_id=%u AND delete_flag=0",
+                 str_c(&value), c->no, c->mid);
+        ok = run(d, &q); str_clear(&q);
+        if (!ok) snprintf(err, ERRBUF, "改角色名：%s", d->err);
+    }
+    if (ok) {
+        str_catf(&q, "SELECT BINARY charac_name=BINARY %s FROM taiwan_cain.charac_info "
+                     "WHERE charac_no=%u AND m_id=%u AND delete_flag=0 FOR UPDATE", str_c(&value), c->no, c->mid);
+        ok = select1(d, &q, &r) && r.nrow == 1 && my_i64(&r, 0, 0, 0) == 1;
+        if (!ok) snprintf(err, ERRBUF, "改名没有按原样落库，已回滚");
+    }
+    if (!ok) db_tx_rollback(d);
+    else ok = db_tx_commit(d, err);
+finish:
+    my_free(&r); str_free(&q); str_free(&value); return ok;
 }
 
 int db_set_job(Db *d, const Charac *c, int job, int grow, Err err) {

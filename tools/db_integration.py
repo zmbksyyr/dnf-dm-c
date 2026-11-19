@@ -97,6 +97,128 @@ class DataTests(unittest.TestCase):
             self.cur.execute("UPDATE taiwan_cain.charac_info SET charac_name=UNHEX(%s) WHERE charac_no=%s", (before, self.cno))
             self.assertEqual(self.one("SELECT HEX(charac_name) FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,)), before)
 
+    def test_rename_offline_encoding_idempotence_and_invalid_names(self):
+        for mode in ('', 'STRICT_TRANS_TABLES', 'NO_BACKSLASH_ESCAPES'):
+            with self.subTest(mode=mode), self.offline_character():
+                for name in ('改名测试甲', "audit'\\name", '六字中文名字12'):
+                    for _ in range(2):
+                        result = self.probe('rename', TEST_NO, TEST_NO, name, mode=mode)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        wire = self.one('SELECT HEX(CONVERT(charac_name USING latin1)) FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,))
+                        self.assertEqual(bytes.fromhex(wire), name.encode())
+                        read = self.probe('read-name', TEST_NO, TEST_NO)
+                        self.assertEqual(read.returncode, 0, read.stderr)
+                        self.assertIn('name=' + name, read.stdout)
+                before = self.one('SELECT HEX(charac_name) FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,))
+                for name in ('', 'a' * 21, '六字中文名字123', 'emoji😀'):
+                    result = self.probe('rename', TEST_NO, TEST_NO, name, mode=mode)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertEqual(self.one('SELECT HEX(charac_name) FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,)), before)
+
+    def test_rename_rejects_online_stale_deleted_and_missing_targets(self):
+        with self.offline_character():
+            for status in (1, 2, 3):
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s', (status, TEST_NO))
+                result = self.probe('rename', TEST_NO, TEST_NO, 'refused')
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn('在线或正在退出', result.stderr)
+            self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s', (TEST_NO,))
+            for cno, mid in ((TEST_NO, TEST_NO + 1), (TEST_NO + 1, TEST_NO), (0, TEST_NO), (TEST_NO, 0)):
+                result = self.probe('rename', cno, mid, 'refused')
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s', (TEST_NO,))
+            result = self.probe('rename', TEST_NO, TEST_NO, 'refused')
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0,m_id=%s WHERE charac_no=%s', (TEST_NO + 1, TEST_NO))
+            result = self.probe('rename', TEST_NO, TEST_NO, 'refused')
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(self.one('SELECT charac_name FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,)), 'audit_mail')
+
+    def test_rename_duplicate_faults_and_readback_roll_back(self):
+        with self.offline_character():
+            original = self.one('SELECT HEX(charac_name) FROM taiwan_cain.charac_info WHERE charac_no=%s', (self.cno,))
+            source_name = bytes.fromhex(self.one('SELECT HEX(CONVERT(charac_name USING latin1)) FROM taiwan_cain.charac_info WHERE charac_no=%s', (self.cno,))).decode('utf8')
+            result = self.probe('rename', TEST_NO, TEST_NO, source_name)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(self.one('SELECT HEX(charac_name) FROM taiwan_cain.charac_info WHERE charac_no=%s', (self.cno,)), original)
+            for body in ("SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit rename failure'", 'SET NEW.charac_name=OLD.charac_name'):
+                with self.trigger('taiwan_cain.charac_info', 'UPDATE', body):
+                    result = self.probe('rename', TEST_NO, TEST_NO, 'must_rollback')
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertEqual(self.one('SELECT charac_name FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,)), 'audit_mail')
+            result = self.probe('rename', TEST_NO, TEST_NO, 'after_failure')
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rename_holds_existing_or_absent_login_lock_while_waiting(self):
+        for absent in (False, True):
+            with self.subTest(absent=absent), self.offline_character():
+                if absent:
+                    self.cur.execute('DELETE FROM taiwan_login.login_account_3 WHERE m_id=%s', (TEST_NO,))
+                params = dict(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+                lock = pymysql.connect(**params)
+                login = pymysql.connect(**params)
+                pending = None
+                try:
+                    lock.begin()
+                    with lock.cursor() as query:
+                        query.execute('SELECT charac_no FROM taiwan_cain.charac_info WHERE charac_no=%s FOR UPDATE', (TEST_NO,))
+                    env = dict(os.environ, **{'DNF_GM_TEST_' + key.upper(): value for key, value in self.params.items()})
+                    pending = subprocess.Popen([str(PROBE), 'rename', str(TEST_NO), str(TEST_NO), 'after_wait'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    deadline = time.monotonic() + 15
+                    while True:
+                        self.cur.execute('SHOW FULL PROCESSLIST')
+                        if any(row[7] and row[7].startswith('SELECT m_id,delete_flag FROM taiwan_cain.charac_info') and 'charac_no=' + str(TEST_NO) in row[7] for row in self.cur.fetchall()):
+                            break
+                        self.assertIsNone(pending.poll(), 'rename exited before waiting on the role')
+                        self.assertLess(time.monotonic(), deadline, 'rename role-lock wait missing')
+                        time.sleep(.05)
+                    change = ('INSERT INTO taiwan_login.login_account_3 (m_id,login_status) VALUES (%s,1)' if absent else 'UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s')
+                    with login.cursor() as query:
+                        query.execute('SET SESSION innodb_lock_wait_timeout=1')
+                        with self.assertRaises(pymysql.err.OperationalError) as blocked:
+                            query.execute(change, (TEST_NO,))
+                        self.assertEqual(blocked.exception.args[0], 1205)
+                    lock.commit()
+                    out, err = pending.communicate(timeout=20)
+                    self.assertEqual(pending.returncode, 0, (out, err))
+                    with login.cursor() as query:
+                        query.execute(change, (TEST_NO,))
+                    self.assertEqual(self.one('SELECT charac_name FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,)), 'after_wait')
+                finally:
+                    lock.rollback()
+                    if pending is not None and pending.poll() is None:
+                        pending.kill(); pending.communicate(timeout=10)
+                    lock.close(); login.close()
+
+    def test_rename_rechecks_login_after_waiting_for_account(self):
+        with self.offline_character():
+            lock = pymysql.connect(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+            pending = None
+            try:
+                lock.begin()
+                with lock.cursor() as query:
+                    query.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s', (TEST_NO,))
+                env = dict(os.environ, **{'DNF_GM_TEST_' + key.upper(): value for key, value in self.params.items()})
+                pending = subprocess.Popen([str(PROBE), 'rename', str(TEST_NO), str(TEST_NO), 'refused'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                deadline = time.monotonic() + 15
+                while True:
+                    self.cur.execute('SHOW FULL PROCESSLIST')
+                    if any(row[7] and row[7].startswith('SELECT login_status FROM taiwan_login.login_account_3') and 'm_id=' + str(TEST_NO) in row[7] for row in self.cur.fetchall()):
+                        break
+                    self.assertIsNone(pending.poll(), 'rename exited before account wait')
+                    self.assertLess(time.monotonic(), deadline, 'rename account-lock wait missing')
+                    time.sleep(.05)
+                lock.commit()
+                out, err = pending.communicate(timeout=20)
+                self.assertNotEqual(pending.returncode, 0, (out, err))
+                self.assertIn('在线或正在退出', err.decode('utf8'))
+                self.assertEqual(self.one('SELECT charac_name FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,)), 'audit_mail')
+            finally:
+                lock.rollback()
+                if pending is not None and pending.poll() is None:
+                    pending.kill(); pending.communicate(timeout=10)
+                lock.close()
+
     @contextlib.contextmanager
     def trigger(self, table, event, body):
         schema = table.split(".")[0]
