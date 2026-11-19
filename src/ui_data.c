@@ -102,20 +102,23 @@ static int tab_work(void *ctx, Err err) {
     if (c->kind == D_TABDEL) {
         for (int i = 0; i < g_tabdel.n; i++) {
             TabOrphan *o = VEC_AT(&g_tabdel, TabOrphan, i);
-            if (!db_del_tab_orphan(&g.db, o->avatar, o->ui_id, err)) return 0;
+            if (!db_del_tab_orphan(&g.db, o, g.pvf_ok ? tab_has : NULL, NULL, err)) {
+                app_log("删除错误记录 · 已完成 %d 条，剩余未处理：%s", i, err);
+                return 0;
+            }
         }
         return 1;
     }
     return 0;
 }
 
-static void tab_scan_start(void) {
+static void tab_scan_start(int open_window) {
     if (!g.db_ok) { app_info("请先连接数据库。"); return; }
     if (job_running(&g.job_act)) { app_info("上一个操作还在进行，等它完成"); return; }
     if (!g_tabscan.cap) vec_init(&g_tabscan, sizeof(TabOrphan));
     g_tabscan.n = 0;
     g_tab_failed = 0;
-    g_tab_pending = 1;
+    g_tab_pending = open_window;
     dc.kind = D_TABSCAN;
     app_status("正在扫描宠物/时装表…");
     data_act("扫表内错误", tab_work);
@@ -139,12 +142,11 @@ static void tab_fill(TabCtx *t) {
     ui_rows_clear(t->list);
     for (int i = 0; i < g_tabscan.n; i++) {
         TabOrphan *o = VEC_AT(&g_tabscan, TabOrphan, i);
-        char cn[16], ii[24], it[16], nm[96];
+        char cn[16], ii[24], nm[96];
         fmt(cn, sizeof(cn), "%u", o->cno);
         snprintf(ii, sizeof(ii), "%llu", (unsigned long long)o->ui_id);
-        fmt(it, sizeof(it), "%u", o->it_id);
         const char *cells[6] = {o->avatar ? "时装" : "宠物", cn,
-                                o->cname[0] ? o->cname : "?", it,
+                                o->cname[0] ? o->cname : "?", ii,
                                 app_item_name(o->it_id, nm, sizeof(nm)), o->why};
         ui_row_add(t->list, cells, 6, (LPARAM)i);
     }
@@ -179,7 +181,7 @@ static LRESULT tab_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
     if (m == WM_TIMER) {
         if (g.act_ver == t->ver) return 0;
         t->ver = g.act_ver;
-        if (g_tab_rescan) { g_tab_rescan = 0; tab_scan_start(); }   // 删完自动重扫
+        if (g_tab_rescan) { g_tab_rescan = 0; tab_scan_start(0); }   // 在当前窗口重扫
         else if (g_tab_failed) {                                    // 失败不能显示成「0 条」
             ui_rows_clear(t->list);
             ui_text(t->info, "扫描失败，未得到结果（详见状态栏或日志）");
@@ -199,7 +201,7 @@ static LRESULT tab_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
         case 6302: tab_del_run(t, 1); return 0;         // 全部删除
         case 6303:                                      // 重新扫描
             t->ver = g.act_ver;
-            tab_scan_start();
+            tab_scan_start(0);
             return 0;
         }
     }
@@ -229,7 +231,7 @@ static void tab_show(void) {
     int lh = chh - pad * 2 - rowh * 3 - g2 * 4;
     if (lh < ui_scale(120)) lh = ui_scale(120);
     ui_place(t.list, pad, lt, cw - pad * 2, lh);
-    ui_place(ui_label(d, "只列 it_id 非法或为 0 的记录；it_id=0 的空行算正常，不动", 0),
+    ui_place(ui_label(d, "仅清理已删除／不存在角色或 PVF 无此编号的记录；空行保留", 0),
             pad, lt + lh + g2, cw - pad * 2, rowh);
 
     URow r;
@@ -315,7 +317,7 @@ static LRESULT pet_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     (void)p;
     (void)lp;
     if (m != WM_COMMAND) return -1;
-    if (LOWORD(wp) == P_BAD) { tab_scan_start(); return 0; }
+    if (LOWORD(wp) == P_BAD) { tab_scan_start(1); return 0; }
     if (LOWORD(wp) == P_REFRESH) {
         g.pets.n = 0;
         g.lists_ready &= ~(u32)L_PETS;
@@ -490,7 +492,7 @@ static LRESULT ava_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     (void)p;
     (void)lp;
     if (m != WM_COMMAND) return -1;
-    if (LOWORD(wp) == A_BAD) { tab_scan_start(); return 0; }
+    if (LOWORD(wp) == A_BAD) { tab_scan_start(1); return 0; }
     if (LOWORD(wp) == A_REFRESH) {
         g.avatars.n = 0;
         g.lists_ready &= ~(u32)L_AVAS;

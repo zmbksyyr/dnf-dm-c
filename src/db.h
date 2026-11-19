@@ -251,13 +251,16 @@ typedef struct {
     char why[48];
     int  kind;          // 0 容器槽位 / 1 user_items 时装 / 2 creature_items 宠物 / 3 邮件附件
     u64  key;           // kind 1/2: ui_id；kind 3: postal_id
+    Item item;          // 容器扫描时的完整槽位，清理前核对
+    u32  add_info;      // 邮件扫描时的附件实例／数量
+    int  avata, creature;
 } ScanRow;
 int  db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, ItemStackLim lim, void *hctx, Err err);
-int  db_purge_bad(Db *d, Vec *rows, int *done, Err err);   // 清掉清单里的错误物品，返回成功条数
+int  db_purge_bad(Db *d, Vec *rows, int *done, ItemHasName has, ItemStackLim lim, void *hctx, Err err);
 
 // 宠物/时装表内错误记录（it_id 查不到、角色已删）
 typedef struct {
-    u32  cno;
+    u32  cno, mid;
     char cname[64];
     int  avatar;        // 1 = user_items（时装），0 = creature_items（宠物）
     u64  ui_id;
@@ -265,7 +268,7 @@ typedef struct {
     char why[48];
 } TabOrphan;
 int  db_scan_tab_orphan(Db *d, Vec *out, ItemHasName has, void *hctx, Err err);
-int  db_del_tab_orphan(Db *d, int avatar, u64 ui_id, Err err);
+int  db_del_tab_orphan(Db *d, const TabOrphan *row, ItemHasName has, void *hctx, Err err);
 
 // 角色备份 / 还原（.sql 文本，还原直接走 db_restore_sql）
 void db_backup_char_path(char *out, int cap, const Charac *c);

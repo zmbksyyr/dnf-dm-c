@@ -358,6 +358,203 @@ class DataTests(unittest.TestCase):
                             pending.kill(); pending.communicate(timeout=10)
                         lock.close(); login.close()
 
+    def cleanup_orphan(self, command, avatar, ui, item, invalid=None, mid=TEST_NO):
+        return self.probe(command, int(avatar), TEST_NO, mid, ui, item,
+                          item if invalid is None else invalid)
+
+    def test_cleanup_orphan_online_stale_and_valid_rows_are_preserved(self):
+        for command in ('orphan-delete', 'purge-orphan'):
+            with self.offline_character(), self.companions() as ids:
+                for avatar, ui, item in ((False, ids[0], 63000), (True, ids[1], 1970031)):
+                    table = 'taiwan_cain_2nd.' + ('user_items' if avatar else 'creature_items')
+                    for status in (1, 2):
+                        self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s', (status, TEST_NO))
+                        r = self.cleanup_orphan(command, avatar, ui, item)
+                        self.assertNotEqual(r.returncode, 0, r.stdout)
+                        self.assertIn('在线或正在退出', r.stderr)
+                    self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s', (TEST_NO,))
+                    for change in ('owner', 'item', 'account', 'valid', 'no-pvf'):
+                        with self.subTest(command=command, avatar=avatar, change=change):
+                            self.cur.execute('UPDATE ' + table + ' SET charac_no=%s,it_id=%s WHERE ui_id=%s',
+                                             (TEST_NO - 1 if change == 'owner' else TEST_NO, item + (change == 'item'), ui))
+                            r = self.cleanup_orphan(command, avatar, ui, item, invalid=1 if change == 'valid' else 0 if change == 'no-pvf' else item,
+                                                    mid=TEST_NO + 1 if change == 'account' else TEST_NO)
+                            self.assertNotEqual(r.returncode, 0, r.stdout)
+                            self.assertEqual(self.one('SELECT COUNT(*) FROM ' + table + ' WHERE ui_id=%s', (ui,)), 1)
+                    self.cur.execute('UPDATE ' + table + ' SET charac_no=%s,it_id=%s WHERE ui_id=%s', (TEST_NO, item, ui))
+                    r = self.cleanup_orphan(command, avatar, ui, item)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    self.assertEqual(self.one('SELECT COUNT(*) FROM ' + table + ' WHERE ui_id=%s', (ui,)), 0)
+
+    def test_cleanup_orphan_deleted_missing_and_restored_characters(self):
+        for command in ('orphan-delete', 'purge-orphan'):
+            for missing in (False, True):
+                with self.offline_character(), self.companions() as ids:
+                    self.cur.execute('SELECT * FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,))
+                    row = self.cur.fetchone();cols = [d[0] for d in self.cur.description]
+                    if missing:
+                        self.cur.execute('DELETE FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,))
+                    else:
+                        self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s', (TEST_NO,))
+                    r = self.cleanup_orphan(command, False, ids[0], 63000, invalid=0, mid=0 if missing else TEST_NO)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    if missing:
+                        self.cur.execute('INSERT INTO taiwan_cain.charac_info(' + ','.join(map(ident, cols)) +
+                                         ')VALUES(' + ','.join(['%s'] * len(cols)) + ')', row)
+                    else:
+                        self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0 WHERE charac_no=%s', (TEST_NO,))
+                    r = self.cleanup_orphan(command, True, ids[1], 1970031, invalid=0, mid=0 if missing else TEST_NO)
+                    self.assertNotEqual(r.returncode, 0)
+                    self.assertEqual(self.one('SELECT COUNT(*)FROM taiwan_cain_2nd.user_items WHERE ui_id=%s', (ids[1],)), 1)
+
+    @contextlib.contextmanager
+    def cleanup_fixture(self, kind='all'):
+        tables = [('taiwan_cain_2nd.inventory', 'charac_no'),
+                  ('taiwan_cain_2nd.charac_inven_expand', 'charac_no'),
+                  ('taiwan_cain.account_cargo', 'm_id')]
+        raw = bytearray(3 * 61)
+        for i in range(3):
+            raw[i * 61 + 1] = 255 if i == 1 else 3
+            struct.pack_into('<I', raw, i * 61 + 2, 1001 + (i == 2))
+            struct.pack_into('<I', raw, i * 61 + 7, 2)
+        packed = struct.pack('<I', len(raw)) + zlib.compress(raw)
+        created = []
+        mail = None;counter = self.one("SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME='postal'")
+        try:
+            if kind in ('all', 'containers', 'inventory', 'account'):
+                for table, key in tables:
+                    self.assertEqual(self.one('SELECT COUNT(*)FROM ' + table + ' WHERE ' + key + '=%s', (TEST_NO,)), 0)
+                if kind != 'account':
+                    empty = struct.pack('<I', 61) + zlib.compress(bytes(61))
+                    self.cur.execute('INSERT INTO taiwan_cain_2nd.inventory(charac_no,inventory,equipslot,creature)VALUES(%s,%s,%s,%s)',
+                                     (TEST_NO, packed, packed if kind != 'inventory' else empty, packed if kind != 'inventory' else empty))
+                    created.append(tables[0])
+                if kind in ('all', 'containers'):
+                    self.cur.execute('INSERT INTO taiwan_cain_2nd.charac_inven_expand(charac_no,cargo,jewel)VALUES(%s,%s,%s)', (TEST_NO, packed, packed))
+                    created.append(tables[1])
+                if kind != 'inventory':
+                    self.cur.execute('INSERT INTO taiwan_cain.account_cargo(m_id,cargo,money)VALUES(%s,%s,987)', (TEST_NO, packed))
+                    created.append(tables[2])
+            if kind in ('all', 'mail'):
+                self.cur.execute("INSERT INTO taiwan_cain_2nd.postal(occ_time,send_charac_name,receive_charac_no,item_id,add_info,gold,unlimit_flag)"
+                                 "VALUES(NOW(),'audit',%s,63000,2,321,1)", (TEST_NO,))
+                mail = self.cur.lastrowid
+            yield bytes(raw), mail
+        finally:
+            for table, key in created:
+                self.cur.execute('DELETE FROM ' + table + ' WHERE ' + key + '=%s', (TEST_NO,))
+            if mail is not None:self.cur.execute('DELETE FROM taiwan_cain_2nd.postal WHERE postal_id=%s', (mail,))
+            if counter:self.cur.execute('ALTER TABLE taiwan_cain_2nd.postal AUTO_INCREMENT=' + str(counter))
+
+    def cleanup_scan(self, invalid=0):
+        path = OUT / 'cleanup-snapshot.bin'
+        r = self.probe('cleanup-scan', TEST_NO, TEST_NO, path, invalid, timeout=180)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return path, r.stdout
+
+    def test_cleanup_scan_and_purge_preserve_other_slots_and_mail_gold(self):
+        with self.offline_character(), self.cleanup_fixture() as (raw, mail), self.companions() as ids:
+            # Both table rows and the mail use the same absent PVF item for this fixture.
+            self.cur.execute('UPDATE taiwan_cain_2nd.user_items SET it_id=63000 WHERE ui_id=%s', (ids[1],))
+            path, scanned = self.cleanup_scan(63000)
+            self.assertIn('selected=9', scanned)
+            r = self.probe('cleanup-purge', path, 63000)
+            self.assertEqual(r.returncode, 0, r.stderr);self.assertIn('done=9', r.stdout)
+            expected = raw[:61] + bytes(61) + raw[122:]
+            for table, key, columns in [('taiwan_cain_2nd.inventory', 'charac_no', ('inventory','equipslot','creature')),
+                                         ('taiwan_cain_2nd.charac_inven_expand','charac_no',('cargo','jewel')),
+                                         ('taiwan_cain.account_cargo','m_id',('cargo',))]:
+                for col in columns:
+                    blob = self.one('SELECT ' + col + ' FROM ' + table + ' WHERE ' + key + '=%s', (TEST_NO,))
+                    self.assertEqual(zlib.decompress(blob[4:]), expected)
+            self.assertEqual(self.one('SELECT money FROM taiwan_cain.account_cargo WHERE m_id=%s', (TEST_NO,)), 987)
+            self.assertEqual(self.one('SELECT gold FROM taiwan_cain_2nd.postal WHERE postal_id=%s', (mail,)), 321)
+            self.assertEqual(self.one('SELECT item_id+add_info+avata_flag+creature_flag FROM taiwan_cain_2nd.postal WHERE postal_id=%s', (mail,)), 0)
+
+    def test_cleanup_without_pvf_only_finds_structural_errors(self):
+        with self.offline_character(), self.cleanup_fixture() as (_, mail), self.companions():
+            path, scanned = self.cleanup_scan()
+            self.assertIn('selected=6', scanned)
+            r = self.probe('cleanup-purge', path, 0)
+            self.assertEqual(r.returncode, 0, r.stderr);self.assertIn('done=6', r.stdout)
+            self.assertEqual(self.one('SELECT item_id FROM taiwan_cain_2nd.postal WHERE postal_id=%s', (mail,)), 63000)
+
+    def test_cleanup_stale_same_id_slot_and_attachment_are_preserved(self):
+        for kind in ('inventory', 'mail'):
+            with self.offline_character(), self.cleanup_fixture(kind) as (raw, mail):
+                path, _ = self.cleanup_scan(63000)
+                if kind == 'inventory':
+                    changed = bytearray(raw);changed[61 + 6] = 17
+                    self.cur.execute('UPDATE taiwan_cain_2nd.inventory SET inventory=COMPRESS(%s) WHERE charac_no=%s', (bytes(changed), TEST_NO))
+                    before = self.one('SELECT inventory FROM taiwan_cain_2nd.inventory WHERE charac_no=%s', (TEST_NO,))
+                else:
+                    self.cur.execute('UPDATE taiwan_cain_2nd.postal SET add_info=7 WHERE postal_id=%s', (mail,))
+                r = self.probe('cleanup-purge', path, 63000)
+                self.assertNotEqual(r.returncode, 0);self.assertIn('done=0', r.stdout)
+                if kind == 'inventory':self.assertEqual(self.one('SELECT inventory FROM taiwan_cain_2nd.inventory WHERE charac_no=%s', (TEST_NO,)), before)
+                else:self.assertEqual(self.one('SELECT add_info FROM taiwan_cain_2nd.postal WHERE postal_id=%s', (mail,)), 7)
+
+    def test_cleanup_online_container_mail_and_partial_failure_count(self):
+        for kind in ('inventory', 'account', 'mail'):
+            with self.offline_character(), self.cleanup_fixture(kind):
+                path, _ = self.cleanup_scan(63000)
+                for status in (1, 2):
+                    self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s', (status, TEST_NO))
+                    r = self.probe('cleanup-purge', path, 63000)
+                    self.assertNotEqual(r.returncode, 0);self.assertIn('done=0', r.stdout);self.assertIn('在线或正在退出', r.stderr)
+        with self.offline_character(), self.cleanup_fixture(), self.companions() as ids:
+            self.cur.execute('UPDATE taiwan_cain_2nd.user_items SET it_id=63000 WHERE ui_id=%s', (ids[1],))
+            path, _ = self.cleanup_scan(63000)
+            with self.trigger('taiwan_cain_2nd.user_items', 'DELETE', "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit cleanup failure'"):
+                r = self.probe('cleanup-purge', path, 63000)
+            self.assertNotEqual(r.returncode, 0);self.assertIn('done=7', r.stdout);self.assertIn('audit cleanup failure', r.stderr)
+            self.assertEqual(self.one('SELECT COUNT(*)FROM taiwan_cain_2nd.creature_items WHERE ui_id=%s', (ids[0],)), 1)
+
+    def test_cleanup_blob_and_mail_faults_roll_back(self):
+        for kind in ('inventory', 'mail'):
+            with self.offline_character(), self.cleanup_fixture(kind) as (_, mail):
+                path, _ = self.cleanup_scan(63000)
+                table = 'taiwan_cain_2nd.' + ('inventory' if kind == 'inventory' else 'postal')
+                for body in ("SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit cleanup fault'",
+                             'SET NEW.inventory=OLD.inventory' if kind == 'inventory' else 'SET NEW.item_id=OLD.item_id'):
+                    with self.trigger(table, 'UPDATE', body):
+                        r = self.probe('cleanup-purge', path, 63000)
+                    self.assertNotEqual(r.returncode, 0);self.assertIn('done=0', r.stdout)
+                r = self.probe('cleanup-purge', path, 63000)
+                self.assertEqual(r.returncode, 0, r.stderr);self.assertIn('done=1', r.stdout)
+
+    def test_cleanup_locks_login_until_waiting_item_edit_finishes(self):
+        for absent in (False, True):
+            for avatar in (False, True):
+                with self.offline_character(), self.companions() as ids:
+                    if absent:self.cur.execute('DELETE FROM taiwan_login.login_account_3 WHERE m_id=%s', (TEST_NO,))
+                    table = 'taiwan_cain_2nd.' + ('user_items' if avatar else 'creature_items')
+                    ui = ids[int(avatar)];item = 1970031 if avatar else 63000
+                    params = dict(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+                    lock=pymysql.connect(**params);login=pymysql.connect(**params);pending=None
+                    try:
+                        lock.begin()
+                        with lock.cursor()as q:q.execute('SELECT ui_id FROM '+table+' WHERE ui_id=%s FOR UPDATE',(ui,))
+                        args=['orphan-delete' if avatar else 'purge-orphan',int(avatar),TEST_NO,TEST_NO,ui,item,item]
+                        env=dict(os.environ,**{'DNF_GM_TEST_'+k.upper():v for k,v in self.params.items()})
+                        pending=subprocess.Popen([str(PROBE),*map(str,args)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                        deadline=time.monotonic()+15
+                        while True:
+                            self.cur.execute('SHOW FULL PROCESSLIST')
+                            if any(row[7]and row[7].startswith('SELECT charac_no,it_id FROM '+table)and 'ui_id='+str(ui)in row[7]for row in self.cur.fetchall()):break
+                            self.assertIsNone(pending.poll());self.assertLess(time.monotonic(),deadline);time.sleep(.05)
+                        change='INSERT INTO taiwan_login.login_account_3(m_id,login_status)VALUES(%s,1)'if absent else'UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s'
+                        with login.cursor()as q:
+                            q.execute('SET SESSION innodb_lock_wait_timeout=1')
+                            with self.assertRaises(pymysql.err.OperationalError)as blocked:q.execute(change,(TEST_NO,))
+                            self.assertEqual(blocked.exception.args[0],1205)
+                        lock.commit();out,err=pending.communicate(timeout=20);self.assertEqual(pending.returncode,0,(out,err))
+                        with login.cursor()as q:q.execute(change,(TEST_NO,))
+                    finally:
+                        lock.rollback()
+                        if pending is not None and pending.poll()is None:pending.kill();pending.communicate(timeout=10)
+                        lock.close();login.close()
+
     def test_mail_bulk_after_logout_deletes_all_attachments(self):
         with self.offline_character(), self.attachment() as first, self.attachment() as second:
             self.cur.execute("UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s", (TEST_NO,))

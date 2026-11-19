@@ -6,10 +6,32 @@ import ctypes.wintypes as wt
 import os
 import time
 from contextlib import contextmanager
+import subprocess
 
 from . import core
 
 u = core.u
+
+
+@core.case("gm.modal_owner_close", needs=("gui",), group="always",
+           desc="弹窗打开时关闭其主窗口，退出消息穿过模态循环，进程正常退出")
+def modal_owner_close(ctx):
+    p, h = core.boot(connect=False, page=11, wait=0.2)
+    try:
+        core.press(core.ctl(h, 2106), 0)
+        d = core.progress_wait(p.pid)
+        if not ctx.ok("独立测试进程打开桥接弹窗", d is not None):
+            return
+        u.PostMessageW(h, core.WM_CLOSE, 0, 0)
+        try:
+            ctx.check("主窗口关闭后整个进程正常退出", p.wait(timeout=10), 0)
+        except subprocess.TimeoutExpired:
+            ctx.ok("主窗口关闭后整个进程正常退出", False, "模态循环没有退出")
+    finally:
+        if p.poll() is None:
+            d = core.progress_dlg(p.pid)
+            if d: u.PostMessageW(d, core.WM_CLOSE, 0, 0)
+            u.PostMessageW(h, core.WM_CLOSE, 0, 0)
 
 # ---------------------------------------------------------------- 窗口与控件
 IDC_CONN, IDC_DISC, IDC_CHLIST, IDC_STATUS = 104, 105, 113, 191

@@ -46,6 +46,8 @@ static void progress(int pct) {
     if (cancel && pct >= atoi(cancel)) db_cancel_request();
 }
 
+static int cleanup_has(u32 id, void *ctx) { return id != *(const u32 *)ctx; }
+
 static int run_probe(int argc, char **argv) {
     if (argc < 2) return 2;
     if (argc == 3 && !strcmp(argv[1], "item-codec")) return item_codec(argv[2]);
@@ -75,7 +77,44 @@ static int run_probe(int argc, char **argv) {
     Charac c = {0};
     if (argc > 2) c.no = (u32)strtoul(argv[2], NULL, 10);
     if (argc > 3) c.mid = (u32)strtoul(argv[3], NULL, 10);
-    if (!strcmp(argv[1], "pet-name") && argc == 6) {
+    if ((!strcmp(argv[1], "orphan-delete") || !strcmp(argv[1], "purge-orphan")) && argc == 8) {
+        u32 invalid = (u32)strtoul(argv[7], NULL, 10);
+        ItemHasName has = invalid ? cleanup_has : NULL;
+        if (!strcmp(argv[1], "orphan-delete")) {
+            TabOrphan r = {0};r.avatar = atoi(argv[2]);r.cno = (u32)strtoul(argv[3], NULL, 10);
+            r.mid = (u32)strtoul(argv[4], NULL, 10);r.ui_id = (u64)strtoull(argv[5], NULL, 10);r.it_id = (u32)strtoul(argv[6], NULL, 10);
+            ok = db_del_tab_orphan(&d, &r, has, &invalid, err);
+        }
+        else {
+            Vec rows; vec_init(&rows, sizeof(ScanRow));
+            ScanRow *r = VEC_ADD(&rows, ScanRow);
+            r->kind = atoi(argv[2]) ? 1 : 2;
+            r->cno = (u32)strtoul(argv[3], NULL, 10);r->mid = (u32)strtoul(argv[4], NULL, 10);
+            r->key = (u64)strtoull(argv[5], NULL, 10);r->id = (u32)strtoul(argv[6], NULL, 10);
+            ok = db_purge_bad(&d, &rows, &nt, has, NULL, &invalid, err);vec_free(&rows);printf("done=%d\n", nt);
+        }
+    } else if (!strcmp(argv[1], "cleanup-scan") && argc == 6) {
+        u32 invalid = (u32)strtoul(argv[5], NULL, 10);
+        Vec rows;vec_init(&rows, sizeof(ScanRow));
+        ok = db_scan_bad(&d, &rows, &nt, invalid ? cleanup_has : NULL, NULL, &invalid, err);
+        Vec selected;vec_init(&selected, sizeof(ScanRow));
+        if (ok) for (int i = 0; i < rows.n; i++) {
+            ScanRow *r = VEC_AT(&rows, ScanRow, i);
+            if (r->cno == c.no && r->mid == c.mid) *VEC_ADD(&selected, ScanRow) = *r;
+        }
+        if (ok) ok = file_write(argv[4], selected.p, (size_t)selected.n * sizeof(ScanRow));
+        printf("scanned=%d selected=%d\n", nt, selected.n);vec_free(&selected);vec_free(&rows);
+    } else if (!strcmp(argv[1], "cleanup-purge") && argc == 4) {
+        u32 invalid = (u32)strtoul(argv[3], NULL, 10);
+        Buf data = {0};
+        if (file_read(argv[2], &data) && !(data.n % sizeof(ScanRow))) {
+            Vec rows;vec_init(&rows, sizeof(ScanRow));
+            for (size_t i = 0; i < data.n; i += sizeof(ScanRow)) memcpy(vec_add(&rows), data.p + i, sizeof(ScanRow));
+            ok = db_purge_bad(&d, &rows, &nt, invalid ? cleanup_has : NULL, NULL, &invalid, err);
+            printf("done=%d\n", nt);vec_free(&rows);
+        }
+        buf_free(&data);
+    } else if (!strcmp(argv[1], "pet-name") && argc == 6) {
         ok = db_set_pet_name(&d, &c, (u32)strtoul(argv[4], NULL, 10), argv[5], err);
     } else if (!strcmp(argv[1], "pet-full") && argc == 5) {
         ok = db_set_pet_full(&d, &c, (u32)strtoul(argv[4], NULL, 10), err);

@@ -1694,6 +1694,7 @@ static void scan_blob(Db *d, const Charac *c, const ScanCol *sc, Vec *out,
         snprintf(o->cont, sizeof(o->cont), "%s", sc->label);
         o->slot = i + 1;
         o->id = item_id(&b.items[i]);
+        o->item = b.items[i];
         snprintf(o->why, sizeof(o->why), "%s", why);
     }
     blob_free(&b);
@@ -1747,7 +1748,7 @@ int db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, ItemStackLim lim, 
         if (has) {
             MyResult m = {0};
             str_clear(&s);
-            str_catf(&s, "SELECT postal_id,item_id FROM taiwan_cain_2nd.postal "
+            str_catf(&s, "SELECT postal_id,item_id,add_info,avata_flag,creature_flag FROM taiwan_cain_2nd.postal "
                          "WHERE receive_charac_no=%u AND delete_flag=0", c.no);
             if (select1(d, &s, &m)) {
                 for (int i = 0; i < m.nrow; i++) {
@@ -1763,6 +1764,9 @@ int db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, ItemStackLim lim, 
                     snprintf(o->why, sizeof(o->why), "PVF 无此编号");
                     o->kind = 3;
                     o->key = my_u64(&m, i, 0, 0);
+                    o->add_info = (u32)my_u64(&m, i, 2, 0);
+                    o->avata = (int)my_i64(&m, i, 3, 0);
+                    o->creature = (int)my_i64(&m, i, 4, 0);
                 }
             }
             my_free(&m);
@@ -1781,6 +1785,7 @@ int db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, ItemStackLim lim, 
             TabOrphan *t = VEC_AT(&tb, TabOrphan, i);
             ScanRow *o = VEC_ADD(out, ScanRow);
             o->cno = t->cno;
+            o->mid = t->mid;
             snprintf(o->name, sizeof(o->name), "%s", t->cname);
             snprintf(o->cont, sizeof(o->cont), "%s", t->avatar ? "时装" : "宠物");
             o->id = t->it_id;
@@ -1788,7 +1793,7 @@ int db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, ItemStackLim lim, 
             o->kind = t->avatar ? 1 : 2;
             o->key = t->ui_id;
         }
-    }
+    } else { vec_free(&tb); return 0; }
     vec_free(&tb);
 
     // 账号名统一补齐：容器/时装/宠物行在生成时没带，按角色名回查一遍
@@ -1816,95 +1821,153 @@ int db_scan_bad(Db *d, Vec *out, int *nchar, ItemHasName has, ItemStackLim lim, 
     return 1;
 }
 
-// 清掉清单里的错误物品。容器槽位按容器归并（一次读、清多格、一次写），
-// 时装/宠物表行直接删，邮件清掉附件并保留金币。返回成功清除的条数。
-int db_purge_bad(Db *d, Vec *rows, int *done, Err err) {
-    if (done) *done = 0;
-    int ok_n = 0;
-    u8 *handled = (u8 *)calloc((size_t)(rows->n > 0 ? rows->n : 1), 1);
-    if (!handled) return 0;
-
-    for (int i = 0; i < rows->n; i++) {
-        ScanRow *r = VEC_AT(rows, ScanRow, i);
-        if (handled[i]) continue;
-
-        if (r->kind == 0) {                       // 容器槽位
-            const ScanCol *sc = NULL;
-            for (int k = 0; k < COUNT_OF(kScanCols); k++)
-                if (!strcmp(kScanCols[k].label, r->cont)) { sc = &kScanCols[k]; break; }
-            if (!sc) { handled[i] = 1; continue; }
-
-            Charac c;
-            memset(&c, 0, sizeof(c));
-            c.no = r->cno;
-            c.mid = r->mid;
-            Str s = {0};
-            MyResult q = {0};
-            str_catf(&s, "SELECT `%s` FROM %s WHERE %s=%u", sc->col, sc->table, sc->keycol,
-                     scan_col_key(&c, sc->keycol));
-            int have = select1(d, &s, &q) && q.nrow && my_text(&q, 0, 0);
-            str_free(&s);
-            if (!have) { my_free(&q); handled[i] = 1; continue; }
-
-            Blob b = {0};
-            Err e = {0};
-            if (!(blob_unpack(my_text(&q, 0, 0), (size_t)my_len(&q, 0, 0), &b, e) && b.ok)) {
-                my_free(&q);
-                handled[i] = 1;
-                continue;
-            }
-            my_free(&q);
-            int cleared = 0;
-            for (int j = i; j < rows->n; j++) {
-                ScanRow *t = VEC_AT(rows, ScanRow, j);
-                if (handled[j] || t->kind != 0 || t->cno != r->cno || strcmp(t->cont, r->cont))
-                    continue;
-                // 只清扫描时看到的那一格：期间玩家整理过背包，槽位号可能已经换人
-                if (t->slot >= 1 && t->slot <= b.n && item_id(&b.items[t->slot - 1]) == t->id) {
-                    memset(&b.items[t->slot - 1], 0, sizeof(Item));
-                    cleared++;
-                }
-                handled[j] = 1;
-            }
-            if (cleared) {
-                Buf out;
-                if (blob_pack(&b, &out)) {
-                    if (db_save_blob(d, &c, sc->table, sc->col, out.p, out.n, err)) ok_n += cleared;
-                    buf_free(&out);
-                }
-            }
-            blob_free(&b);
-        } else if (r->kind == 1 || r->kind == 2) {  // 时装 / 宠物表行
-            Str s = {0};
-            str_catf(&s, "DELETE FROM taiwan_cain_2nd.%s WHERE ui_id=%llu",
-                     r->kind == 1 ? "user_items" : "creature_items",
-                     (unsigned long long)r->key);
-            if (run(d, &s)) ok_n++;
-            else snprintf(err, ERRBUF, "%s", d->err);
-            str_free(&s);
-            handled[i] = 1;
-        } else if (r->kind == 3) {                  // 邮件：清附件，金币留下
-            if (!db_tx_begin(d, err)) { handled[i] = 1; continue; }
-            if (!mail_drop_attach(d, r->key, err)) {
-                db_tx_rollback(d); handled[i] = 1; continue;
-            }
-            Str s = {0};
-            str_catf(&s, "UPDATE taiwan_cain_2nd.postal SET item_id=0,add_info=0,"
-                         "avata_flag=0,creature_flag=0 WHERE postal_id=%llu",
-                     (unsigned long long)r->key);
-            if (!run(d, &s)) {
-                snprintf(err, ERRBUF, "%s", d->err);
-                db_tx_rollback(d);
-            } else if (db_tx_commit(d, err)) ok_n++;
-            str_free(&s);
-            handled[i] = 1;
-        } else {
-            handled[i] = 1;
+// Every cleanup transaction owns the login/character locks before reading its
+// target. A scan is a snapshot, never permission to delete the current row.
+static int cleanup_begin(Db *d, u32 cno, u32 mid, const char *table,
+                         int allow_orphan, int *orphan, Err err) {
+    *orphan = 0;
+    if (!cno || (!mid && !allow_orphan) || d->tx_depth) {
+        snprintf(err, ERRBUF, "清理目标缺少归属或已有未结束事务，未写入"); return 0;
+    }
+    Str s = {0}; MyResult r = {0};
+    str_catf(&s, "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE='InnoDB' AND "
+        "CONCAT(TABLE_SCHEMA,'.',TABLE_NAME) IN ('taiwan_cain.charac_info',"
+        "'taiwan_login.login_account_3','%s')", table);
+    int ok = select1(d, &s, &r) && my_u64(&r, 0, 0, 0) == 3;
+    my_free(&r); str_clear(&s);
+    if (!ok) { snprintf(err, ERRBUF, "清理需要 InnoDB 角色、登录和目标表，未写入"); goto end; }
+    str_cat(&s, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+    ok = run(d, &s); str_clear(&s);
+    if (!ok) { snprintf(err, ERRBUF, "%s", d->err); goto end; }
+    if (!db_tx_begin(d, err)) { ok = 0; goto end; }
+    if (mid) {
+        str_catf(&s, "SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%u FOR UPDATE", mid);
+        ok = select1(d, &s, &r);
+        if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+        else if (r.nrow && my_i64(&r, 0, 0, -1) != 0) {
+            snprintf(err, ERRBUF, "账号在线或正在退出，未清理；请退出游戏后重新扫描"); ok = 0;
         }
+        my_free(&r); str_clear(&s);
+    }
+    if (ok) {
+        str_catf(&s, "SELECT m_id,delete_flag FROM taiwan_cain.charac_info WHERE charac_no=%u FOR UPDATE", cno);
+        ok = select1(d, &s, &r);
+        if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+        else if (!r.nrow && allow_orphan && !mid) *orphan = 1;
+        else if (r.nrow != 1 || !mid || my_u64(&r, 0, 0, 0) != mid ||
+                 (!allow_orphan && my_i64(&r, 0, 1, 1) != 0)) {
+            snprintf(err, ERRBUF, "角色归属或删除状态已变化，未清理；请重新扫描"); ok = 0;
+        } else *orphan = my_i64(&r, 0, 1, 1) != 0;
+    }
+    if (!ok) db_tx_rollback(d);
+end:
+    my_free(&r); str_free(&s); return ok;
+}
+
+static int same_container(const ScanRow *a, const ScanRow *b) {
+    return a->kind == 0 && a->cno == b->cno && a->mid == b->mid && !strcmp(a->cont, b->cont);
+}
+
+static int purge_container(Db *d, Vec *rows, int index, u8 *handled, int *cleared,
+                           ItemHasName has, ItemStackLim lim, void *hctx, Err err) {
+    const ScanRow *r = VEC_AT(rows, ScanRow, index);
+    const ScanCol *sc = NULL;
+    for (int k = 0; k < COUNT_OF(kScanCols); k++)
+        if (!strcmp(kScanCols[k].label, r->cont)) { sc = &kScanCols[k]; break; }
+    if (!sc) { snprintf(err, ERRBUF, "未知容器，未清理"); return 0; }
+    int orphan = 0;
+    if (!cleanup_begin(d, r->cno, r->mid, sc->table, 0, &orphan, err)) return 0;
+    Charac c = {0}; c.no = r->cno; c.mid = r->mid;
+    Str s = {0}; MyResult q = {0}; Blob b = {0}; Buf out = {0};
+    str_catf(&s, "SELECT `%s` FROM %s WHERE %s=%u FOR UPDATE", sc->col, sc->table, sc->keycol, scan_col_key(&c, sc->keycol));
+    int ok = select1(d, &s, &q) && q.nrow == 1 && my_text(&q, 0, 0) &&
+        blob_unpack(my_text(&q, 0, 0), (size_t)my_len(&q, 0, 0), &b, err) && b.ok;
+    if (!ok) snprintf(err, ERRBUF, "容器不存在、读取失败或结构错误，未清理");
+    my_free(&q); str_clear(&s);
+    int count = 0;
+    for (int j = index; ok && j < rows->n; j++) {
+        const ScanRow *t = VEC_AT(rows, ScanRow, j);
+        if (!same_container(t, r)) continue;
+        char why[48];
+        if (t->slot < 1 || t->slot > b.n || memcmp(&b.items[t->slot - 1], &t->item, sizeof(Item)) ||
+            !item_bad(&b.items[t->slot - 1], has, lim, hctx, why, sizeof(why))) {
+            snprintf(err, ERRBUF, "容器槽位或校验结果已变化，未清理；请重新扫描"); ok = 0; break;
+        }
+        memset(&b.items[t->slot - 1], 0, sizeof(Item)); count++;
+    }
+    if (ok && !blob_pack(&b, &out)) { snprintf(err, ERRBUF, "容器重新打包失败，未清理"); ok = 0; }
+    if (ok) ok = db_save_blob(d, &c, sc->table, sc->col, out.p, out.n, err);
+    if (ok) {
+        str_catf(&s, "SELECT BINARY `%s`=0x", sc->col); hex_str(out.p, out.n, &s);
+        str_catf(&s, " FROM %s WHERE %s=%u FOR UPDATE", sc->table, sc->keycol, scan_col_key(&c, sc->keycol));
+        ok = select1(d, &s, &q) && q.nrow == 1 && my_i64(&q, 0, 0, 0) == 1;
+        if (!ok) snprintf(err, ERRBUF, "清理容器回读不一致，已回滚");
+    }
+    if (!ok) db_tx_rollback(d);
+    else ok = db_tx_commit(d, err);
+    if (ok) {
+        *cleared = count;
+        for (int j = index; j < rows->n; j++) if (same_container(VEC_AT(rows, ScanRow, j), r)) handled[j] = 1;
+    }
+    my_free(&q); str_free(&s); blob_free(&b); buf_free(&out); return ok;
+}
+
+static int purge_mail(Db *d, const ScanRow *r, ItemHasName has, void *hctx, Err err) {
+    int orphan = 0;
+    if (!cleanup_begin(d, r->cno, r->mid, "taiwan_cain_2nd.postal", 0, &orphan, err)) return 0;
+    Str s = {0}; MyResult q = {0};
+    str_catf(&s, "SELECT receive_charac_no,item_id,add_info,avata_flag,creature_flag,delete_flag,gold "
+                 "FROM taiwan_cain_2nd.postal WHERE postal_id=%llu FOR UPDATE", (unsigned long long)r->key);
+    int ok = select1(d, &s, &q) && q.nrow == 1 && my_u64(&q, 0, 0, 0) == r->cno &&
+        my_u64(&q, 0, 1, 0) == r->id && my_u64(&q, 0, 2, 0) == r->add_info &&
+        my_i64(&q, 0, 3, -1) == r->avata && my_i64(&q, 0, 4, -1) == r->creature &&
+        my_i64(&q, 0, 5, 1) == 0 && r->id && has && !has(r->id, hctx);
+    u64 gold = my_u64(&q, 0, 6, 0);
+    if (!ok) snprintf(err, ERRBUF, "邮件附件或校验结果已变化，未清理；请重新扫描");
+    my_free(&q); str_clear(&s);
+    if (ok) ok = mail_drop_attach(d, r->key, err);
+    if (ok) {
+        str_catf(&s, "UPDATE taiwan_cain_2nd.postal SET item_id=0,add_info=0,avata_flag=0,creature_flag=0 "
+                     "WHERE postal_id=%llu", (unsigned long long)r->key);
+        ok = run(d, &s); str_clear(&s);
+        if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    }
+    if (ok) {
+        str_catf(&s, "SELECT item_id=0 AND add_info=0 AND avata_flag=0 AND creature_flag=0 "
+                     "AND delete_flag=0 AND gold=%llu FROM taiwan_cain_2nd.postal WHERE postal_id=%llu FOR UPDATE",
+                     (unsigned long long)gold, (unsigned long long)r->key);
+        ok = select1(d, &s, &q) && q.nrow == 1 && my_i64(&q, 0, 0, 0) == 1;
+        if (!ok) snprintf(err, ERRBUF, "清理邮件回读不一致，已回滚");
+    }
+    if (!ok) db_tx_rollback(d);
+    else ok = db_tx_commit(d, err);
+    my_free(&q); str_free(&s); return ok;
+}
+
+// Stop at the first failure. Previously committed groups are counted precisely;
+// a failed group rolls back and is never reported as a completed batch.
+int db_purge_bad(Db *d, Vec *rows, int *done, ItemHasName has, ItemStackLim lim, void *hctx, Err err) {
+    if (done) *done = 0;
+    int ok = 1, count = 0;
+    u8 *handled = (u8 *)calloc((size_t)(rows->n > 0 ? rows->n : 1), 1);
+    if (!handled) { snprintf(err, ERRBUF, "清理内存分配失败"); return 0; }
+    for (int i = 0; ok && i < rows->n; i++) {
+        const ScanRow *r = VEC_AT(rows, ScanRow, i);
+        if (handled[i]) continue;
+        if (db_cancelled()) { snprintf(err, ERRBUF, "已取消，后续未清理"); ok = 0; break; }
+        int cleared = 1;
+        if (r->kind == 0) ok = purge_container(d, rows, i, handled, &cleared, has, lim, hctx, err);
+        else if (r->kind == 1 || r->kind == 2) {
+            TabOrphan row = {0}; row.cno = r->cno; row.mid = r->mid;
+            row.avatar = r->kind == 1; row.ui_id = r->key; row.it_id = r->id;
+            ok = db_del_tab_orphan(d, &row, has, hctx, err);
+        } else if (r->kind == 3) ok = purge_mail(d, r, has, hctx, err);
+        else { snprintf(err, ERRBUF, "未知清理记录，未写入"); ok = 0; }
+        if (ok) count += cleared;
     }
     free(handled);
-    if (done) *done = ok_n;
-    return 1;
+    if (done) *done = count;
+    return ok;
 }
 
 // ---------------- 宠物 / 时装表内错误记录 ----------------
@@ -1914,7 +1977,7 @@ int db_scan_tab_orphan(Db *d, Vec *out, ItemHasName has, void *hctx, Err err) {
     vec_clear(out);
     Str s = {0};
     MyResult ch = {0};
-    str_cat(&s, "SELECT charac_no,charac_name,delete_flag FROM taiwan_cain.charac_info ORDER BY charac_no");
+    str_cat(&s, "SELECT charac_no,charac_name,delete_flag,m_id FROM taiwan_cain.charac_info ORDER BY charac_no");
     if (!select1(d, &s, &ch)) { snprintf(err, ERRBUF, "%s", d->err); str_free(&s); return 0; }
     str_clear(&s);
 
@@ -1945,6 +2008,7 @@ int db_scan_tab_orphan(Db *d, Vec *out, ItemHasName has, void *hctx, Err err) {
             TabOrphan *o = VEC_ADD(out, TabOrphan);
             memset(o, 0, sizeof(*o));
             o->cno = cno;
+            if (f >= 0) o->mid = (u32)my_u64(&ch, f, 3, 0);
             if (f >= 0) cp_game_text(o->cname, sizeof(o->cname), &ch, f, 1);
             o->avatar = avatar;
             o->ui_id = ui;
@@ -1962,12 +2026,29 @@ fail:
     return 0;
 }
 
-int db_del_tab_orphan(Db *d, int avatar, u64 ui_id, Err err) {
-    Str s = {0};
-    str_catf(&s, "DELETE FROM taiwan_cain_2nd.%s WHERE ui_id=%llu",
-             avatar ? "user_items" : "creature_items", (unsigned long long)ui_id);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+int db_del_tab_orphan(Db *d, const TabOrphan *row, ItemHasName has, void *hctx, Err err) {
+    const char *table = row->avatar ? "taiwan_cain_2nd.user_items" : "taiwan_cain_2nd.creature_items";
+    int orphan = 0;
+    if (!row->ui_id || !row->it_id) { snprintf(err, ERRBUF, "空记录不能按错误物品删除"); return 0; }
+    if (!cleanup_begin(d, row->cno, row->mid, table, 1, &orphan, err)) return 0;
+    Str s = {0}; MyResult r = {0};
+    str_catf(&s, "SELECT charac_no,it_id FROM %s WHERE ui_id=%llu FOR UPDATE", table, (unsigned long long)row->ui_id);
+    int ok = select1(d, &s, &r) && r.nrow == 1 && my_u64(&r, 0, 0, 0) == row->cno &&
+        my_u64(&r, 0, 1, 0) == row->it_id && (orphan || (has && !has(row->it_id, hctx)));
+    if (!ok) snprintf(err, ERRBUF, "物品归属、编号或校验结果已变化，未删除；请重新扫描");
+    my_free(&r); str_clear(&s);
+    if (ok) {
+        str_catf(&s, "DELETE FROM %s WHERE ui_id=%llu AND charac_no=%u AND it_id=%u", table,
+                 (unsigned long long)row->ui_id, row->cno, row->it_id);
+        ok = run(d, &s); str_clear(&s);
+        if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    }
+    if (ok) {
+        str_catf(&s, "SELECT ui_id FROM %s WHERE ui_id=%llu FOR UPDATE", table, (unsigned long long)row->ui_id);
+        ok = select1(d, &s, &r) && r.nrow == 0;
+        if (!ok) snprintf(err, ERRBUF, "删除错误物品回读不一致，已回滚");
+    }
+    if (!ok) db_tx_rollback(d);
+    else ok = db_tx_commit(d, err);
+    my_free(&r); str_free(&s); return ok;
 }

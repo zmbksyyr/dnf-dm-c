@@ -1116,7 +1116,11 @@ int ui_dlg_run(HWND dlg, HWND owner) {
     g_dlg_top = d;
     MSG m;
     while (d->running) {
-        if (GetMessageW(&m, NULL, 0, 0) <= 0) break;
+        int received = (int)GetMessageW(&m, NULL, 0, 0);
+        if (received <= 0) {
+            if (!received) PostQuitMessage((int)m.wParam);
+            break;
+        }
         if (!IsDialogMessageW(dlg, &m)) {
             TranslateMessage(&m);
             DispatchMessageW(&m);

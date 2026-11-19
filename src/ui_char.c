@@ -435,7 +435,7 @@ static u32 scan_stack_lim(u32 id, void *ctx) {
 
 static int scan_work(void *ctx, Err err) {
     (void)ctx;
-    int ok = db_scan_bad(&g.db, &s_scan, &s_scan_chars, scan_has_name, scan_stack_lim, NULL, err);
+    int ok = db_scan_bad(&g.db, &s_scan, &s_scan_chars, g.pvf_ok ? scan_has_name : NULL, scan_stack_lim, NULL, err);
     // 收尾自己放开闸：窗口关掉之后没有 WM_TIMER 来收，外面谁也判断不了它是否还在
     // 往 s_scan 里追加，只有这里知道「这一轮确实写完了」。
     InterlockedExchange(&s_scan_live, 0);
@@ -445,10 +445,10 @@ static int scan_work(void *ctx, Err err) {
 static int purge_work(void *ctx, Err err) {
     (void)ctx;
     int done = 0;
-    db_purge_bad(&g.db, &s_scan, &done, err);
+    int ok = db_purge_bad(&g.db, &s_scan, &done, g.pvf_ok ? scan_has_name : NULL, scan_stack_lim, NULL, err);
     InterlockedExchange(&s_scan_live, 0);       // 同上：清除也会改写 s_scan
-    app_log("清除错误物品 · 完成 %d 处", done);
-    return 1;
+    app_log("清除错误物品 · 已完成 %d 处%s", done, ok ? "" : "，其余未完成，详见失败记录");
+    return ok;
 }
 
 static void scan_run(void) {
@@ -517,7 +517,7 @@ static LRESULT scan_proc(HWND d, UINT m, WPARAM wp, LPARAM lp, void *ctx) {
             s_scan_busy = 0;
             if (s_phase) {                       // 清除完，自动复扫一遍看结果
                 s_phase = 0;
-                ui_text(s_sinfo, "清除完成，正在重新扫描…");
+                ui_text(s_sinfo, "清除操作已结束，正在重新扫描（结果见日志）…");
                 scan_run();
             } else {
                 scan_fill();
