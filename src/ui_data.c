@@ -261,10 +261,10 @@ static int pet_work(void *ctx, Err err) {
     }
     if (!db_require_offline(&g.db, who.mid, err)) return 0;
     switch (c->kind) {
-        case D_PETNAME: return db_set_pet_name(&g.db, c->ui_id, c->s, err);
-        case D_PETFULL: return db_set_pet_full(&g.db, c->ui_id, err);
-        case D_PETEXPIRE: return db_set_pet_expire(&g.db, c->ui_id, err);
-        case D_PETDEL: return db_delete_pet(&g.db, c->ui_id, err);
+        case D_PETNAME: return db_set_pet_name(&g.db, &who, c->ui_id, c->s, err);
+        case D_PETFULL: return db_set_pet_full(&g.db, &who, c->ui_id, err);
+        case D_PETEXPIRE: return db_set_pet_expire(&g.db, &who, c->ui_id, err);
+        case D_PETDEL: return db_delete_pet(&g.db, &who, c->ui_id, err);
     }
     return 0;
 }
@@ -283,7 +283,8 @@ static void pet_fill(void) {
         ui_row_add(p_list, cells, 6, (LPARAM)i);
     }
     ui_batch(p_list, 0);
-    ui_text(p_info, fmt_new("%s · 共 %d 只宠物", g.cur.name, g.pets.n));
+    ui_text(p_info, fmt_new("%s · 共 %d 只宠物%s", g.cur.name, g.pets.n,
+                           g.cur.online ? " · 修改请先退出游戏" : ""));
 }
 
 static void pet_reload(Page *p) {
@@ -332,27 +333,27 @@ static LRESULT pet_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             dc.kind = D_PETNAME;
             dc.ui_id = r->ui_id;
             snprintf(dc.s, sizeof(dc.s), "%s", nm);
-            g.pets.n = 0;
+            g.lists_ready &= ~(u32)L_PETS;
             data_act("宠物改名", pet_work);
             return 0;
         }
         case P_FULL:
             dc.kind = D_PETFULL;
             dc.ui_id = r->ui_id;
-            g.pets.n = 0;
+            g.lists_ready &= ~(u32)L_PETS;
             data_act("宠物满饱食", pet_work);
             return 0;
         case P_EXPIRE:
             dc.kind = D_PETEXPIRE;
             dc.ui_id = r->ui_id;
-            g.pets.n = 0;
+            g.lists_ready &= ~(u32)L_PETS;
             data_act("宠物续期", pet_work);
             return 0;
         case P_DEL:
             if (!app_confirm(fmt_new("删除宠物「%s」？", r->name))) return 0;
             dc.kind = D_PETDEL;
             dc.ui_id = r->ui_id;
-            g.pets.n = 0;
+            g.lists_ready &= ~(u32)L_PETS;
             data_act("删除宠物", pet_work);
             return 0;
     }
@@ -385,9 +386,10 @@ static void pet_layout(Page *p, int w, int h) {
 
 static void pet_lock(Page *p) {
     (void)p;
-    int on = g.char_ok;
-    int ids[] = {P_NAME, P_RENAME, P_FULL, P_EXPIRE, P_DEL, P_REFRESH, P_BAD};
-    for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
+    int read_ids[] = {P_LIST, P_REFRESH, P_BAD};
+    int edit_ids[] = {P_NAME, P_RENAME, P_FULL, P_EXPIRE, P_DEL};
+    for (int i = 0; i < COUNT_OF(read_ids); i++) ui_enable(GetDlgItem(p->wnd, read_ids[i]), g.char_ok);
+    for (int i = 0; i < COUNT_OF(edit_ids); i++) ui_enable(GetDlgItem(p->wnd, edit_ids[i]), g.char_ok && !g.cur.online);
 }
 
 static void pet_build(HWND parent) {
@@ -435,9 +437,9 @@ static int ava_work(void *ctx, Err err) {
     }
     if (!db_require_offline(&g.db, who.mid, err)) return 0;
     switch (c->kind) {
-        case D_AVAHIDE: return db_set_avatar_hidden(&g.db, c->ui_id, (int)c->s[0], err);
-        case D_AVAEXPIRE: return db_set_avatar_expire(&g.db, c->ui_id, err);
-        case D_AVADEL: return db_delete_avatar(&g.db, c->ui_id, err);
+        case D_AVAHIDE: return db_set_avatar_hidden(&g.db, &who, c->ui_id, (int)c->s[0], err);
+        case D_AVAEXPIRE: return db_set_avatar_expire(&g.db, &who, c->ui_id, err);
+        case D_AVADEL: return db_delete_avatar(&g.db, &who, c->ui_id, err);
     }
     return 0;
 }
@@ -456,7 +458,8 @@ static void ava_fill(void) {
         ui_row_add(a_list, cells, 4, (LPARAM)i);
     }
     ui_batch(a_list, 0);
-    ui_text(a_info, fmt_new("%s · 共 %d 件时装", g.cur.name, g.avatars.n));
+    ui_text(a_info, fmt_new("%s · 共 %d 件时装%s", g.cur.name, g.avatars.n,
+                           g.cur.online ? " · 修改请先退出游戏" : ""));
 }
 
 static void ava_reload(Page *p) {
@@ -501,20 +504,20 @@ static LRESULT ava_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
             dc.kind = D_AVAHIDE;
             dc.ui_id = r->ui_id;
             dc.s[0] = (char)(r->hidden ? 0 : 1);
-            g.avatars.n = 0;
+            g.lists_ready &= ~(u32)L_AVAS;
             data_act("切换显示", ava_work);
             return 0;
         case A_EXPIRE:
             dc.kind = D_AVAEXPIRE;
             dc.ui_id = r->ui_id;
-            g.avatars.n = 0;
+            g.lists_ready &= ~(u32)L_AVAS;
             data_act("时装续期", ava_work);
             return 0;
         case A_DEL:
             dc.ui_id = r->ui_id;          // 弹框前取走，之后不再读 r
             if (!app_confirm("删除这件时装？")) return 0;
             dc.kind = D_AVADEL;
-            g.avatars.n = 0;
+            g.lists_ready &= ~(u32)L_AVAS;
             data_act("删除时装", ava_work);
             return 0;
     }
@@ -539,9 +542,10 @@ static void ava_layout(Page *p, int w, int h) {
 
 static void ava_lock(Page *p) {
     (void)p;
-    int on = g.char_ok;
-    int ids[] = {A_REFRESH, A_HIDE, A_EXPIRE, A_DEL, A_LIST, A_BAD};
-    for (int i = 0; i < COUNT_OF(ids); i++) ui_enable(GetDlgItem(p->wnd, ids[i]), on);
+    int read_ids[] = {A_REFRESH, A_LIST, A_BAD};
+    int edit_ids[] = {A_HIDE, A_EXPIRE, A_DEL};
+    for (int i = 0; i < COUNT_OF(read_ids); i++) ui_enable(GetDlgItem(p->wnd, read_ids[i]), g.char_ok);
+    for (int i = 0; i < COUNT_OF(edit_ids); i++) ui_enable(GetDlgItem(p->wnd, edit_ids[i]), g.char_ok && !g.cur.online);
 }
 
 static void ava_build(HWND parent) {

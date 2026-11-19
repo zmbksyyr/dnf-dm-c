@@ -305,66 +305,88 @@ int db_list_pets(Db *d, const Charac *c, Vec *out, Err err) {
     return 1;
 }
 
-int db_set_pet_name(Db *d, u32 ui_id, const char *name, Err err) {
+// Lock the login row (or its gap), character and item until the edit commits.
+// The UI snapshot alone cannot protect against login or ownership changes.
+static int companion_edit(Db *d, const Charac *c, u32 ui_id, int avatar,
+                          const char *field, const char *value, Err err) {
+    if (!c->no || !c->mid || !ui_id) {
+        snprintf(err, ERRBUF, "宠物／时装修改缺少角色、账号或物品编号"); return 0;
+    }
+    const char *table = avatar ? "user_items" : "creature_items";
+    Str s = {0}; MyResult r = {0};
+    str_catf(&s, "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE='InnoDB' AND "
+        "((TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME='charac_info') "
+        "OR (TABLE_SCHEMA='taiwan_login' AND TABLE_NAME='login_account_3') "
+        "OR (TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME='%s'))", table);
+    int ok = select1(d, &s, &r) && my_u64(&r, 0, 0, 0) == 3;
+    my_free(&r); str_clear(&s);
+    if (!ok) { snprintf(err, ERRBUF, "宠物／时装修改需要 InnoDB 角色、登录和物品表，未写入"); goto finish; }
+    if (!d->tx_depth) {
+        str_cat(&s, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+        ok = run(d, &s); str_clear(&s);
+        if (!ok) { snprintf(err, ERRBUF, "%s", d->err); goto finish; }
+    }
+    if (!db_tx_begin(d, err)) { ok = 0; goto finish; }
+    str_catf(&s, "SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%u FOR UPDATE", c->mid);
+    ok = select1(d, &s, &r);
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    else if (r.nrow && my_i64(&r, 0, 0, -1) != 0) {
+        snprintf(err, ERRBUF, "账号在线或正在退出，请先退出游戏后修改宠物／时装，未写入"); ok = 0;
+    }
+    my_free(&r); str_clear(&s);
+    if (ok) {
+        str_catf(&s, "SELECT m_id,delete_flag FROM taiwan_cain.charac_info WHERE charac_no=%u FOR UPDATE", c->no);
+        ok = select1(d, &s, &r) && r.nrow == 1 && my_u64(&r, 0, 0, 0) == c->mid && my_i64(&r, 0, 1, 1) == 0;
+        if (!ok) snprintf(err, ERRBUF, "未写入：角色不存在、已删除或账号归属变化");
+        my_free(&r); str_clear(&s);
+    }
+    if (ok) {
+        str_catf(&s, "SELECT charac_no FROM taiwan_cain_2nd.%s WHERE ui_id=%u FOR UPDATE", table, ui_id);
+        ok = select1(d, &s, &r) && r.nrow == 1 && my_u64(&r, 0, 0, 0) == c->no;
+        if (!ok) snprintf(err, ERRBUF, "未写入：所选物品不存在或已不属于当前角色，请刷新");
+        my_free(&r); str_clear(&s);
+    }
+    if (ok) {
+        if (field) str_catf(&s, "UPDATE taiwan_cain_2nd.%s SET %s=%s WHERE ui_id=%u AND charac_no=%u", table, field, value, ui_id, c->no);
+        else str_catf(&s, "DELETE FROM taiwan_cain_2nd.%s WHERE ui_id=%u AND charac_no=%u", table, ui_id, c->no);
+        ok = run(d, &s); str_clear(&s);
+        if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    }
+    if (ok) {
+        if (field) str_catf(&s, "SELECT BINARY %s=BINARY %s FROM taiwan_cain_2nd.%s WHERE ui_id=%u AND charac_no=%u FOR UPDATE", field, value, table, ui_id, c->no);
+        else str_catf(&s, "SELECT ui_id FROM taiwan_cain_2nd.%s WHERE ui_id=%u FOR UPDATE", table, ui_id);
+        ok = select1(d, &s, &r) && (field ? (r.nrow == 1 && my_i64(&r, 0, 0, 0) == 1) : r.nrow == 0);
+        if (!ok) snprintf(err, ERRBUF, "宠物／时装修改回读不一致，已回滚");
+    }
+    if (!ok) db_tx_rollback(d);
+    else ok = db_tx_commit(d, err);
+finish:
+    my_free(&r); str_free(&s); return ok;
+}
+
+int db_set_pet_name(Db *d, const Charac *c, u32 ui_id, const char *name, Err err) {
     if (!name || strlen(name) > 12 || !utf8_valid((const u8 *)name, (int)strlen(name))) {
         snprintf(err, ERRBUF, "宠物名最多 12 字节，且必须为 UTF-8 文字");
         return 0;
     }
     if (!set_names(d, db_cs_name(d->charset))) { snprintf(err, ERRBUF, "%s", d->err); return 0; }
-    if (!db_tx_begin(d, err)) return 0;
-    Str s = {0}, value = {0};
+    Str value = {0};
     game_text_literal(&value, name);
-    str_catf(&s, "UPDATE taiwan_cain_2nd.creature_items SET name=%s WHERE ui_id=%u", str_c(&value), ui_id);
+    int ok = companion_edit(d, c, ui_id, 0, "name", str_c(&value), err);
     str_free(&value);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) {
-        snprintf(err, ERRBUF, "%s", d->err);
-        db_tx_rollback(d);
-        return 0;
-    }
-    char got[64] = "";
-    Str q = {0};
-    MyResult r = {0};
-    str_catf(&q, "SELECT name FROM taiwan_cain_2nd.creature_items WHERE ui_id=%u", ui_id);
-    if (select1(d, &q, &r) && r.nrow) cp_game_text(got, sizeof(got), &r, 0, 0);
-    my_free(&r);
-    str_free(&q);
-    if (strcmp(got, name) != 0) {
-        snprintf(err, ERRBUF, "名字没有按原样落库（库里是「%s」），可能超长，已回滚", got);
-        db_tx_rollback(d);
-        return 0;
-    }
-    return db_tx_commit(d, err);
-}
-
-int db_set_pet_full(Db *d, u32 ui_id, Err err) {
-    Str s = {0};
-    str_catf(&s, "UPDATE taiwan_cain_2nd.creature_items SET stomach=100 WHERE ui_id=%u", ui_id);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
     return ok;
 }
 
-int db_set_pet_expire(Db *d, u32 ui_id, Err err) {
-    Str s = {0};
-    str_catf(&s,
-             "UPDATE taiwan_cain_2nd.creature_items SET expire_date='9999-12-31 23:59:59' WHERE ui_id=%u",
-             ui_id);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+int db_set_pet_full(Db *d, const Charac *c, u32 ui_id, Err err) {
+    return companion_edit(d, c, ui_id, 0, "stomach", "100", err);
 }
 
-int db_delete_pet(Db *d, u32 ui_id, Err err) {
-    Str s = {0};
-    str_catf(&s, "DELETE FROM taiwan_cain_2nd.creature_items WHERE ui_id=%u", ui_id);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+int db_set_pet_expire(Db *d, const Charac *c, u32 ui_id, Err err) {
+    return companion_edit(d, c, ui_id, 0, "expire_date", "'9999-12-31 23:59:59'", err);
+}
+
+int db_delete_pet(Db *d, const Charac *c, u32 ui_id, Err err) {
+    return companion_edit(d, c, ui_id, 0, NULL, NULL, err);
 }
 
 int db_list_avatars(Db *d, const Charac *c, Vec *out, Err err) {
@@ -387,31 +409,18 @@ int db_list_avatars(Db *d, const Charac *c, Vec *out, Err err) {
     return 1;
 }
 
-int db_set_avatar_hidden(Db *d, u32 ui_id, int hidden, Err err) {
-    Str s = {0};
-    str_catf(&s, "UPDATE taiwan_cain_2nd.user_items SET hidden_option=%d WHERE ui_id=%u", hidden, ui_id);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+int db_set_avatar_hidden(Db *d, const Charac *c, u32 ui_id, int hidden, Err err) {
+    if (hidden < 0 || hidden > 65535) { snprintf(err, ERRBUF, "时装选项超出 0..65535，未写入"); return 0; }
+    char value[16]; snprintf(value, sizeof(value), "%d", hidden);
+    return companion_edit(d, c, ui_id, 1, "hidden_option", value, err);
 }
 
-int db_set_avatar_expire(Db *d, u32 ui_id, Err err) {
-    Str s = {0};
-    str_catf(&s, "UPDATE taiwan_cain_2nd.user_items SET expire_date='9999-12-31 23:59:59' WHERE ui_id=%u", ui_id);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+int db_set_avatar_expire(Db *d, const Charac *c, u32 ui_id, Err err) {
+    return companion_edit(d, c, ui_id, 1, "expire_date", "'9999-12-31 23:59:59'", err);
 }
 
-int db_delete_avatar(Db *d, u32 ui_id, Err err) {
-    Str s = {0};
-    str_catf(&s, "DELETE FROM taiwan_cain_2nd.user_items WHERE ui_id=%u", ui_id);
-    int ok = run(d, &s);
-    str_free(&s);
-    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+int db_delete_avatar(Db *d, const Charac *c, u32 ui_id, Err err) {
+    return companion_edit(d, c, ui_id, 1, NULL, NULL, err);
 }
 
 // ---------------- 任务 ----------------

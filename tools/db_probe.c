@@ -75,7 +75,21 @@ static int run_probe(int argc, char **argv) {
     Charac c = {0};
     if (argc > 2) c.no = (u32)strtoul(argv[2], NULL, 10);
     if (argc > 3) c.mid = (u32)strtoul(argv[3], NULL, 10);
-    if (!strcmp(argv[1], "dump") && argc == 3) {
+    if (!strcmp(argv[1], "pet-name") && argc == 6) {
+        ok = db_set_pet_name(&d, &c, (u32)strtoul(argv[4], NULL, 10), argv[5], err);
+    } else if (!strcmp(argv[1], "pet-full") && argc == 5) {
+        ok = db_set_pet_full(&d, &c, (u32)strtoul(argv[4], NULL, 10), err);
+    } else if (!strcmp(argv[1], "pet-expire") && argc == 5) {
+        ok = db_set_pet_expire(&d, &c, (u32)strtoul(argv[4], NULL, 10), err);
+    } else if (!strcmp(argv[1], "pet-delete") && argc == 5) {
+        ok = db_delete_pet(&d, &c, (u32)strtoul(argv[4], NULL, 10), err);
+    } else if (!strcmp(argv[1], "avatar-hidden") && argc == 6) {
+        ok = db_set_avatar_hidden(&d, &c, (u32)strtoul(argv[4], NULL, 10), atoi(argv[5]), err);
+    } else if (!strcmp(argv[1], "avatar-expire") && argc == 5) {
+        ok = db_set_avatar_expire(&d, &c, (u32)strtoul(argv[4], NULL, 10), err);
+    } else if (!strcmp(argv[1], "avatar-delete") && argc == 5) {
+        ok = db_delete_avatar(&d, &c, (u32)strtoul(argv[4], NULL, 10), err);
+    } else if (!strcmp(argv[1], "dump") && argc == 3) {
         ok = db_dump_sql(&d, argv[2], &nt, &nr, err);
     } else if (!strcmp(argv[1], "restore") && argc == 3) {
         ok = db_restore_sql(&d, argv[2], &nt, err);

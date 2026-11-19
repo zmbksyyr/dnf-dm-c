@@ -1165,6 +1165,8 @@ def charset_mail_pet(ctx):
             ctx.check("宠物名存储字符数=12", r[2], len(PET_NAME.encode("utf8")))
             ctx.check("宠物名存储 UTF-8 字节数=27", r[3], len(core.game_storage(PET_NAME).encode("utf8")))
             ctx.ok("宠物名按原 ELF 约定解码", core.game_text(r[0]) == PET_NAME, "hex=%s" % r[1][:80])
+            want = ctx.q1("SELECT COUNT(*) FROM taiwan_cain_2nd.creature_items WHERE charac_no=%s", (cno,))
+            ctx.check("改名后自动重载宠物列表", _wait_list_rows(ctx, "pet", want), want)
     finally:
         if sent_id is not None:
             ctx.cur.execute("DELETE FROM taiwan_cain_2nd.letter WHERE letter_id=%s", (sent_id,))

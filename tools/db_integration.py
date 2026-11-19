@@ -206,6 +206,158 @@ class DataTests(unittest.TestCase):
             self.assertEqual(self.one("SELECT COUNT(*) FROM taiwan_cain_2nd.user_items WHERE ui_id=%s", (ui,)), 0)
             self.assertEqual(self.one("SELECT delete_flag FROM taiwan_cain_2nd.postal WHERE postal_id=%s", (postal,)), 1)
 
+    @contextlib.contextmanager
+    def companions(self):
+        tables = ('creature_items', 'user_items')
+        counters = [self.one("SELECT AUTO_INCREMENT FROM information_schema.TABLES "
+                             "WHERE TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME=%s", (t,)) for t in tables]
+        ids = []
+        try:
+            for table, item in zip(tables, (63000, 1970031)):
+                self.cur.execute('INSERT INTO taiwan_cain_2nd.' + table +
+                                 " (charac_no,it_id,expire_date,reg_date,stat) VALUES (%s,%s,'2030-01-01',NOW(),0)",
+                                 (TEST_NO, item))
+                ids.append(self.cur.lastrowid)
+            yield ids
+        finally:
+            for table, ui in zip(tables, ids):
+                self.cur.execute('DELETE FROM taiwan_cain_2nd.' + table + ' WHERE ui_id=%s', (ui,))
+            for table, counter in zip(tables, counters):
+                if counter:
+                    self.cur.execute('ALTER TABLE taiwan_cain_2nd.' + table + ' AUTO_INCREMENT=' + str(counter))
+
+    def companion_commands(self, ids):
+        pet, avatar = ids
+        return [('pet-name', pet, '\u6d4b\u8bd5\u5ba0\u7269'), ('pet-full', pet),
+                ('pet-expire', pet), ('avatar-hidden', avatar, 1), ('avatar-expire', avatar),
+                ('pet-delete', pet), ('avatar-delete', avatar)]
+
+    def companion_rows(self, ids):
+        rows = []
+        for table, ui in zip(('creature_items', 'user_items'), ids):
+            self.cur.execute('SELECT * FROM taiwan_cain_2nd.' + table + ' WHERE ui_id=%s', (ui,))
+            rows.append(dict(zip([c[0] for c in self.cur.description], self.cur.fetchone())))
+        return rows
+
+    def test_companion_offline_edits_and_idempotence(self):
+        for mode in ('', 'STRICT_TRANS_TABLES'):
+            with self.subTest(mode=mode), self.offline_character(), self.companions() as ids:
+                original = self.companion_rows(ids)
+                for cmd, ui, *args in self.companion_commands(ids)[:5]:
+                    for _ in range(2):
+                        r = self.probe(cmd, TEST_NO, TEST_NO, ui, *args, mode=mode)
+                        self.assertEqual(r.returncode, 0, r.stderr)
+                got = self.companion_rows(ids)
+                self.assertEqual(got[0]['stomach'], 100)
+                self.assertEqual(got[1]['hidden_option'], 1)
+                self.assertEqual(self.one('SELECT HEX(CONVERT(name USING latin1)) FROM '
+                                         'taiwan_cain_2nd.creature_items WHERE ui_id=%s', (ids[0],)),
+                                 '\u6d4b\u8bd5\u5ba0\u7269'.encode().hex().upper())
+                for index, row in enumerate(got):
+                    changed = {'expire_date', 'name', 'stomach'} if index == 0 else {'expire_date', 'hidden_option'}
+                    self.assertEqual(str(row['expire_date']), '9999-12-31 23:59:59')
+                    self.assertEqual({k: v for k, v in row.items() if k not in changed},
+                                     {k: v for k, v in original[index].items() if k not in changed})
+                for cmd, ui in self.companion_commands(ids)[5:]:
+                    self.assertEqual(self.probe(cmd, TEST_NO, TEST_NO, ui, mode=mode).returncode, 0)
+                    self.assertNotEqual(self.probe(cmd, TEST_NO, TEST_NO, ui, mode=mode).returncode, 0)
+
+    def test_companion_rejects_stale_ownership_online_deleted_and_missing(self):
+        with self.offline_character(), self.companions() as ids:
+            for case in ('online', 'leaving', 'wrong_account', 'wrong_character', 'deleted', 'transferred', 'missing'):
+                with self.subTest(case=case):
+                    status = 1 if case == 'online' else 2 if case == 'leaving' else 0
+                    self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s', (status, TEST_NO))
+                    self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=%s WHERE charac_no=%s', (int(case == 'deleted'), TEST_NO))
+                    for table, ui in zip(('creature_items', 'user_items'), ids):
+                        self.cur.execute('UPDATE taiwan_cain_2nd.' + table + ' SET charac_no=%s WHERE ui_id=%s',
+                                         (TEST_NO - 1 if case == 'transferred' else TEST_NO, ui))
+                    before = self.companion_rows(ids)
+                    for cmd, ui, *args in self.companion_commands(ids):
+                        r = self.probe(cmd, TEST_NO - 1 if case == 'wrong_character' else TEST_NO,
+                                       TEST_NO + 1 if case == 'wrong_account' else TEST_NO,
+                                       2147483647 if case == 'missing' else ui, *args)
+                        self.assertNotEqual(r.returncode, 0, (case, cmd, r.stdout))
+                        self.assertEqual(self.companion_rows(ids), before)
+
+    def test_companion_faults_and_readback_roll_back(self):
+        with self.offline_character(), self.companions() as ids:
+            before = self.companion_rows(ids)
+            for cmd, ui, *args in self.companion_commands(ids):
+                table = 'creature_items' if cmd.startswith('pet-') else 'user_items'
+                event = 'DELETE' if cmd.endswith('delete') else 'UPDATE'
+                with self.subTest(command=cmd), self.trigger('taiwan_cain_2nd.' + table, event,
+                        "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit companion failure'"):
+                    r = self.probe(cmd, TEST_NO, TEST_NO, ui, *args)
+                    self.assertNotEqual(r.returncode, 0)
+                    self.assertEqual(self.companion_rows(ids), before)
+            for cmd, ui, *args in self.companion_commands(ids)[:5]:
+                table = 'creature_items' if cmd.startswith('pet-') else 'user_items'
+                field = {'pet-name': 'name', 'pet-full': 'stomach', 'pet-expire': 'expire_date',
+                         'avatar-hidden': 'hidden_option', 'avatar-expire': 'expire_date'}[cmd]
+                with self.subTest(readback=cmd), self.trigger('taiwan_cain_2nd.' + table, 'UPDATE',
+                        'SET NEW.' + field + '=OLD.' + field):
+                    r = self.probe(cmd, TEST_NO, TEST_NO, ui, *args)
+                    self.assertNotEqual(r.returncode, 0)
+                    self.assertEqual(self.companion_rows(ids), before)
+
+    def test_companion_invalid_values_preserve_rows(self):
+        with self.offline_character(), self.companions() as ids:
+            before = self.companion_rows(ids)
+            for cmd, ui, value in [('pet-name', ids[0], 'x' * 13),
+                                  ('avatar-hidden', ids[1], -1), ('avatar-hidden', ids[1], 65536)]:
+                r = self.probe(cmd, TEST_NO, TEST_NO, ui, value)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual(self.companion_rows(ids), before)
+
+    def test_companion_login_lock_covers_item_wait_and_absent_login_row(self):
+        for absent in (False, True):
+            for index, command in enumerate(('pet-full', 'avatar-hidden')):
+                with self.subTest(absent=absent, command=command), self.offline_character(), self.companions() as ids:
+                    if absent:
+                        self.cur.execute('DELETE FROM taiwan_login.login_account_3 WHERE m_id=%s', (TEST_NO,))
+                    table = ('creature_items', 'user_items')[index]
+                    params = dict(host=self.params['host'], port=int(self.params['port']),
+                                  user=self.params['user'], password=self.params['pwd'], autocommit=True)
+                    lock = pymysql.connect(**params)
+                    login = pymysql.connect(**params)
+                    pending = None
+                    try:
+                        lock.begin()
+                        with lock.cursor() as q:
+                            q.execute('SELECT ui_id FROM taiwan_cain_2nd.' + table + ' WHERE ui_id=%s FOR UPDATE', (ids[index],))
+                        args = [command, TEST_NO, TEST_NO, ids[index]] + ([1] if index else [])
+                        env = dict(os.environ, **{'DNF_GM_TEST_' + k.upper(): v for k, v in self.params.items()})
+                        pending = subprocess.Popen([str(PROBE), *map(str, args)], env=env,
+                                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        deadline = time.monotonic() + 15
+                        while True:
+                            self.cur.execute('SHOW FULL PROCESSLIST')
+                            if any(row[7] and row[7].startswith('SELECT charac_no FROM taiwan_cain_2nd.' + table)
+                                   and 'ui_id=' + str(ids[index]) in row[7] for row in self.cur.fetchall()):
+                                break
+                            self.assertIsNone(pending.poll(), 'item edit exited before reaching lock')
+                            self.assertLess(time.monotonic(), deadline, 'item lock wait missing')
+                            time.sleep(.05)
+                        change = ('INSERT INTO taiwan_login.login_account_3 (m_id,login_status) VALUES (%s,1)' if absent
+                                  else 'UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s')
+                        with login.cursor() as q:
+                            q.execute('SET SESSION innodb_lock_wait_timeout=1')
+                            with self.assertRaises(pymysql.err.OperationalError) as blocked:
+                                q.execute(change, (TEST_NO,))
+                            self.assertEqual(blocked.exception.args[0], 1205)
+                        lock.commit()
+                        out, err = pending.communicate(timeout=20)
+                        self.assertEqual(pending.returncode, 0, (out, err))
+                        with login.cursor() as q:
+                            q.execute(change, (TEST_NO,))
+                        self.assertEqual(self.one('SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%s', (TEST_NO,)), 1)
+                    finally:
+                        lock.rollback()
+                        if pending is not None and pending.poll() is None:
+                            pending.kill(); pending.communicate(timeout=10)
+                        lock.close(); login.close()
+
     def test_mail_bulk_after_logout_deletes_all_attachments(self):
         with self.offline_character(), self.attachment() as first, self.attachment() as second:
             self.cur.execute("UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s", (TEST_NO,))

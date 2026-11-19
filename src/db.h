@@ -188,14 +188,14 @@ int  db_creature_ids(Db *d, Vec *out, Err err);
 
 // 宠物 / 时装
 int  db_list_pets(Db *d, const Charac *c, Vec *out, Err err);             // Vec<PetRow>
-int  db_set_pet_name(Db *d, u32 ui_id, const char *name, Err err);
-int  db_set_pet_full(Db *d, u32 ui_id, Err err);
-int  db_set_pet_expire(Db *d, u32 ui_id, Err err);
-int  db_delete_pet(Db *d, u32 ui_id, Err err);
+int  db_set_pet_name(Db *d, const Charac *c, u32 ui_id, const char *name, Err err);
+int  db_set_pet_full(Db *d, const Charac *c, u32 ui_id, Err err);
+int  db_set_pet_expire(Db *d, const Charac *c, u32 ui_id, Err err);
+int  db_delete_pet(Db *d, const Charac *c, u32 ui_id, Err err);
 int  db_list_avatars(Db *d, const Charac *c, Vec *out, Err err);          // Vec<AvatarRow>
-int  db_set_avatar_hidden(Db *d, u32 ui_id, int hidden, Err err);
-int  db_set_avatar_expire(Db *d, u32 ui_id, Err err);
-int  db_delete_avatar(Db *d, u32 ui_id, Err err);
+int  db_set_avatar_hidden(Db *d, const Charac *c, u32 ui_id, int hidden, Err err);
+int  db_set_avatar_expire(Db *d, const Charac *c, u32 ui_id, Err err);
+int  db_delete_avatar(Db *d, const Charac *c, u32 ui_id, Err err);
 
 // 任务
 int  db_list_quests(Db *d, const Charac *c, Vec *out, Err err);           // Vec<QuestRow>
