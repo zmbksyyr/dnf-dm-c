@@ -130,6 +130,8 @@ static int run_probe(int argc, char **argv) {
         ok = db_set_money(&d, &c, 1234567, err) && db_set_coin(&d, &c, 17, err) &&
              db_set_fatigue(&d, &c, err) && db_set_sp(&d, &c, 1234, 1234, 12, 12, err) &&
              db_set_qp(&d, &c, 34, err) && db_set_cera(&d, &c, 4567, 5678, err);
+    } else if (!strcmp(argv[1], "cera") && argc == 6) {
+        ok = db_set_cera(&d, &c, strtoull(argv[4], NULL, 10), strtoull(argv[5], NULL, 10), err);
     } else if (!strcmp(argv[1], "skill-points") && argc == 8) {
         ok = db_set_sp(&d, &c, atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), err);
     } else if (!strcmp(argv[1], "quest-points") && argc == 5) {
@@ -182,8 +184,8 @@ static int run_probe(int argc, char **argv) {
         if (argc == 11) { cfg.avatar = atoi(argv[9]); cfg.creature = atoi(argv[10]); }
         BubblePaid paid;
         ok = db_bubble_tick(&d, &cfg, &paid, err);
-        printf("paid_chars=%u paid_accounts=%u coin_rejected=%u coin_unknown=%u committed=%d\n",
-               paid.chars,paid.accounts,paid.coin_rejected,paid.coin_unknown,paid.committed);
+        printf("paid_chars=%u paid_accounts=%u coin_rejected=%u coin_unknown=%u billing_unconfirmed=%u committed=%d\n",
+               paid.chars,paid.accounts,paid.coin_rejected,paid.coin_unknown,paid.billing_unconfirmed,paid.committed);
     } else if (!strcmp(argv[1], "query") && argc == 3) {
         Buf f = {0};
         if (file_read(argv[2], &f)) {

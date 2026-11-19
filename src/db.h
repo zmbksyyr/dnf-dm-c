@@ -145,6 +145,7 @@ typedef struct {
 typedef struct {
     u32 chars, accounts;  // 已确认收到角色奖励 / 账号奖励的人数
     u32 coin_rejected, coin_unknown;
+    u32 billing_unconfirmed; // 账单已提交，但在线余额刷新未确认
     int committed;       // SQL 已提交后在线命令可能部分成功，不可声称整批回滚
 } BubblePaid;
 int  db_bubble_tick(Db *d, const BubbleCfg *cfg, BubblePaid *paid, Err err);

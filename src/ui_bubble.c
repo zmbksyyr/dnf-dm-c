@@ -26,6 +26,7 @@ static HWND b_info, b_sep, b_plan, b_box, b_box_rw, b_box_plan;
 static char s_info_last[192];   // 状态行每 tick 都被问一次，文字没变就不写（写一次就是一次重绘）
 static int  s_plan_ver = -1;    // 已填进列表的流水版本
 static int  s_last_target = -2; // 上次看到的目标人群，用来兜住「联动没跟上」
+static int  s_last_on = -1;     // 只同步已应用设置的变化，保留尚未应用的勾选
 
 // 生效时长下拉：可编辑，选项只是常用档；填 0 = 持续（不自动停）
 static const char *kBubDurLbl[] = {"0", "1", "3", "5", "7"};
@@ -75,6 +76,10 @@ static void bub_fit_cols(void) {
 }
 
 void page_bubble_pump(void) {
+    if (b_on && s_last_on != g.cfg.bubble_on) {
+        s_last_on = g.cfg.bubble_on;
+        SendMessageW(b_on, BM_SETCHECK, s_last_on ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
     bub_status_sync();
     // 目标 ID 的启用状态跟着目标人群走。正常情况下 WM_COMMAND 里已经同步过，
     // 这里再兜一道：从别处改配置、或者下拉的通知没进来时，也不会留下"选仅在线
@@ -261,6 +266,7 @@ static void bub_build(HWND parent) {
     ui_tip(parent, b_plan, "点一次「应用」是一条「等待发放」；之后每次结算追加一条结果，超过 20 条挤掉最旧的");
 
     // 初值来自 settings.ini
+    s_last_on = g.cfg.bubble_on;
     if (g.cfg.bubble_on) SendMessageW(b_on, BM_SETCHECK, BST_CHECKED, 0);
     ui_set_int(b_sec, g.cfg.bubble_sec >= 5 ? g.cfg.bubble_sec : 600);
     ui_combo_set(b_target, g.cfg.bubble_target < 0 || g.cfg.bubble_target > 3 ? 0 : g.cfg.bubble_target);

@@ -211,6 +211,11 @@ int db_bubble_tick(Db *d, const BubbleCfg *cfg, BubblePaid *paid, Err err) {
         bubble_coin(d,&chars,cfg->coin,&requests,&offline,err) &&
         bubble_currency(d, &accounts, "taiwan_billing.cash_cera", "cera", cfg->dpoint, 1, err) &&
         bubble_currency(d, &accounts, "taiwan_billing.cash_cera_point", "cera_point", cfg->dcoin, 2, err);
+    for(int i=0;ok && (cfg->dpoint || cfg->dcoin) && i<accounts.n;i++) {
+        OnlineCommand request;
+        ok=db_online_billing_submit(d,*(const u32 *)vec_at(&accounts,i),&request,err);
+        if(ok && request.token[0]) *VEC_ADD(&requests,OnlineCommand)=request;
+    }
     for (int i = 0; ok && cfg->item && i < chars.n; i++) {
         Charac c = {0};
         c.no = *(const u32 *)vec_at(&chars, i);
@@ -237,16 +242,17 @@ int db_bubble_tick(Db *d, const BubbleCfg *cfg, BubblePaid *paid, Err err) {
             OnlineCommand *request=vec_at(&requests,i);
             Err detail={0};
             if(db_online_finish(d,request,detail)) {
-                if(!cfg->item) result.chars++;
+                if(request->version!=6 && !cfg->item) result.chars++;
             } else {
                 if(!first[0]) snprintf(first,ERRBUF,"%s",detail);
-                if(request->rejected) result.coin_rejected++;
+                if(request->version==6) result.billing_unconfirmed++;
+                else if(request->rejected) result.coin_rejected++;
                 else result.coin_unknown++;
                 ok=0;
             }
         }
-        if(!ok) snprintf(err,ERRBUF,"部分奖励已提交：%u角色/%u账号已确认，复活币%u未执行/%u不确定；%s",
-            result.chars,result.accounts,result.coin_rejected,result.coin_unknown,first);
+        if(!ok) snprintf(err,ERRBUF,"部分奖励已提交：%u角色/%u账号已入账，复活币%u未执行/%u不确定，点券刷新%u未确认；勿重发整批；%s",
+            result.chars,result.accounts,result.coin_rejected,result.coin_unknown,result.billing_unconfirmed,first);
         if(paid) *paid=result;
     }
     vec_free(&chars);

@@ -21,13 +21,16 @@ static int online_submit(Db *d, const Charac *c, u32 amount, const u32 *extra, c
     if(!ok || strlen(request->token)!=32) goto failed;
     str_catf(&s,"INSERT INTO d_taiwan.dnf_gm_online_v%d "
         "(token,m_id,charac_no,operation,amount%s,created,expires,updated) ",version,
-        extra?",amount_sp2,amount_tp,amount_tp2":"");
+        version==6?",amount_point":extra?",amount_sp2,amount_tp,amount_tp2":"");
     if(c->no) {
         str_catf(&s,"SELECT '%s',c.m_id,c.charac_no,'%s',%u",request->token,operation,amount);
         if(extra) str_catf(&s,",%u,%u,%u",extra[0],extra[1],extra[2]);
         str_catf(&s,",NOW(6),DATE_ADD(NOW(6),INTERVAL 20 SECOND),NOW(6) "
             "FROM taiwan_cain.charac_info c WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 ",c->no,c->mid);
     }
+    else if(version==6) str_catf(&s,
+        "SELECT '%s',c.UID,0,'refresh_billing',%u,%u,NOW(6),DATE_ADD(NOW(6),INTERVAL 20 SECOND),NOW(6) "
+        "FROM d_taiwan.accounts c WHERE c.UID=%u ",request->token,amount,extra[0],c->mid);
     else str_catf(&s,
         "SELECT '%s',c.UID,0,'inspect',0,NOW(6),DATE_ADD(NOW(6),INTERVAL 20 SECOND),NOW(6) "
         "FROM d_taiwan.accounts c WHERE c.UID=%u ",request->token,c->mid);
@@ -79,8 +82,30 @@ int db_online_qp_submit(Db *d,const Charac *c,u32 qp,OnlineCommand *request,Err 
     return online_submit(d,c,qp,NULL,"set_quest_points",5,request,err);
 }
 
+// Called inside the billing transaction, after its writes. Keep the reload
+// request invisible to the game until those balances commit together.
+int db_online_billing_submit(Db *d,u32 mid,OnlineCommand *request,Err err) {
+    memset(request,0,sizeof(*request));
+    int online=0;
+    if(!db_account_online(d,mid,&online,err)) return 0;
+    if(!online) return 1; // The next login loads the committed billing balance.
+    Str s={0};MyResult r={0};
+    str_catf(&s,"SELECT COALESCE(c.cera,0),COALESCE(p.cera_point,0) FROM d_taiwan.accounts a "
+        "LEFT JOIN taiwan_billing.cash_cera c ON c.account=a.UID "
+        "LEFT JOIN taiwan_billing.cash_cera_point p ON p.account=a.UID WHERE a.UID=%u",mid);
+    int ok=select1(d,&s,&r);
+    if(!ok) snprintf(err,ERRBUF,"读取点券余额：%s",d->err);
+    else if(r.nrow!=1) {snprintf(err,ERRBUF,"点券账号不存在或账单记录不唯一");ok=0;}
+    u64 cera=ok?my_u64(&r,0,0,UINT64_MAX):0,point=ok?my_u64(&r,0,1,UINT64_MAX):0;
+    my_free(&r);str_free(&s);
+    if(ok && (cera>UINT32_MAX || point>UINT32_MAX)) {snprintf(err,ERRBUF,"点券余额超出游戏范围");ok=0;}
+    if(!ok) return 0;
+    Charac c={0};c.mid=mid;u32 extra[]={(u32)point};
+    return online_submit(d,&c,(u32)cera,extra,"refresh_billing",6,request,err);
+}
+
 int db_online_finish(Db *d, OnlineCommand *request, Err err) {
-    int version=request->version==5?5:request->version==4?4:request->version==3?3:request->version==2?2:1;
+    int version=request->version==6?6:request->version==5?5:request->version==4?4:request->version==3?3:request->version==2?2:1;
     Str s={0};MyResult r={0};
     u64 deadline=now_ms()+22000;
     int stopped=0,ok=0;
