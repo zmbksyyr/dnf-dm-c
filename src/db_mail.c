@@ -129,7 +129,44 @@ int db_delete_all_mails(Db *d, const Charac *c, Err err) {
     return delete_mail_where(d, where, err);
 }
 
-int db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *text, Err err) {
+static int mail_insert_id(Db *d, u64 *id, Err err);
+
+// A recipient can be online: the original game loads new mail from these
+// tables. Hold the character row so deletion/transfer cannot race the insert.
+static int mail_send_begin(Db *d, const Charac *c, int attachment, const char *item_table, Err err) {
+    if (!c->no) { snprintf(err, ERRBUF, "邮件收件角色无效，未发放"); return 0; }
+    Str s = {0}; MyResult r = {0};
+    str_cat(&s, "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE='InnoDB' AND "
+        "CONCAT(TABLE_SCHEMA,'.',TABLE_NAME) IN ('taiwan_cain.charac_info','taiwan_cain_2nd.letter'");
+    if (attachment) str_cat(&s, ",'taiwan_cain_2nd.postal'");
+    if (item_table) str_catf(&s, ",'taiwan_cain_2nd.%s'", item_table);
+    str_cat(&s, ")");
+    int ok = select1(d, &s, &r) && my_i64(&r, 0, 0, 0) == 2 + attachment + (item_table != NULL);
+    my_free(&r); str_clear(&s);
+    if (!ok) { snprintf(err, ERRBUF, "邮件发放需要 InnoDB 角色、正文及相关附件表，未发放"); goto finish; }
+    if (!db_tx_begin(d, err)) { ok = 0; goto finish; }
+    str_catf(&s, "SELECT m_id,delete_flag FROM taiwan_cain.charac_info WHERE charac_no=%u FOR UPDATE", c->no);
+    ok = select1(d, &s, &r) && r.nrow == 1 && my_u64(&r, 0, 0, 0) != 0 &&
+        (!c->mid || my_u64(&r, 0, 0, 0) == c->mid) && my_i64(&r, 0, 1, 1) == 0;
+    if (!ok) { snprintf(err, ERRBUF, "邮件未发放：收件角色不存在、已删除或账号归属变化"); db_tx_rollback(d); }
+finish:
+    my_free(&r); str_free(&s); return ok;
+}
+
+static int mail_letter_matches(Db *d, const Charac *c, u64 id, const char *sender, const char *text, Err err) {
+    Str s = {0}, from = {0}, body = {0}; MyResult r = {0};
+    game_text_literal(&from, sender ? sender : "GM");
+    game_text_literal(&body, text ? text : "");
+    str_catf(&s, "SELECT charac_no=%u AND send_charac_no=0 AND "
+        "BINARY send_charac_name=BINARY %s AND BINARY letter_text=BINARY %s AND stat=1 "
+        "FROM taiwan_cain_2nd.letter WHERE letter_id=%llu FOR UPDATE", c->no,
+        str_c(&from), str_c(&body), (unsigned long long)id);
+    int ok = select1(d, &s, &r) && r.nrow == 1 && my_i64(&r, 0, 0, 0) == 1;
+    if (!ok) snprintf(err, ERRBUF, "邮件正文回读不一致，已回滚");
+    my_free(&r); str_free(&s); str_free(&from); str_free(&body); return ok;
+}
+
+static int mail_insert_letter(Db *d, const Charac *c, const char *sender, const char *text, u64 *id, Err err) {
     const char *body = text ? text : "", *from = sender ? sender : "GM";
     if (strlen(body) > 255 || strlen(from) > 20 ||
         !utf8_valid((const u8 *)body, (int)strlen(body)) || !utf8_valid((const u8 *)from, (int)strlen(from))) {
@@ -156,7 +193,7 @@ int db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *te
     int ok = run(d, &s);
     str_free(&s);
     if (!ok) snprintf(err, ERRBUF, "%s", d->err);
-    return ok;
+    return ok && mail_insert_id(d, id, err);
 }
 
 static int mail_insert_id(Db *d, u64 *id, Err err) {
@@ -175,13 +212,26 @@ static int mail_insert_id(Db *d, u64 *id, Err err) {
     return ok;
 }
 
+int db_send_text_mail(Db *d, const Charac *c, const char *sender, const char *text, Err err) {
+    if (!mail_send_begin(d, c, 0, NULL, err)) return 0;
+    u64 id = 0;
+    if (!mail_insert_letter(d, c, sender, text, &id, err) ||
+        !mail_letter_matches(d, c, id, sender, text, err)) { db_tx_rollback(d); return 0; }
+    return db_tx_commit(d, err);
+}
+
 int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char *text,
                          const GrantItem *g, int avata_flag, int creature_flag, Err err) {
+    if (!g || !g->id || !g->num || (avata_flag != 0 && avata_flag != 1) ||
+        (creature_flag != 0 && creature_flag != 1) || (avata_flag && creature_flag) ||
+        ((avata_flag || creature_flag) && g->num != 1)) {
+        snprintf(err, ERRBUF, "邮件附件编号、数量或类型无效，未发放"); return 0;
+    }
     // 正文、附件行、postal 必须同生共死：附件先落库而 postal 失败会留下占格的孤儿行
-    if (!db_tx_begin(d, err)) return 0;
-    if (!db_send_text_mail(d, c, sender, text, err)) goto fail;
+    const char *item_table = avata_flag ? "user_items" : creature_flag ? "creature_items" : NULL;
+    if (!mail_send_begin(d, c, 1, item_table, err)) return 0;
     u64 letter_id = 0;
-    if (!mail_insert_id(d, &letter_id, err)) goto fail;
+    if (!mail_insert_letter(d, c, sender, text, &letter_id, err)) goto fail;
     // 正文已经设置会话字符集；使用本连接的插入编号，不猜测“最新一封”。
     Str es = {0};
     game_text_literal(&es, sender ? sender : "GM");
@@ -224,13 +274,43 @@ int db_send_item_mail_ex(Db *d, const Charac *c, const char *sender, const char 
              ts, str_c(&es), c->no, g->inc_type, g->inc_val, g->forge, g->seal, g->id,
              (unsigned long long)add_info, g->enhance,
              (unsigned long long)letter_id, avata_flag, creature_flag, g->dur);
-    str_free(&es);
     int ok = run(d, &s);
-    str_free(&s);
     if (!ok) {
         snprintf(err, ERRBUF, "%s", d->err);
-        goto fail;
+    } else {
+        u64 postal_id = 0;
+        ok = mail_insert_id(d, &postal_id, err);
+        if (ok) {
+            str_clear(&s);
+            str_catf(&s, "SELECT receive_charac_no=%u AND send_charac_no=0 AND "
+                "BINARY send_charac_name=BINARY %s AND amplify_option=%u AND amplify_value=%u "
+                "AND seperate_upgrade=%u AND seal_flag=%u AND item_id=%u AND add_info=%llu "
+                "AND upgrade=%u AND gold=0 AND letter_id=%llu AND avata_flag=%d AND creature_flag=%d "
+                "AND endurance=%u AND unlimit_flag=1 AND delete_flag=0 "
+                "FROM taiwan_cain_2nd.postal WHERE postal_id=%llu FOR UPDATE",
+                c->no, str_c(&es), g->inc_type, g->inc_val, g->forge, g->seal, g->id,
+                (unsigned long long)add_info, g->enhance, (unsigned long long)letter_id,
+                avata_flag, creature_flag, g->dur, (unsigned long long)postal_id);
+            MyResult r = {0};
+            ok = select1(d, &s, &r) && r.nrow == 1 && my_i64(&r, 0, 0, 0) == 1;
+            if (!ok) snprintf(err, ERRBUF, "邮件附件回读不一致，已回滚");
+            my_free(&r);
+        }
     }
+    if (ok && item_table) {
+        str_clear(&s);
+        str_catf(&s, "SELECT charac_no=%u AND it_id=%u AND expire_date='9999-12-31 23:59:59' AND %s "
+            "FROM taiwan_cain_2nd.%s WHERE ui_id=%llu FOR UPDATE", c->no, g->id,
+            avata_flag ? "stat=2 AND obtain_from=1" : "stat=0 AND item_lock_key=0 AND creature_type=0 AND stomach=100",
+            item_table, (unsigned long long)add_info);
+        MyResult r = {0};
+        ok = select1(d, &s, &r) && r.nrow == 1 && my_i64(&r, 0, 0, 0) == 1;
+        if (!ok) snprintf(err, ERRBUF, "邮件时装／宠物回读不一致，已回滚");
+        my_free(&r);
+    }
+    if (ok) ok = mail_letter_matches(d, c, letter_id, sender, text, err);
+    str_free(&es); str_free(&s);
+    if (!ok) goto fail;
     return db_tx_commit(d, err);
 
 fail:
@@ -244,7 +324,7 @@ int db_send_mail_bulk(Db *d, int online_only, const char *sender, const char *te
                       u32 item_id, u32 num, int avata_flag, int creature_flag, u32 *sent, Err err) {
     if (sent) *sent = 0;
     Str s = {0};
-    str_cat(&s, "SELECT charac_no FROM taiwan_cain.charac_info WHERE delete_flag=0");
+    str_cat(&s, "SELECT charac_no,m_id FROM taiwan_cain.charac_info WHERE delete_flag=0");
     if (online_only)
         str_cat(&s, " AND m_id IN (SELECT m_id FROM taiwan_login.login_account_3 WHERE login_status>=1)");
     str_cat(&s, " ORDER BY charac_no");
@@ -258,6 +338,7 @@ int db_send_mail_bulk(Db *d, int online_only, const char *sender, const char *te
         Charac c;
         memset(&c, 0, sizeof(c));
         c.no = cno;
+        c.mid = (u32)my_u64(&r, i, 1, 0);
         int ok;
         if (item_id) {
             GrantItem g;

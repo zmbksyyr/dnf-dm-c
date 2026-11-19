@@ -780,6 +780,165 @@ class DataTests(unittest.TestCase):
                 if counter:
                     self.cur.execute("ALTER TABLE " + ident(table) + " AUTO_INCREMENT=" + str(counter))
 
+    @contextlib.contextmanager
+    def mail_send_fixture(self):
+        tables = ('letter', 'postal', 'user_items', 'creature_items')
+        keys = ('letter_id', 'postal_id', 'ui_id', 'ui_id')
+        before = {}
+        with self.offline_character():
+            for table, key in zip(tables, keys):
+                self.cur.execute('SELECT * FROM taiwan_cain_2nd.' + table + ' ORDER BY ' + key)
+                before[table] = (self.cur.fetchall(), [c[0] for c in self.cur.description],
+                    self.one("SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE "
+                             "TABLE_SCHEMA='taiwan_cain_2nd' AND TABLE_NAME=%s", (table,)))
+            try:
+                yield
+            finally:
+                for table, key in zip(tables, keys):
+                    rows, columns, counter = before[table]
+                    old = {row[columns.index(key)] for row in rows}
+                    self.cur.execute('SELECT ' + key + ' FROM taiwan_cain_2nd.' + table)
+                    added = [row[0] for row in self.cur.fetchall() if row[0] not in old]
+                    if added:
+                        self.cur.execute('DELETE FROM taiwan_cain_2nd.' + table + ' WHERE ' + key + ' IN %s', (added,))
+                    if counter is not None:
+                        self.cur.execute('ALTER TABLE taiwan_cain_2nd.' + table + ' AUTO_INCREMENT=' + str(counter))
+                    self.cur.execute('SELECT * FROM taiwan_cain_2nd.' + table + ' ORDER BY ' + key)
+                    self.assertEqual(self.cur.fetchall(), rows, table)
+
+    def mail_send_counts(self):
+        return [self.one('SELECT COUNT(*) FROM taiwan_cain_2nd.' + table)
+                for table in ('letter', 'postal', 'user_items', 'creature_items')]
+
+    def test_mail_send_recipient_ownership_deleted_and_missing(self):
+        with self.mail_send_fixture():
+            before = self.mail_send_counts()
+            for cid, mid in ((0, TEST_NO), (TEST_NO + 1, TEST_NO), (TEST_NO, TEST_NO + 1)):
+                for command in [('text-mail', cid, mid, 'refused'), ('item-mail', cid, mid, 3037, 1)]:
+                    r = self.probe(*command)
+                    self.assertNotEqual(r.returncode, 0, r.stdout)
+                    self.assertEqual(self.mail_send_counts(), before)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s', (TEST_NO,))
+            for command in [('text-mail', TEST_NO, TEST_NO, 'refused'), ('item-mail', TEST_NO, TEST_NO, 3037, 1)]:
+                self.assertNotEqual(self.probe(*command).returncode, 0)
+                self.assertEqual(self.mail_send_counts(), before)
+
+    def test_mail_send_online_text_and_three_attachment_types_modes(self):
+        for mode in ('', 'STRICT_TRANS_TABLES', 'NO_BACKSLASH_ESCAPES'):
+            with self.subTest(mode=mode), self.mail_send_fixture():
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s', (TEST_NO,))
+                text = "邮件中文'反斜线\\测试"
+                r = self.probe('text-mail', TEST_NO, TEST_NO, text, 'GM中文', mode=mode)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.one('SELECT HEX(CONVERT(letter_text USING latin1)) FROM taiwan_cain_2nd.letter WHERE charac_no=%s ORDER BY letter_id DESC LIMIT 1', (TEST_NO,)), text.encode().hex().upper())
+                for item, num, avatar, creature in [(3037, 7, 0, 0), (1970031, 1, 1, 0), (63000, 1, 0, 1)]:
+                    r = self.probe('item-mail', TEST_NO, TEST_NO, item, num, avatar, creature, text, mode=mode)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    self.cur.execute('SELECT item_id,add_info,avata_flag,creature_flag,letter_id FROM taiwan_cain_2nd.postal WHERE receive_charac_no=%s ORDER BY postal_id DESC LIMIT 1', (TEST_NO,))
+                    iid, info, av, cr, letter = self.cur.fetchone()
+                    self.assertEqual((iid, av, cr), (item, avatar, creature))
+                    self.assertEqual(self.one('SELECT charac_no FROM taiwan_cain_2nd.letter WHERE letter_id=%s', (letter,)), TEST_NO)
+                    if avatar or creature:
+                        table = 'user_items' if avatar else 'creature_items'
+                        self.assertEqual(self.one('SELECT it_id FROM taiwan_cain_2nd.' + table + ' WHERE ui_id=%s AND charac_no=%s', (info, TEST_NO)), item)
+                    else:
+                        self.assertEqual(info, num)
+
+    def test_mail_send_errors_and_final_cross_table_readback_roll_back(self):
+        with self.mail_send_fixture():
+            before = self.mail_send_counts()
+            for table, item, av, cr in [('letter',3037,0,0), ('postal',3037,0,0), ('user_items',1970031,1,0), ('creature_items',63000,0,1)]:
+                for body in ["SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit mail insert'",
+                             'SET NEW.' + ('letter_text' if table == 'letter' else 'item_id' if table == 'postal' else 'it_id') + "='0'"]:
+                    with self.trigger('taiwan_cain_2nd.' + table, 'INSERT', body):
+                        r = self.probe('item-mail', TEST_NO, TEST_NO, item, 1, av, cr)
+                    self.assertNotEqual(r.returncode, 0, (table, body, r.stdout))
+                    self.assertEqual(self.mail_send_counts(), before)
+            for body in ["UPDATE taiwan_cain_2nd.letter SET letter_text='changed' WHERE letter_id=NEW.letter_id",
+                         'UPDATE taiwan_cain_2nd.creature_items SET stomach=1 WHERE ui_id=NEW.add_info']:
+                with self.trigger('taiwan_cain_2nd.postal', 'INSERT', body):
+                    r = self.probe('item-mail', TEST_NO, TEST_NO, 63000, 1, 0, 1)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertEqual(self.mail_send_counts(), before)
+            with self.trigger('taiwan_cain_2nd.letter', 'INSERT', "SET NEW.letter_text='changed'"):
+                r = self.probe('text-mail', TEST_NO, TEST_NO, 'original')
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertEqual(self.mail_send_counts(), before)
+
+    def test_mail_send_nontransactional_tables_refuse_before_inserts(self):
+        with self.mail_send_fixture():
+            before = self.mail_send_counts()
+            for schema, table in [('taiwan_cain','charac_info'), ('taiwan_cain_2nd','letter'), ('taiwan_cain_2nd','postal'), ('taiwan_cain_2nd','user_items'), ('taiwan_cain_2nd','creature_items')]:
+                self.cur.execute('ALTER TABLE ' + schema + '.' + table + ' ENGINE=MyISAM')
+                try:
+                    command = ('item-mail', TEST_NO, TEST_NO, 1970031, 1, 1, 0) if table == 'user_items' else ('item-mail', TEST_NO, TEST_NO, 63000, 1, 0, 1)
+                    r = self.probe(*command)
+                    self.assertNotEqual(r.returncode, 0, (table, r.stdout))
+                    self.assertIn('InnoDB', r.stderr)
+                    if table in ('letter', 'charac_info'):
+                        self.assertNotEqual(self.probe('text-mail', TEST_NO, TEST_NO, 'refused').returncode, 0)
+                    self.assertEqual(self.mail_send_counts(), before)
+                finally:
+                    self.cur.execute('ALTER TABLE ' + schema + '.' + table + ' ENGINE=InnoDB')
+
+    def test_mail_send_holds_role_during_insert_and_rechecks_after_wait(self):
+        for table, key in [('letter','letter_id'), ('postal','postal_id'), ('creature_items','ui_id')]:
+            with self.subTest(table=table), self.mail_send_fixture():
+                params = dict(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+                lock = pymysql.connect(**params); change = pymysql.connect(**params); pending = None
+                try:
+                    lock.begin()
+                    with lock.cursor() as q:
+                        q.execute('SELECT ' + key + ' FROM taiwan_cain_2nd.' + table + ' ORDER BY ' + key + ' DESC LIMIT 1 FOR UPDATE')
+                    env = dict(os.environ, **{'DNF_GM_TEST_' + k.upper(): v for k, v in self.params.items()})
+                    pending = subprocess.Popen([str(PROBE),'item-mail',str(TEST_NO),str(TEST_NO),'63000','1','0','1'], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    deadline = time.monotonic() + 20
+                    prefix = 'INSERT INTO taiwan_cain_2nd.' + table
+                    while True:
+                        self.cur.execute('SHOW FULL PROCESSLIST')
+                        if any(row[7] and row[7].startswith(prefix) for row in self.cur.fetchall()): break
+                        self.assertIsNone(pending.poll()); self.assertLess(time.monotonic(), deadline); time.sleep(.05)
+                    with change.cursor() as q:
+                        q.execute('SET SESSION innodb_lock_wait_timeout=1')
+                        with self.assertRaises(pymysql.err.OperationalError) as blocked:
+                            q.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s', (TEST_NO,))
+                        self.assertEqual(blocked.exception.args[0], 1205)
+                    lock.commit(); out, err = pending.communicate(timeout=30)
+                    self.assertEqual(pending.returncode, 0, (out, err))
+                finally:
+                    lock.rollback()
+                    if pending is not None and pending.poll() is None: pending.kill(); pending.communicate(timeout=10)
+                    lock.close(); change.close()
+        with self.mail_send_fixture():
+            before = self.mail_send_counts()
+            lock = pymysql.connect(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+            pending = None
+            try:
+                lock.begin()
+                with lock.cursor() as q:q.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s', (TEST_NO,))
+                env = dict(os.environ, **{'DNF_GM_TEST_' + k.upper(): v for k, v in self.params.items()})
+                pending = subprocess.Popen([str(PROBE),'text-mail',str(TEST_NO),str(TEST_NO),'refused'], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                deadline = time.monotonic() + 20
+                while not self.one('SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO=%s', ('SELECT m_id,delete_flag FROM taiwan_cain.charac_info WHERE charac_no=' + str(TEST_NO) + ' FOR UPDATE',)):
+                    self.assertIsNone(pending.poll()); self.assertLess(time.monotonic(), deadline); time.sleep(.05)
+                lock.commit(); out, err = pending.communicate(timeout=30)
+                self.assertNotEqual(pending.returncode, 0, out)
+                self.assertEqual(self.mail_send_counts(), before)
+            finally:
+                lock.rollback()
+                if pending is not None and pending.poll() is None:pending.kill();pending.communicate(timeout=10)
+                lock.close()
+
+    def test_mail_send_invalid_attachment_or_text_writes_nothing(self):
+        with self.mail_send_fixture():
+            before = self.mail_send_counts()
+            for item,num,av,cr in [(0,1,0,0),(3037,0,0,0),(3037,1,1,1),(3037,1,2,0),(1970031,2,1,0),(63000,2,0,1)]:
+                self.assertNotEqual(self.probe('item-mail',TEST_NO,TEST_NO,item,num,av,cr).returncode, 0)
+                self.assertEqual(self.mail_send_counts(), before)
+            for text,sender in [('x'*256,'GM'),('okay','x'*21),('中'*86,'GM')]:
+                self.assertNotEqual(self.probe('text-mail',TEST_NO,TEST_NO,text,sender).returncode, 0)
+                self.assertEqual(self.mail_send_counts(), before)
+
     def test_mail_postal_failure_rolls_back_attachment(self):
         with self.attachment() as (ui, postal):
             with self.trigger("taiwan_cain_2nd.postal", "UPDATE",

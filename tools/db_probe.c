@@ -282,12 +282,15 @@ static int run_probe(int argc, char **argv) {
         }
         buf_free(&packed[0]);
         db_free_data(&data);
-    } else if (!strcmp(argv[1], "item-mail") && argc == 6) {
+    } else if (!strcmp(argv[1], "text-mail") && (argc == 5 || argc == 6)) {
+        ok = db_send_text_mail(&d, &c, argc == 6 ? argv[5] : "GM", argv[4], err);
+    } else if (!strcmp(argv[1], "item-mail") && (argc == 6 || argc == 8 || argc == 9)) {
         GrantItem g = {0};
         g.id = (u32)strtoul(argv[4], NULL, 10);
         g.num = (u32)strtoul(argv[5], NULL, 10);
         g.type = IT_MATERIAL;
-        ok = db_send_item_mail_ex(&d, &c, "GM", "GM host comparison", &g, 0, 0, err);
+        ok = db_send_item_mail_ex(&d, &c, "GM", argc == 9 ? argv[8] : "GM host comparison", &g,
+                                 argc >= 8 ? atoi(argv[6]) : 0, argc >= 8 ? atoi(argv[7]) : 0, err);
     } else if (!strcmp(argv[1], "bubble") && (argc == 9 || argc == 11)) {
         BubbleCfg cfg = {0};
         cfg.target = atoi(argv[2]); cfg.tno = (u32)strtoul(argv[3], NULL, 10);
