@@ -599,7 +599,7 @@ static int chars_differs(const Vec *a, const Vec *b) {
         const Charac *x = (const Charac *)vec_at(a, i);
         const Charac *y = (const Charac *)vec_at(b, i);
         if (x->no != y->no || x->mid != y->mid || x->lev != y->lev || x->job != y->job ||
-            x->grow != y->grow || x->online != y->online || strcmp(x->name, y->name) != 0 ||
+            x->grow != y->grow || x->online != y->online || x->online_caps != y->online_caps || strcmp(x->name, y->name) != 0 ||
             strcmp(x->account, y->account) != 0)
             return 1;
     }
@@ -638,6 +638,7 @@ static void chars_apply(void) {
             // 在线状态是写库的闸门（游戏在线时改库会被它覆盖回去），必须实时；
             // 等级/职业的实时值留在 g.chars 里给角色卡用，快照 g.cur 不动。
             g.cur.online = c->online;
+            g.cur.online_caps = c->online_caps;
             break;
         }
     }

@@ -3,6 +3,9 @@
 #pragma once
 #include "db.h"
 
+// Advisory UI capabilities; mutation submission still checks the live heartbeat.
+void db_online_capabilities(Db *d, Vec *chars);
+
 // SQL 执行
 int  run_aff(Db *d, Str *sql, u64 *aff);
 int  run(Db *d, Str *sql);

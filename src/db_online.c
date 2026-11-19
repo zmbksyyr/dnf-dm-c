@@ -1,6 +1,48 @@
 // Original game memory is authoritative for online inventory balances.
 #include "db_priv.h"
 
+void db_online_capabilities(Db *d, Vec *chars) {
+    int any=0;
+    for(int i=0;i<chars->n;i++) {
+        Charac *c=VEC_AT(chars,Charac,i);c->online_caps=0;
+        if(c->online) any=1;
+    }
+    if(!any) return;
+    // Do not cache missing tables: users can deploy or upgrade the bridge while
+    // this database connection stays open. Nothing is installed by this probe.
+    Str s={0};MyResult r={0};u32 hosts=0,queues=0;
+    str_cat(&s,"SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='d_taiwan' "
+               "AND TABLE_NAME REGEXP '^dnf_gm_(hosts|online)_v[1-9]$'");
+    int ok=select1(d,&s,&r);
+    if(ok) for(int i=0;i<r.nrow;i++) for(int v=1;v<=9;v++) {
+        char name[40];snprintf(name,sizeof(name),"dnf_gm_hosts_v%d",v);
+        if(!strcmp(my_text(&r,i,0),name)) hosts|=1u<<(v-1);
+        snprintf(name,sizeof(name),"dnf_gm_online_v%d",v);
+        if(!strcmp(my_text(&r,i,0),name)) queues|=1u<<(v-1);
+    }
+    my_free(&r);str_clear(&s);
+    u32 available=hosts&queues;
+    if(ok && available) {
+        str_cat(&s,"SELECT l.m_id,BIT_OR(h.cap) FROM taiwan_login.login_account_3 l JOIN (");
+        int first=1;
+        for(int v=1;v<=9;v++) if(available&(1u<<(v-1))) {
+            if(!first) str_cat(&s," UNION ALL ");
+            str_catf(&s,"SELECT channel_no,%u AS cap FROM d_taiwan.dnf_gm_hosts_v%d "
+                "WHERE seen>DATE_SUB(NOW(6),INTERVAL 5 SECOND)",1u<<(v-1),v);
+            first=0;
+        }
+        str_cat(&s,") h ON h.channel_no=l.m_channel_no WHERE l.login_status>=1 GROUP BY l.m_id");
+        if(select1(d,&s,&r)) for(int i=0;i<chars->n;i++) {
+            Charac *c=VEC_AT(chars,Charac,i);
+            if(!c->online) continue;
+            for(int j=0;j<r.nrow;j++) if(c->mid==(u32)my_u64(&r,j,0,0)) {
+                c->online_caps=(u32)my_u64(&r,j,1,0);break;
+            }
+        }
+    }
+    my_free(&r);str_free(&s);
+}
+
 int db_account_online(Db *d, u32 mid, int *online, Err err) {
     Str s = {0}; MyResult r = {0};
     str_catf(&s,"SELECT COALESCE(MAX(login_status),0) FROM taiwan_login.login_account_3 WHERE m_id=%u",mid);
@@ -43,8 +85,8 @@ static int online_submit(Db *d, const Charac *c, u32 amount, const u32 *extra, c
     ok=run_aff(d,&s,&affected);
     str_free(&s);
     if(ok && affected==1) return 1;
-    if(ok) snprintf(err,ERRBUF,"在线命令未提交：角色归属或状态变化，或游戏端桥接尚未就绪");
-    else snprintf(err,ERRBUF,"在线命令未提交：%s；需要启用游戏端 GM 桥接",d->err);
+    if(ok) snprintf(err,ERRBUF,"在线修改未提交：角色状态已变化或服务端不支持，请先退出游戏后修改");
+    else snprintf(err,ERRBUF,"在线修改未提交：%s；可退出游戏后修改",d->err);
     request->token[0]=0;return 0;
 failed:
     str_free(&s);snprintf(err,ERRBUF,"创建在线命令失败：%s",d->err);request->token[0]=0;return 0;

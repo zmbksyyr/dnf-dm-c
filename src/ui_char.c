@@ -32,6 +32,33 @@ enum {
 static HWND c_name, c_lev, c_job, c_grow, c_money, c_coin, c_cera, c_point, c_accm, c_vip;
 static HWND g_grade, g_win, g_point;
 
+static int gm_bridge_version(int id) {
+    switch(id) {
+        case G_COIN:return 1;
+        case G_MONEY:return 2;
+        case G_FATIGUE:return 3;
+        case G_SP:return 4;
+        case G_QP:return 5;
+        case G_SLOT:case G_UNLOCK:return 7;
+        case G_NOWEIGHT:return 8;
+        case G_LEV:return 9;
+        default:return 0;
+    }
+}
+
+static int gm_available(int id) {
+    if(!g.char_ok) return 0;
+    if(!g.cur.online) return 1;
+    int version=gm_bridge_version(id);
+    return version && (g.cur.online_caps&(1u<<(version-1)));
+}
+
+static void gm_unavailable(int id) {
+    app_status(gm_bridge_version(id)?
+        "当前服务端不支持此项在线修改，请先退出游戏后修改；未写入":
+        "此项需要退出游戏后修改，未写入");
+}
+
 // 全服清错误物品的状态（实现在本文件后面）
 static Vec  s_scan;
 static int  s_scan_chars;        // 本次扫到的角色数
@@ -592,8 +619,8 @@ static i64 gm_value(int id) {
 // 校验不过不弹框打断——失焦时弹模态框会跟焦点切换打架，状态栏说一句就够了。
 static void gm_commit(int id) {
     if (!g.char_ok) return;
-    if (g.cur.online && id != G_COIN && id != G_MONEY && id != G_LEV) {
-        app_status("角色在线，改动未写入——请先退出游戏");
+    if (!gm_available(id)) {
+        gm_unavailable(id);
         gm_refill();                     // 顺便把刚填的值清掉
         return;
     }
@@ -746,8 +773,8 @@ static const struct {
 static void gm_quick_add(int i) {
     if (i < 0 || i >= QADD_N) return;
     if (!g.char_ok) return;
-    if (g.cur.online && kQAdd[i].target != G_COIN && kQAdd[i].target != G_MONEY && kQAdd[i].target != G_LEV) {
-        app_status("角色在线，改动未写入——请先退出游戏");
+    if (!gm_available(kQAdd[i].target)) {
+        gm_unavailable(kQAdd[i].target);
         return;
     }
     int tgt = kQAdd[i].target;
@@ -831,6 +858,10 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (!need_char()) return 0;
+    if (id>=G_SP && id<=G_QCLR && !gm_available(id)) {
+        gm_unavailable(id);
+        return 0;
+    }
     // kc 是全局 Ctx，跨动作复用：不先清零，上一次动作留下的 i1/i2/s 会跟着跑；
     // 更糟的是 cno/mid 从没人填过 —— 一键按钮全在写 charac_no=0，0 行影响被
     // 判成失败，界面上就是"点了没反应/报错"。归属一律在这里定，和 gm_push 对齐。
@@ -1049,24 +1080,29 @@ static void gm_lock(Page *p) {
                    G_GRADE, G_WIN, G_PVP_POINT, G_VIP};
     // 已支持的在线字段经游戏线程修改并保存，其余字段仍需离线。
     int edit = g.char_ok && !g.cur.online;
-    for (int i = 0; i < 13; i++) ui_enable(GetDlgItem(p->wnd, ids[i]), ids[i]==G_COIN || ids[i]==G_MONEY || ids[i]==G_LEV ? g.char_ok : edit);
+    for (int i = 0; i < 13; i++) ui_enable(GetDlgItem(p->wnd, ids[i]),gm_available(ids[i]));
     // 快捷按钮和它对应的输入框同生同死：框不能改的时候，按钮点了也没意义
-    for (int i = 0; i < QADD_N; i++) ui_enable(GetDlgItem(p->wnd, G_QADD + i), kQAdd[i].target==G_COIN || kQAdd[i].target==G_MONEY || kQAdd[i].target==G_LEV ? g.char_ok : edit);
-    for (int i = 0; i < 10; i++) ui_enable(GetDlgItem(p->wnd, G_SP + i), on);
+    for (int i = 0; i < QADD_N; i++) ui_enable(GetDlgItem(p->wnd, G_QADD + i),gm_available(kQAdd[i].target));
+    for (int i = 0; i < 10; i++) ui_enable(GetDlgItem(p->wnd, G_SP + i),gm_available(G_SP+i));
     ui_enable(GetDlgItem(p->wnd, G_QEXP), on);
-    ui_enable(GetDlgItem(p->wnd, G_QIMP), on);
-    static int s_edit = -1;
-    if (edit != s_edit) {
-        s_edit = edit;
+    ui_enable(GetDlgItem(p->wnd, G_QIMP), edit);
+    static int s_mode = -1;
+    static u32 s_caps = 0xffffffffu;
+    int mode=!g.char_ok?0:g.cur.online?2:1;
+    u32 caps=g.char_ok && g.cur.online?g.cur.online_caps:0;
+    if (mode != s_mode || caps != s_caps) {
+        s_mode = mode;
+        s_caps = caps;
         struct { int id; const char *base; } bx[3] = {
             {G_BOX_ROLE, "角色"}, {G_BOX_ASSET, "资产"}, {G_BOX_PVP, "PVP"},
         };
         for (int i = 0; i < 3; i++) {
             HWND h = GetDlgItem(p->wnd, bx[i].id);
             // 没选角色时不加任何后缀：那时候这些框是"还没东西可改"，不是"在线不能改"
-            char *t = (!g.char_ok) ? fmt_new("%s", bx[i].base)
-                      : edit       ? fmt_new("%s", bx[i].base)
-                                     : fmt_new("%s（%s）", bx[i].base,i==0?"在线可改等级":i==1?"在线可改金币、复活币":"退出游戏才能改");
+            const char *note=i==0?(gm_available(G_LEV)?"在线可改等级":"退出游戏才能改"):
+                i==1?((caps&3)==3?"在线可改金币、复活币":(caps&1)?"在线可改复活币":(caps&2)?"在线可改金币":"退出游戏才能改"):
+                "退出游戏才能改";
+            char *t = !g.char_ok || edit?fmt_new("%s",bx[i].base):fmt_new("%s（%s）",bx[i].base,note);
             WCHAR w[96];
             utf16(t, w, COUNT_OF(w));
             if (h) SetWindowTextW(h, w);

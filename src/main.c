@@ -583,13 +583,14 @@ static void tick(void) {
         s_chars_ver = g.chars_ver;
         chars_fill();
     }
-    int ready = (g.db_ok ? 1 : 0) | (g.char_ok ? 2 : 0) | (g.cur.online ? 4 : 0);
+    int ready = (g.db_ok ? 1 : 0) | (g.char_ok ? 2 : 0) | (g.cur.online ? 4 : 0)
+              | (g.char_ok && g.cur.online ? (int)(g.cur.online_caps << 3) : 0);
     if (ready != s_ready) {
         s_ready = ready;
         buttons_refresh();
         chars_fill();
-        // 在线状态也进 ready：GM 页的表单在线时要置灰并把条件写进组框标题，
-        // 不重新 lock 一次，上下线切换界面不会跟着变
+        // 在线状态和桥接能力共同决定可编辑项；心跳过期、部署或升级后
+        // 只重算控件状态，保留用户正在输入的表单。
         LOCK_REDO();
     }
     if (g.sel != s_sel) {

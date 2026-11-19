@@ -13,6 +13,7 @@ typedef struct {
     char account[48];     // 所属账号名（d_taiwan.accounts），列表展示与搜索用
     int  job, grow, lev;
     int  online;
+    u32  online_caps;     // Last poll: live GM bridge versions on this account's channel.
 } Charac;
 
 typedef struct {

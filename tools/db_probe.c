@@ -99,6 +99,15 @@ static int run_probe(int argc, char **argv) {
         ok = db_delete_mail(&d, (u64)strtoull(argv[2], NULL, 10), err);
     } else if (!strcmp(argv[1], "mail-delete-all") && argc == 3) {
         ok = db_delete_all_mails(&d, &c, err);
+    } else if (!strcmp(argv[1], "capabilities") && argc == 4) {
+        Vec found;vec_init(&found,sizeof(Charac));
+        ok=db_list_chars(&d,&found,200,argv[2],err);
+        if(ok) for(int i=0;i<found.n;i++) {
+            const Charac *row=VEC_AT(&found,Charac,i);
+            if(row->no==c.no && row->mid==c.mid)
+                printf("online=%d\ncapabilities=%u\n",row->online,row->online_caps);
+        }
+        vec_free(&found);
     } else if (!strcmp(argv[1], "read-name") && argc == 4) {
         ok = db_read_charac(&d, c.no, &c, err);
         if (ok) printf("name=%s\n", c.name);

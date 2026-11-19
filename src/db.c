@@ -250,6 +250,7 @@ int db_list_chars(Db *d, Vec *out, int limit, const char *kw, Err err) {
         cp_text(c->account, sizeof(c->account), &r, i, 7);
     }
     my_free(&r);
+    db_online_capabilities(d,out);
     return 1;
 }
 
@@ -356,6 +357,7 @@ int db_poll_chars(Db *d, Vec *out, int limit, Err err) {
         c->online = acct == 1 && playing == 1 && users != 0;
     }
     my_free(&r);
+    db_online_capabilities(d,out);
     return 1;
 }
 

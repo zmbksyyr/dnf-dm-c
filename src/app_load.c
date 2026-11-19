@@ -116,7 +116,10 @@ void app_load_poll(void) {
     g.cur = g_load_ctx.c;
     if (g.sel >= 0 && g.sel < g.chars.n) {       // 在线状态以轮询为准
         Charac *lc = VEC_AT(&g.chars, Charac, g.sel);
-        if (lc->no == g.cur.no) g.cur.online = lc->online;
+        if (lc->no == g.cur.no) {
+            g.cur.online = lc->online;
+            g.cur.online_caps = lc->online_caps;
+        }
     }
     g.char_ok = 1;
     g.data_ver++;

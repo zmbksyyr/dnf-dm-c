@@ -1,6 +1,7 @@
 // ui_data：宠物、时装、任务、数据库、日志。
 #include "ui.h"
 #include "pvf.h"
+#include <shlobj.h>
 
 
 // ================================================================ 宠物页
@@ -828,7 +829,83 @@ void page_quest_create(Page *p) {
 }
 
 // ================================================================ 日志页
-enum { L_TEXT = PAGE_ID(PAGE_LOG, 1), L_REFRESH, L_CLR, L_INFO, L_CFGCLR };
+enum { L_TEXT = PAGE_ID(PAGE_LOG, 1), L_REFRESH, L_CLR, L_INFO, L_CFGCLR, L_BRIDGE };
+
+static const char bridge_guide[] =
+    "桥接用于在线修改角色数据，GM 自动识别是否可用。\r\n\r\n"
+    "1. 服务端先启用 DP2。\r\n"
+    "2. 导出文件，将脚本和配置复制到服务端 /dp2/。\r\n"
+    "3. 配置使用 GM 当前的数据库连接，请核对服务端可访问的地址；\r\n"
+    "   channel = server_group × 1000 + channel_no，导出默认为 3011。\r\n"
+    "4. 在 /dp2/df_game_r.lua 末尾加入：\r\n"
+    "dofile('/dp2/dnf-gm-online.lua')\r\n"
+    "5. 重启 game。数据库账号需有建表和读写权限。\r\n\r\n"
+    "桥接不可用的项目需退出游戏后修改。";
+
+static void bridge_json_string(Str *s,const char *value) {
+    str_catc(s,'"');
+    for(const char *p=value;*p;p++) {
+        unsigned char c=(unsigned char)*p;
+        if(c=='"' || c=='\\') {str_catc(s,'\\');str_catc(s,*p);}
+        else if(c<32) str_catf(s,"\\u%04x",(unsigned)c);
+        else str_catc(s,*p);
+    }
+    str_catc(s,'"');
+}
+
+static void bridge_export(HWND owner) {
+    HMODULE module=GetModuleHandleW(NULL);
+    HRSRC resource=FindResourceW(module,MAKEINTRESOURCEW(202),RT_RCDATA);
+    HGLOBAL loaded=resource?LoadResource(module,resource):NULL;
+    const void *data=loaded?LockResource(loaded):NULL;
+    DWORD size=resource?SizeofResource(module,resource):0;
+    if(!data || !size) {app_info("本程序的桥接脚本资源缺失，请使用完整构建。");return;}
+    BROWSEINFOW pick;memset(&pick,0,sizeof(pick));pick.hwndOwner=owner;
+    pick.lpszTitle=L"选择桥接文件导出目录";
+    pick.ulFlags=BIF_RETURNONLYFSDIRS|BIF_NEWDIALOGSTYLE|BIF_EDITBOX;
+    LPITEMIDLIST folder=SHBrowseForFolderW(&pick);
+    if(!folder) return;
+    WCHAR path[MAX_PATH];int ok=SHGetPathFromIDListW(folder,path);CoTaskMemFree(folder);
+    if(!ok) return;
+    char target[MAX_PATH*3];utf8(path,target,sizeof(target));
+    const char *names[]={"dnf-gm-online.lua","gm-online.private.json","桥接说明.txt"};
+    Str files[3]={{0}};
+    int exists=0;
+    for(int i=0;i<3;i++) {
+        str_catf(&files[i],"%s\\%s",target,names[i]);
+        if(file_exists(files[i].p)) exists=1;
+    }
+    if(exists && !app_confirm("覆盖目录中已有的桥接文件？配置将使用 GM 当前数据库连接。")) goto finish;
+    Str config={0};
+    str_cat(&config,"{\r\n  \"host\": ");bridge_json_string(&config,g.cfg.host);
+    str_catf(&config,",\r\n  \"port\": %d,\r\n  \"user\": ",g.cfg.port);bridge_json_string(&config,g.cfg.user);
+    str_cat(&config,",\r\n  \"password\": ");bridge_json_string(&config,g.cfg.pwd);
+    str_cat(&config,",\r\n  \"channel\": 3011\r\n}\r\n");
+    ok=file_write(files[0].p,data,size) && file_write(files[1].p,config.p,(size_t)config.n)
+        && file_write(files[2].p,bridge_guide,sizeof(bridge_guide)-1);
+    str_free(&config);
+    app_info(ok?"已导出脚本、配置和说明。":"导出未完成，请检查目录写入权限后重试。");
+finish:
+    for(int i=0;i<3;i++) str_free(&files[i]);
+}
+
+static LRESULT bridge_on(HWND h,UINT m,WPARAM wp,LPARAM lp,void *ctx) {
+    (void)lp;(void)ctx;
+    if(m!=WM_COMMAND) return -1;
+    if(LOWORD(wp)==6102) {bridge_export(h);return 0;}
+    return -1;
+}
+
+static void bridge_show(void) {
+    HWND d=ui_dlg_new(g_main,"桥接",680,360,bridge_on,NULL);
+    if(!d) return;
+    HWND text=ui_make(d,L"EDIT",L"",WS_BORDER|WS_VSCROLL|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL,
+                      WS_EX_CLIENTEDGE,6100);
+    ui_text(text,bridge_guide);ui_place(text,ui_scale(16),ui_scale(16),ui_scale(648),ui_scale(280));
+    ui_place(ui_button(d,"导出桥接文件",6102),ui_scale(16),ui_scale(316),ui_scale(128),ui_scale(28));
+    ui_place(ui_button(d,"关闭",IDCANCEL),ui_scale(552),ui_scale(316),ui_scale(112),ui_scale(28));
+    ui_dlg_run(d,g_main);
+}
 
 static HWND l_text, l_info;
 static HWND l_sep;
@@ -935,6 +1012,7 @@ static LRESULT log_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
     if (m != WM_COMMAND) return -1;
     if (LOWORD(wp) == L_CFGCLR) { on_cfg_clear_exit(); return 0; }
     if (LOWORD(wp) == L_REFRESH) { log_load(); return 0; }
+    if (LOWORD(wp) == L_BRIDGE) { bridge_show(); return 0; }
     if (LOWORD(wp) == L_CLR) {
         if (!app_confirm("清空今天的日志？")) return 0;
         char path[MAX_PATH];
@@ -954,6 +1032,7 @@ static void log_layout(Page *p, int w, int h) {
     ui_row(&r, p->wnd, pad, pad, rowh);
     ui_add(&r, ui_btn_at(p->wnd, L_REFRESH, "刷新日志"), ui_scale(76));
     ui_add(&r, ui_btn_at(p->wnd, L_CLR, "清空日志"), ui_scale(76));
+    ui_add(&r, ui_btn_at(p->wnd, L_BRIDGE, "桥接"), ui_scale(64));
     ui_add(&r, ui_btn_at(p->wnd, L_CFGCLR, "清除配置并退出"), ui_scale(130));
     ui_add(&r, l_info, -1);
     int ly = pad + rowh + ui_scale(4);
@@ -977,6 +1056,7 @@ static void log_build(HWND parent) {
     l_sep = ui_hline(parent);
     ui_button(parent, "刷新日志", L_REFRESH);
     ui_button(parent, "清空日志", L_CLR);
+    ui_button(parent, "桥接", L_BRIDGE);
     ui_button(parent, "清除配置并退出", L_CFGCLR);
 }
 
