@@ -781,6 +781,138 @@ class DataTests(unittest.TestCase):
                     self.cur.execute("ALTER TABLE " + ident(table) + " AUTO_INCREMENT=" + str(counter))
 
     @contextlib.contextmanager
+    def expert_fixture(self):
+        with self.offline_character():
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET expert_job=1 WHERE charac_no=%s', (TEST_NO,))
+            self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,)), 0)
+            self.cur.execute('SELECT * FROM taiwan_cain.charac_stat WHERE charac_no=%s', (self.cno,))
+            row = list(self.cur.fetchone()); columns = [c[0] for c in self.cur.description]
+            row[columns.index('charac_no')] = TEST_NO
+            row[columns.index('expert_job_exp')] = 17
+            try:
+                self.cur.execute('INSERT INTO taiwan_cain.charac_stat (' + ','.join(map(ident, columns)) +
+                                 ') VALUES (' + ','.join(['%s'] * len(columns)) + ')', row)
+                yield
+            finally:
+                self.cur.execute('DELETE FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,))
+
+    def test_expert_offline_modes_idempotence_and_other_fields_preserved(self):
+        for mode in ('', 'STRICT_TRANS_TABLES', 'NO_BACKSLASH_ESCAPES'):
+            with self.subTest(mode=mode), self.expert_fixture():
+                self.cur.execute('SELECT * FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,))
+                expected = list(self.cur.fetchone()); columns = [c[0] for c in self.cur.description]
+                expected[columns.index('expert_job_exp')] = 2054
+                for _ in range(2):
+                    r = self.probe('expert', TEST_NO, TEST_NO, mode=mode)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    self.cur.execute('SELECT * FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,))
+                    self.assertEqual(self.cur.fetchone(), tuple(expected))
+
+    def test_expert_target_follows_locked_profession_type(self):
+        with self.expert_fixture():
+            for expert, target in ((1, 2054), (2, 2054), (3, 200), (4, 2054)):
+                self.cur.execute('UPDATE taiwan_cain.charac_info SET expert_job=%s WHERE charac_no=%s', (expert, TEST_NO))
+                r = self.probe('expert', TEST_NO, TEST_NO)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.one('SELECT expert_job_exp FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,)), target)
+            for expert in (0, 5):
+                self.cur.execute('UPDATE taiwan_cain.charac_info SET expert_job=%s WHERE charac_no=%s', (expert, TEST_NO))
+                self.assertNotEqual(self.probe('expert', TEST_NO, TEST_NO).returncode, 0)
+                self.assertEqual(self.one('SELECT expert_job_exp FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,)), 2054)
+
+    def test_expert_rejects_online_stale_deleted_and_missing_records(self):
+        with self.expert_fixture():
+            for cid, mid in ((0, TEST_NO), (TEST_NO, 0), (TEST_NO + 1, TEST_NO), (TEST_NO, TEST_NO + 1)):
+                self.assertNotEqual(self.probe('expert', cid, mid).returncode, 0)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=1 WHERE charac_no=%s', (TEST_NO,))
+            self.assertNotEqual(self.probe('expert', TEST_NO, TEST_NO).returncode, 0)
+            self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=0 WHERE charac_no=%s', (TEST_NO,))
+            for status in (1, 2, -1):
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s', (status, TEST_NO))
+                r = self.probe('expert', TEST_NO, TEST_NO)
+                self.assertNotEqual(r.returncode, 0); self.assertIn('在线或正在退出', r.stderr)
+                self.assertEqual(self.one('SELECT expert_job_exp FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,)), 17)
+            self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=0 WHERE m_id=%s', (TEST_NO,))
+            self.cur.execute('DELETE FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,))
+            self.assertNotEqual(self.probe('expert', TEST_NO, TEST_NO).returncode, 0)
+            self.assertEqual(self.one('SELECT COUNT(*) FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,)), 0)
+
+    def test_expert_failure_and_readback_mismatch_roll_back(self):
+        with self.expert_fixture():
+            self.cur.execute('SELECT * FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,))
+            before = self.cur.fetchone()
+            for body in ("SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit expert update'", 'SET NEW.expert_job_exp=0'):
+                with self.trigger('taiwan_cain.charac_stat', 'UPDATE', body):
+                    r = self.probe('expert', TEST_NO, TEST_NO)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.cur.execute('SELECT * FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,))
+                self.assertEqual(self.cur.fetchone(), before)
+
+    def test_expert_nontransactional_tables_refuse_before_update(self):
+        with self.expert_fixture():
+            for table in ('taiwan_login.login_account_3', 'taiwan_cain.charac_info', 'taiwan_cain.charac_stat'):
+                self.cur.execute('ALTER TABLE ' + table + ' ENGINE=MyISAM')
+                try:
+                    r = self.probe('expert', TEST_NO, TEST_NO)
+                    self.assertNotEqual(r.returncode, 0); self.assertIn('InnoDB', r.stderr)
+                    self.assertEqual(self.one('SELECT expert_job_exp FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,)), 17)
+                finally:
+                    self.cur.execute('ALTER TABLE ' + table + ' ENGINE=InnoDB')
+
+    def test_expert_holds_login_lock_while_waiting_for_role_or_stat(self):
+        for absent, table in ((False, 'charac_info'), (True, 'charac_info'), (False, 'charac_stat'), (True, 'charac_stat')):
+            with self.subTest(absent=absent, table=table), self.expert_fixture():
+                if absent:
+                    self.cur.execute('DELETE FROM taiwan_login.login_account_3 WHERE m_id=%s', (TEST_NO,))
+                params = dict(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+                lock = pymysql.connect(**params); login = pymysql.connect(**params); pending = None
+                try:
+                    lock.begin()
+                    with lock.cursor() as q:
+                        q.execute('SELECT charac_no FROM taiwan_cain.' + table + ' WHERE charac_no=%s FOR UPDATE', (TEST_NO,))
+                    env = dict(os.environ, **{'DNF_GM_TEST_' + k.upper(): v for k, v in self.params.items()})
+                    pending = subprocess.Popen([str(PROBE), 'expert', str(TEST_NO), str(TEST_NO)], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    prefix = 'SELECT m_id,delete_flag,expert_job FROM taiwan_cain.charac_info' if table == 'charac_info' else 'UPDATE taiwan_cain.charac_stat SET expert_job_exp='
+                    deadline = time.monotonic() + 20
+                    while True:
+                        self.cur.execute('SHOW FULL PROCESSLIST')
+                        if any(row[7] and row[7].startswith(prefix) for row in self.cur.fetchall()): break
+                        self.assertIsNone(pending.poll()); self.assertLess(time.monotonic(), deadline); time.sleep(.05)
+                    change = 'INSERT INTO taiwan_login.login_account_3 (m_id,login_status) VALUES(%s,1)' if absent else 'UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s'
+                    with login.cursor() as q:
+                        q.execute('SET SESSION innodb_lock_wait_timeout=1')
+                        with self.assertRaises(pymysql.err.OperationalError) as blocked: q.execute(change, (TEST_NO,))
+                        self.assertEqual(blocked.exception.args[0], 1205)
+                    lock.commit(); out, err = pending.communicate(timeout=30)
+                    self.assertEqual(pending.returncode, 0, (out, err))
+                    with login.cursor() as q: q.execute(change, (TEST_NO,))
+                finally:
+                    lock.rollback()
+                    if pending is not None and pending.poll() is None: pending.kill(); pending.communicate(timeout=10)
+                    lock.close(); login.close()
+
+    def test_expert_rechecks_online_state_after_login_wait(self):
+        with self.expert_fixture():
+            lock = pymysql.connect(host=self.params['host'], port=int(self.params['port']), user=self.params['user'], password=self.params['pwd'], autocommit=True)
+            pending = None
+            try:
+                lock.begin()
+                with lock.cursor() as q: q.execute('UPDATE taiwan_login.login_account_3 SET login_status=1 WHERE m_id=%s', (TEST_NO,))
+                env = dict(os.environ, **{'DNF_GM_TEST_' + k.upper(): v for k, v in self.params.items()})
+                pending = subprocess.Popen([str(PROBE), 'expert', str(TEST_NO), str(TEST_NO)], cwd=OUT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                waiting = 'SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=' + str(TEST_NO) + ' FOR UPDATE'
+                deadline = time.monotonic() + 20
+                while not self.one('SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO=%s', (waiting,)):
+                    self.assertIsNone(pending.poll()); self.assertLess(time.monotonic(), deadline); time.sleep(.05)
+                lock.commit(); out, err = pending.communicate(timeout=30)
+                self.assertNotEqual(pending.returncode, 0, out); self.assertIn('在线或正在退出', err.decode('utf8'))
+                self.assertEqual(self.one('SELECT expert_job_exp FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,)), 17)
+            finally:
+                lock.rollback()
+                if pending is not None and pending.poll() is None: pending.kill(); pending.communicate(timeout=10)
+                lock.close()
+
+    @contextlib.contextmanager
     def mail_send_fixture(self):
         tables = ('letter', 'postal', 'user_items', 'creature_items')
         keys = ('letter_id', 'postal_id', 'ui_id', 'ui_id')

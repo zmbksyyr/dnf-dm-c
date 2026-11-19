@@ -79,6 +79,7 @@ int   pvf_read(const Pvf *p, const Leaf *lf, Buf *out);
 // The table starts at level 2 and stores accumulated experience.
 int   pvf_level_min_exp(const Pvf *p, int level, u32 *exp, Err err);
 int   pvf_account_cargo_create_capacity(Pvf *p, int *capacity);
+int   pvf_expert_max_exp(Pvf *p, u32 targets[5], Err err);
 
 typedef struct {
     u32  id;

@@ -576,6 +576,47 @@ int pvf_account_cargo_create_capacity(Pvf *p, int *capacity) {
     return *capacity != 0;
 }
 
+int pvf_expert_max_exp(Pvf *p, u32 targets[5], Err err) {
+    memset(targets, 0, 5 * sizeof(*targets));
+    if (!p || !p->opened) {
+        snprintf(err, ERRBUF, "请先加载与服务端一致的 PVF，再修改副职业"); return 0;
+    }
+    Buf data = {0}; Vec pairs; vec_init(&pairs, sizeof(LstPair));
+    const Leaf *list = pvf_find(p, "character/expertjob.lst");
+    if (list && pvf_read(p, list, &data)) parse_lst(p, &data, "character", &pairs);
+    int found = 0;
+    for (int i = 0; i < pairs.n; i++) {
+        const LstPair *pair = VEC_AT(&pairs, LstPair, i);
+        if (pair->id < 1 || pair->id > 4) continue;
+        const Leaf *leaf = pvf_find(p, pair->path);
+        if (!leaf || !pvf_read(p, leaf, &data)) continue;
+        int inside = 0, used = 0, complete = 0; u32 last = 0;
+        // Original script rows are accumulated experience, reserved int, name.
+        for (size_t j = 2; j + 5 <= data.n; j += 5) {
+            u8 type = data.p[j]; u32 value = rd32(data.p + j + 1);
+            if (type == 5) {
+                const char *tag = stab_get(&p->strings, (int)value);
+                if (inside) {
+                    complete = !strcmp(tag, "[/expertness exp]") && used == 0 && last > 0;
+                    break;
+                }
+                inside = !strcmp(tag, "[expertness exp]");
+            } else if (inside) {
+                if (used < 2 ? type != 2 : type != 7) break;
+                if (!used) {
+                    if (!value || value <= last || value > 2147483647u) break;
+                    last = value;
+                }
+                used = (used + 1) % 3;
+            }
+        }
+        if (complete) { targets[pair->id] = last; found++; }
+    }
+    buf_free(&data); vec_free(&pairs);
+    if (!found) snprintf(err, ERRBUF, "PVF 中没有有效的副职业经验表，未修改");
+    return found != 0;
+}
+
 // 目录作为缺省分类；装备还需读取 equipment type，宠物也属于 equipment.lst。
 static u8 kind_of_equip(const char *path) {
     return strstr(path, "/avatar/") ? PK_AVATAR : PK_EQUIP;

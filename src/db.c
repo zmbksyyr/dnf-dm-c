@@ -25,54 +25,6 @@ int run_aff(Db *d, Str *sql, u64 *aff) {
 int run(Db *d, Str *sql) { return run_aff(d, sql, NULL); }
 int select1(Db *d, Str *sql, MyResult *r);   // 实现见下
 
-// ---------------- 一条写语句 ----------------
-// 18 个 db_set_* 原本各自复制同一段「拼 SQL → run → 写 err → str_free」。
-// 收敛到这里，以后加一个字段只要一行，不用再抄一遍样板。
-//
-// 三件原本没人管的事在这里一次做完：
-//   1. 错误带上下文——「Unknown column 'pay_coin'」看不出是谁在改什么，
-//      加上「改复活币」才知道去哪儿找；
-//   2. UPDATE 命中 0 行当失败——表是空的、角色已被删、键列拼错，
-//      这三种情况 MySQL 都返回「成功」，界面上就表现为「改了又弹回去」；
-//   3. 0 行时再探一次记录是否存在，把「值本来就一样」和「压根没这条」分开，
-//      免得正常操作被误报成失败。
-static int db_exec(Db *d, const char *what, const char *table, const char *keycol, u32 key,
-                   Err err, const char *fmt, ...) {
-    char sql[2048];
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(sql, sizeof(sql), fmt, ap);
-    va_end(ap);
-    if (n < 0 || n >= (int)sizeof(sql)) {
-        snprintf(err, ERRBUF, "%s：语句过长", what);
-        return 0;
-    }
-
-    Str s = {0};
-    str_cat(&s, sql);
-    u64 aff = 0;
-    int ok = run_aff(d, &s, &aff);
-    str_free(&s);
-    if (!ok) {
-        snprintf(err, ERRBUF, "%s：%s", what, d->err);
-        return 0;
-    }
-    if (aff > 0) return 1;
-
-    // 0 行：先确认这条记录在不在。不在就是真失败（表空了 / 角色不存在 / 键列写错）
-    str_catf(&s, "SELECT 1 FROM %s WHERE %s=%u LIMIT 1", table, keycol, key);
-    MyResult r = {0};
-    int exists = select1(d, &s, &r) && r.nrow > 0;
-    my_free(&r);
-    str_free(&s);
-    if (!exists) {
-        snprintf(err, ERRBUF, "%s：%s 里没有 %s=%u 的记录（表为空、角色已删或键列不对）",
-                 what, table, keycol, key);
-        return 0;
-    }
-    return 1;      // 记录在，值本来就一样：这是正常结果，不是失败
-}
-
 // ---------------- 事务 ----------------
 // 一个动作写多张表时（改等级要动 charac_info + charac_stat + 清惩罚，
 // 改点券要动 cash_cera + cash_cera_point），中途失败会留下半新半旧：
@@ -1634,10 +1586,57 @@ int db_unlock_lev_equip(Db *d, const Charac *c, int lev_max, Err err) {
     return change_equipment(d,c,lv,1,err);
 }
 
-int db_max_expert(Db *d, const Charac *c, Err err) {
-    return db_exec(d, "满专家", "taiwan_cain.charac_stat", "charac_no", c->no, err,
-                   "UPDATE taiwan_cain.charac_stat SET expert_job_exp=2054 WHERE charac_no=%u",
-                   c->no);
+int db_max_expert(Db *d, const Charac *c, const u32 targets[5], Err err) {
+    if (!c->no || !c->mid || d->tx_depth) {
+        snprintf(err, ERRBUF, "副职业修改缺少角色／账号编号或已有未结束事务，未写入"); return 0;
+    }
+    Str q = {0}; MyResult r = {0}; u32 target = 0;
+    str_cat(&q, "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE='InnoDB' AND "
+        "((TABLE_SCHEMA='taiwan_login' AND TABLE_NAME='login_account_3') OR "
+        "(TABLE_SCHEMA='taiwan_cain' AND TABLE_NAME IN ('charac_info','charac_stat')))");
+    int ok = select1(d, &q, &r) && my_i64(&r, 0, 0, 0) == 3;
+    my_free(&r); str_clear(&q);
+    if (!ok) { snprintf(err, ERRBUF, "副职业修改需要 InnoDB 登录、角色及统计表，未写入"); goto finish; }
+    // Keep the login row, including its absent-row gap, locked until commit.
+    // A queued UI action's earlier offline check cannot prevent a later login.
+    str_cat(&q, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+    ok = run(d, &q); str_clear(&q);
+    if (!ok) { snprintf(err, ERRBUF, "%s", d->err); goto finish; }
+    if (!db_tx_begin(d, err)) { ok = 0; goto finish; }
+    str_catf(&q, "SELECT login_status FROM taiwan_login.login_account_3 WHERE m_id=%u FOR UPDATE", c->mid);
+    ok = select1(d, &q, &r);
+    if (!ok) snprintf(err, ERRBUF, "%s", d->err);
+    else if (r.nrow && my_i64(&r, 0, 0, -1) != 0) {
+        snprintf(err, ERRBUF, "账号在线或正在退出，请先退出游戏后修改副职业，未写入"); ok = 0;
+    }
+    my_free(&r); str_clear(&q);
+    if (ok) {
+        str_catf(&q, "SELECT m_id,delete_flag,expert_job FROM taiwan_cain.charac_info WHERE charac_no=%u FOR UPDATE", c->no);
+        ok = select1(d, &q, &r) && r.nrow == 1 && my_u64(&r, 0, 0, 0) == c->mid && my_i64(&r, 0, 1, 1) == 0;
+        if (!ok) snprintf(err, ERRBUF, "副职业未写入：角色不存在、已删除或账号归属变化");
+        if (ok) {
+            int type = (int)my_i64(&r, 0, 2, 0);
+            if (type > 0 && type <= 4 && targets) target = targets[type];
+            if (!target || target > 2147483647u) {
+                snprintf(err, ERRBUF, "角色未学习副职业，或匹配 PVF 的经验表缺失／无效，未写入"); ok = 0;
+            }
+        }
+        my_free(&r); str_clear(&q);
+    }
+    if (ok) {
+        str_catf(&q, "UPDATE taiwan_cain.charac_stat SET expert_job_exp=%u WHERE charac_no=%u", target, c->no);
+        ok = run(d, &q); str_clear(&q);
+        if (!ok) snprintf(err, ERRBUF, "副职业修改：%s", d->err);
+    }
+    if (ok) {
+        str_catf(&q, "SELECT expert_job_exp FROM taiwan_cain.charac_stat WHERE charac_no=%u FOR UPDATE", c->no);
+        ok = select1(d, &q, &r) && r.nrow == 1 && my_i64(&r, 0, 0, -1) == target;
+        if (!ok) snprintf(err, ERRBUF, "副职业经验回读不一致或统计行缺失，已回滚");
+    }
+    if (!ok) db_tx_rollback(d);
+    else ok = db_tx_commit(d, err);
+finish:
+    my_free(&r); str_free(&q); return ok;
 }
 
 // The pinned original game stores remaining fatigue, not consumed fatigue.

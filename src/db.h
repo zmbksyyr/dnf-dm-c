@@ -162,7 +162,7 @@ int  db_set_pvp(Db *d, const Charac *c, int grade, int win, int point, Err err);
 int  db_no_weight(Db *d, const Charac *c, Err err);
 int  db_open_equip_slot(Db *d, const Charac *c, Err err);
 int  db_unlock_lev_equip(Db *d, const Charac *c, int lev_max, Err err);  // lev_max = 本端等级封顶
-int  db_max_expert(Db *d, const Charac *c, Err err);
+int  db_max_expert(Db *d, const Charac *c, const u32 targets[5], Err err);
 int  db_set_fatigue(Db *d, const Charac *c, Err err);      // 补满疲劳
 int  db_unlock_dungeon(Db *d, const Charac *c, Err err);   // 全图全难度
 int  db_reset_punish(Db *d, u32 mid, Err err);

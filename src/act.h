@@ -21,6 +21,7 @@ typedef struct {
     u64  u1, u2;
     char s[160];
     char s2[160];    // 第二个文本参数（如活动字典的「说明」）
+    u32 expert_exp[5]; // PVF targets captured when the action is queued.
 } Ctx;
 
 // 各页面拼好参数后就地提交。app_act 会把整个结构拷进队列，所以这个共享实例

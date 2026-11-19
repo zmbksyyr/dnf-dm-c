@@ -927,7 +927,11 @@ static LRESULT gm_on(Page *p, UINT m, WPARAM wp, LPARAM lp) {
         case G_NOWEIGHT: kc.kind = K_NOWEIGHT; break;
         case G_SLOT: kc.kind = K_SLOT; break;
         case G_UNLOCK: kc.kind = K_UNLOCK; break;
-        case G_EXPERT: kc.kind = K_EXPERT; break;
+        case G_EXPERT: {
+            Err err = {0};
+            if (!pvf_expert_max_exp(&g.pvf, kc.expert_exp, err)) { app_info(err); return 0; }
+            kc.kind = K_EXPERT; break;
+        }
         case G_FATIGUE: kc.kind = K_FATIGUE; break;
         case G_DUNGEON: kc.kind = K_DUNGEON; break;
         case G_PUNISH: kc.kind = K_PUNISH; kc.mid = g.cur.mid; break;

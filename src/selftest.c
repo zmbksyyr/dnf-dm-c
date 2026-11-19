@@ -220,6 +220,48 @@ static void test_account_cargo(void) {
     ok("未加载金库 PVF 不猜测初始容量", !pvf_account_cargo_create_capacity(&empty, &capacity) && !capacity);
 }
 
+static u32 expert_exp_fixture(const u32 *values, int count, int closed) {
+    u8 bytes[256] = {0};
+    char tags[] = "expert.exj\0[expertness exp]\0[/expertness exp]\0title";
+    u32 offsets[] = {0, sizeof("expert.exj"), sizeof("expert.exj") + sizeof("[expertness exp]"),
+        sizeof("expert.exj") + sizeof("[expertness exp]") + sizeof("[/expertness exp]")};
+    u32 indexes[] = {1, 0}; char list[] = "character/expertjob.lst", script[] = "character/expert.exj";
+    bytes[2] = 2; wr32(bytes + 3, 3); bytes[7] = 7;
+    const u32 list_size = 12;
+    u8 *data = bytes + list_size; data[2] = 5; wr32(data + 3, 1);
+    size_t pos = 7;
+    for (int i = 0; i < count; i++) {
+        data[pos] = 2; wr32(data + pos + 1, values[i]); pos += 5;
+        data[pos] = 2; pos += 5;
+        data[pos] = 7; wr32(data + pos + 1, 3); pos += 5;
+    }
+    if (closed) { data[pos] = 5; wr32(data + pos + 1, 2); pos += 5; }
+    u32 script_size = (u32)(pos + 3) & ~3u;
+    pvf_encrypt(bytes, list_size, 123); pvf_encrypt(data, script_size, 321);
+    Leaf leaves[2] = {0};
+    leaves[0].path = list; leaves[0].len = list_size; leaves[0].crc = 123;
+    leaves[1].path = script; leaves[1].off = list_size; leaves[1].len = script_size; leaves[1].crc = 321;
+    Pvf p = {0}; p.opened = 1; p.base = bytes; p.size = list_size + script_size;
+    p.leafs = leaves; p.nleaf = 2; p.by_path = indexes; p.nby_path = 2;
+    p.strings.blob = tags; p.strings.off = offsets; p.strings.n = 4; p.strings.blob_len = sizeof(tags);
+    u32 targets[5]; Err err = {0};
+    return pvf_expert_max_exp(&p, targets, err) ? targets[3] : 0;
+}
+
+static void test_expert_exp(void) {
+    u32 curve[] = {1, 7, 100, 200};
+    ok("副职业上限按 lst 映射及经验表末项读取", expert_exp_fixture(curve, 4, 1) == 200);
+    curve[3] = 444;
+    ok("修改 PVF 后不沿用固定 2054 或 200", expert_exp_fixture(curve, 4, 1) == 444);
+    ok("缺少副职业经验表结束标记拒绝", expert_exp_fixture(curve, 4, 0) == 0);
+    curve[3] = 99;
+    ok("副职业非递增经验曲线拒绝", expert_exp_fixture(curve, 4, 1) == 0);
+    curve[3] = 0x80000000u;
+    ok("副职业经验超出有符号字段拒绝", expert_exp_fixture(curve, 4, 1) == 0);
+    Pvf empty = {0}; u32 targets[5]; Err err = {0};
+    ok("没有 PVF 不猜测副职业上限", !pvf_expert_max_exp(&empty, targets, err));
+}
+
 int selftest_run(void) {
     // GUI 子系统没有控制台：挂到父进程的控制台上，输出才能被 CI/脚本看到
     AttachConsole(ATTACH_PARENT_PROCESS);
@@ -232,6 +274,7 @@ int selftest_run(void) {
     test_item();
     test_pvf();
     test_account_cargo();
+    test_expert_exp();
     str_catf(&s_log, "\n%s（%d 项失败）\n", s_fail ? "失败" : "全部通过", s_fail);
     char dir[MAX_PATH], path[MAX_PATH];
     app_config_dir(dir, sizeof(dir));

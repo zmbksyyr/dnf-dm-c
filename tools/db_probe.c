@@ -232,6 +232,15 @@ static int run_probe(int argc, char **argv) {
         ok = db_set_sp(&d, &c, atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), err);
     } else if (!strcmp(argv[1], "quest-points") && argc == 5) {
         ok = db_set_qp(&d, &c, atoi(argv[4]), err);
+    } else if ((!strcmp(argv[1], "expert") || !strcmp(argv[1], "expert-checked")) && argc == 4) {
+        const u32 targets[5] = {0, 2054, 2054, 200, 2054}; // Synthetic data-test PVF snapshot.
+        ok = (strcmp(argv[1], "expert-checked") || db_require_offline(&d, c.mid, err)) &&
+             db_max_expert(&d, &c, targets, err);
+    } else if (!strcmp(argv[1], "expert-pvf") && argc == 5) {
+        Pvf p = {0}; PvfProg prog = {0}; u32 targets[5];
+        ok = pvf_open(&p, argv[4], prog, err) && pvf_expert_max_exp(&p, targets, err) &&
+             db_max_expert(&d, &c, targets, err);
+        pvf_close(&p);
     } else if (!strcmp(argv[1], "fatigue") && argc == 4) {
         ok = db_set_fatigue(&d, &c, err);
     } else if (!strcmp(argv[1], "money") && argc == 5) {
