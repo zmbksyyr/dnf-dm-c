@@ -592,7 +592,7 @@ static i64 gm_value(int id) {
 // 校验不过不弹框打断——失焦时弹模态框会跟焦点切换打架，状态栏说一句就够了。
 static void gm_commit(int id) {
     if (!g.char_ok) return;
-    if (g.cur.online && id != G_COIN && id != G_MONEY) {
+    if (g.cur.online && id != G_COIN && id != G_MONEY && id != G_LEV) {
         app_status("角色在线，改动未写入——请先退出游戏");
         gm_refill();                     // 顺便把刚填的值清掉
         return;
@@ -608,7 +608,7 @@ static void gm_commit(int id) {
                 app_status("等级范围 1~%d，未写入", gm_lev_max());
                 return;
             }
-            if (v == g.cur.lev) return;
+            if (!g.cur.online && v == g.cur.lev) return;
             c.i1 = v;
             u32 exp;
             Err err = {0};
@@ -724,7 +724,7 @@ static void gm_commit(int id) {
 
 // ---------------- 数值框的「+数量」快捷按钮 ----------------
 // 按钮只写「+数量」：在当前值上加这么多，立刻写库。
-// 金币和复活币使用服务端原子增量，其余离线字段以当前快照为起点。
+// 金币和复活币使用服务端原子增量，等级按当前快照提交目标等级。
 #define QADD_N 8
 static HWND s_qadd[QADD_N];
 static const struct {
@@ -746,7 +746,7 @@ static const struct {
 static void gm_quick_add(int i) {
     if (i < 0 || i >= QADD_N) return;
     if (!g.char_ok) return;
-    if (g.cur.online && kQAdd[i].target != G_COIN && kQAdd[i].target != G_MONEY) {
+    if (g.cur.online && kQAdd[i].target != G_COIN && kQAdd[i].target != G_MONEY && kQAdd[i].target != G_LEV) {
         app_status("角色在线，改动未写入——请先退出游戏");
         return;
     }
@@ -1047,13 +1047,11 @@ static void gm_lock(Page *p) {
     int on = g.char_ok;
     int ids[16] = {G_NAME, G_LEV, G_JOB, G_GROW, G_MONEY, G_COIN, G_CERA, G_POINT, G_ACCM,
                    G_GRADE, G_WIN, G_PVP_POINT, G_VIP};
-    // 表单是失焦即写，而角色在线时写完会被服务端回写覆盖（程序会拒绝提交）。
-    // 与其让人改半天发现没生效，不如在线时把这些框置灰，并把条件写在组框标题上——
-    // 灰掉的控件收不到悬停，提示只能写在旁边的文字里。一键按钮不受此限（它们直接改库）。
+    // 已支持的在线字段经游戏线程修改并保存，其余字段仍需离线。
     int edit = g.char_ok && !g.cur.online;
-    for (int i = 0; i < 13; i++) ui_enable(GetDlgItem(p->wnd, ids[i]), ids[i]==G_COIN || ids[i]==G_MONEY ? g.char_ok : edit);
+    for (int i = 0; i < 13; i++) ui_enable(GetDlgItem(p->wnd, ids[i]), ids[i]==G_COIN || ids[i]==G_MONEY || ids[i]==G_LEV ? g.char_ok : edit);
     // 快捷按钮和它对应的输入框同生同死：框不能改的时候，按钮点了也没意义
-    for (int i = 0; i < QADD_N; i++) ui_enable(GetDlgItem(p->wnd, G_QADD + i), kQAdd[i].target==G_COIN || kQAdd[i].target==G_MONEY ? g.char_ok : edit);
+    for (int i = 0; i < QADD_N; i++) ui_enable(GetDlgItem(p->wnd, G_QADD + i), kQAdd[i].target==G_COIN || kQAdd[i].target==G_MONEY || kQAdd[i].target==G_LEV ? g.char_ok : edit);
     for (int i = 0; i < 10; i++) ui_enable(GetDlgItem(p->wnd, G_SP + i), on);
     ui_enable(GetDlgItem(p->wnd, G_QEXP), on);
     ui_enable(GetDlgItem(p->wnd, G_QIMP), on);
@@ -1068,7 +1066,7 @@ static void gm_lock(Page *p) {
             // 没选角色时不加任何后缀：那时候这些框是"还没东西可改"，不是"在线不能改"
             char *t = (!g.char_ok) ? fmt_new("%s", bx[i].base)
                       : edit       ? fmt_new("%s", bx[i].base)
-                                     : fmt_new("%s（%s）", bx[i].base,i==1?"在线可改金币、复活币":"退出游戏才能改");
+                                     : fmt_new("%s（%s）", bx[i].base,i==0?"在线可改等级":i==1?"在线可改金币、复活币":"退出游戏才能改");
             WCHAR w[96];
             utf16(t, w, COUNT_OF(w));
             if (h) SetWindowTextW(h, w);
@@ -1186,7 +1184,7 @@ static void gm_build(HWND parent) {
     // 上限写进提示：不同端封顶不同，写死「1~100」会让人以为能填到 100
     ui_tip(parent, c_lev,
            fmt_new("填「设成几级」（1~%d，上限由配置文件 settings.ini 的 [gm] lev_max 决定，默认 85），"
-                   "点到别处按这个数写库、经验清零，框随即回 0。"
+                    "点到别处提交，经验设为该等级的起始值，框随即回 0。在线须在城镇，按原游戏规则更新属性、技能点并确认存档。"
                    "留 0 = 不改；要往上加几级用右边 +10。当前等级看左边角色信息",
                    gm_lev_max()));
     ui_tip(parent, c_money,
@@ -1206,7 +1204,7 @@ static void gm_build(HWND parent) {
            "点券和赠送点券是同一条 UPDATE，只填一个就只改那一个");
 
     // 快捷按钮上只有「+数量」：点一下在「当前值」上加，不经过输入框
-    ui_tip(parent, s_qadd[0], fmt_new("在当前等级上加 10 级（封顶 %d），立刻写库；不动输入框",
+    ui_tip(parent, s_qadd[0], fmt_new("在当前等级上加 10 级（封顶 %d）；在线须在城镇，确认原游戏存档后完成",
                                       gm_lev_max()));
     ui_tip(parent, s_qadd[1], "在实际余额上加 1000 万；在线时确认游戏存档，超过游戏金币上限则不发放");
     ui_tip(parent, s_qadd[2], "在当前复活币上加 100，立刻写库；不动输入框");

@@ -349,65 +349,90 @@ class DataTests(unittest.TestCase):
 
     def test_level_punishment_failure_rolls_back(self):
         table = "d_taiwan.member_punish_info"
-        self.cur.execute("SELECT * FROM " + table + " WHERE m_id=%s", (self.mid,))
-        rows = self.cur.fetchall()
-        self.cur.execute("SELECT lev,exp FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,))
-        level, info_exp = self.cur.fetchone()
-        exp = self.one("SELECT exp FROM taiwan_cain.charac_stat WHERE charac_no=%s", (self.cno,))
-        try:
-            if not rows:
-                self.cur.execute("INSERT INTO " + table + " (m_id) VALUES (%s)", (self.mid,))
+        with self.level_fixture() as before:
+            self.cur.execute("INSERT INTO " + table + " (m_id) VALUES (%s)", (TEST_NO,))
             with self.trigger(table, "DELETE", "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit blocked punish'"):
-                r = self.probe("level", self.cno, self.mid, 42 if level != 42 else 43)
-            self.assertNotEqual(r.returncode, 0)
-            self.assertEqual(self.one("SELECT lev FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,)), level)
-            self.assertEqual(self.one("SELECT exp FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,)), info_exp)
-            self.assertEqual(self.one("SELECT exp FROM taiwan_cain.charac_stat WHERE charac_no=%s", (self.cno,)), exp)
-        finally:
-            self.cur.execute("UPDATE taiwan_cain.charac_info SET lev=%s,exp=%s WHERE charac_no=%s", (level, info_exp, self.cno))
-            self.cur.execute("UPDATE taiwan_cain.charac_stat SET exp=%s WHERE charac_no=%s", (exp, self.cno))
-            if not rows:
-                self.cur.execute("DELETE FROM " + table + " WHERE m_id=%s", (self.mid,))
+                r = self.probe("level-exp", TEST_NO, TEST_NO, 60, 150172894)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertIn("清除处罚失败", r.stderr)
+            self.assertEqual(self.level_values(), before)
+            self.assertEqual(self.one("SELECT COUNT(*) FROM " + table + " WHERE m_id=%s", (TEST_NO,)), 1)
 
     @contextlib.contextmanager
     def level_fixture(self):
-        self.cur.execute("SELECT lev,exp FROM taiwan_cain.charac_info WHERE charac_no=%s", (self.cno,))
-        level, info_exp = self.cur.fetchone()
-        stat_exp = self.one("SELECT exp FROM taiwan_cain.charac_stat WHERE charac_no=%s", (self.cno,))
-        try:
-            yield level, info_exp, stat_exp
-        finally:
-            self.cur.execute("UPDATE taiwan_cain.charac_info SET lev=%s,exp=%s WHERE charac_no=%s",
-                             (level, info_exp, self.cno))
-            self.cur.execute("UPDATE taiwan_cain.charac_stat SET exp=%s WHERE charac_no=%s", (stat_exp, self.cno))
+        with self.equipment_fixture():
+            self.assertEqual(self.one("SELECT COUNT(*) FROM d_taiwan.member_punish_info WHERE m_id=%s", (TEST_NO,)), 0)
+            try:
+                yield self.level_values()
+            finally:
+                self.cur.execute("DELETE FROM d_taiwan.member_punish_info WHERE m_id=%s", (TEST_NO,))
+
+    def level_values(self):
+        self.cur.execute("SELECT c.lev,c.exp,s.exp FROM taiwan_cain.charac_info c "
+                         "JOIN taiwan_cain.charac_stat s USING(charac_no) WHERE c.charac_no=%s", (TEST_NO,))
+        return self.cur.fetchone()
 
     def test_level_updates_both_experience_columns(self):
-        # An empty punishment fixture avoids clearing any existing account penalties.
         with self.level_fixture():
-            r = self.probe("level-exp", self.cno, TEST_NO, 60, 150172894)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.cur.execute("SELECT c.lev,c.exp,s.exp FROM taiwan_cain.charac_info c "
-                             "JOIN taiwan_cain.charac_stat s USING(charac_no) WHERE c.charac_no=%s", (self.cno,))
-            self.assertEqual(self.cur.fetchone(), (60, 150172894, 150172894))
+            before = {}
+            for table, changed in [('charac_info', ('lev', 'exp')), ('charac_stat', ('exp',))]:
+                self.cur.execute('SELECT * FROM taiwan_cain.' + table + ' WHERE charac_no=%s', (TEST_NO,))
+                row = self.cur.fetchone(); cols = [d[0] for d in self.cur.description]
+                before[table] = {k: v for k, v in zip(cols, row) if k not in changed}
+            for _ in range(2):
+                r = self.probe("level-exp", TEST_NO, TEST_NO, 60, 150172894)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.level_values(), (60, 150172894, 150172894))
+            for table in before:
+                self.cur.execute('SELECT * FROM taiwan_cain.' + table + ' WHERE charac_no=%s', (TEST_NO,))
+                row = self.cur.fetchone(); cols = [d[0] for d in self.cur.description]
+                self.assertEqual({k: v for k, v in zip(cols, row) if k in before[table]}, before[table])
 
     def test_level_second_table_failure_rolls_back_first(self):
         with self.level_fixture() as before:
             with self.trigger("taiwan_cain.charac_stat", "UPDATE",
                               "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='audit blocked experience'"):
-                r = self.probe("level-exp", self.cno, TEST_NO, 60, 150172894)
+                r = self.probe("level-exp", TEST_NO, TEST_NO, 60, 150172894)
             self.assertNotEqual(r.returncode, 0)
-            self.cur.execute("SELECT c.lev,c.exp,s.exp FROM taiwan_cain.charac_info c "
-                             "JOIN taiwan_cain.charac_stat s USING(charac_no) WHERE c.charac_no=%s", (self.cno,))
-            self.assertEqual(self.cur.fetchone(), before)
+            self.assertIn("audit blocked experience", r.stderr)
+            self.assertEqual(self.level_values(), before)
 
     def test_level_out_of_range_never_clips_or_writes(self):
         with self.level_fixture() as before:
             for level, exp in ((0, 0), (128, 0), (60, -1), (94, 2147483648)):
-                r = self.probe("level-exp", self.cno, TEST_NO, level, exp)
+                r = self.probe("level-exp", TEST_NO, TEST_NO, level, exp)
                 self.assertNotEqual(r.returncode, 0, (level, exp, r.stdout))
-                self.cur.execute("SELECT c.lev,c.exp,s.exp FROM taiwan_cain.charac_info c "
-                                 "JOIN taiwan_cain.charac_stat s USING(charac_no) WHERE c.charac_no=%s", (self.cno,))
-                self.assertEqual(self.cur.fetchone(), before)
+                self.assertEqual(self.level_values(), before)
+
+    def test_level_rejects_wrong_owner_deleted_and_login_state(self):
+        with self.level_fixture() as before:
+            self.cur.execute('INSERT INTO d_taiwan.member_punish_info (m_id) VALUES (%s)', (TEST_NO,))
+            for owner, deleted, status in [(TEST_NO + 1, 0, 0), (TEST_NO, 1, 0),
+                                           (TEST_NO, 0, 1), (TEST_NO, 0, 2)]:
+                self.cur.execute('UPDATE taiwan_cain.charac_info SET delete_flag=%s WHERE charac_no=%s', (deleted, TEST_NO))
+                self.cur.execute('UPDATE taiwan_login.login_account_3 SET login_status=%s WHERE m_id=%s', (status, TEST_NO))
+                r = self.probe('level-exp', TEST_NO, owner, 60, 150172894)
+                self.assertNotEqual(r.returncode, 0, (owner, deleted, status, r.stdout))
+                self.assertEqual(self.level_values(), before)
+                self.assertEqual(self.one('SELECT COUNT(*) FROM d_taiwan.member_punish_info WHERE m_id=%s', (TEST_NO,)), 1)
+
+    def test_level_missing_stat_does_not_change_info_or_penalty(self):
+        with self.level_fixture() as before:
+            self.cur.execute('DELETE FROM taiwan_cain.charac_stat WHERE charac_no=%s', (TEST_NO,))
+            self.cur.execute('INSERT INTO d_taiwan.member_punish_info (m_id) VALUES (%s)', (TEST_NO,))
+            r = self.probe('level-exp', TEST_NO, TEST_NO, 60, 150172894)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.cur.execute('SELECT lev,exp FROM taiwan_cain.charac_info WHERE charac_no=%s', (TEST_NO,))
+            self.assertEqual(self.cur.fetchone(), before[:2])
+            self.assertEqual(self.one('SELECT COUNT(*) FROM d_taiwan.member_punish_info WHERE m_id=%s', (TEST_NO,)), 1)
+
+    def test_level_readback_mismatch_rolls_back(self):
+        with self.level_fixture() as before:
+            with self.trigger('taiwan_cain.charac_stat', 'UPDATE', 'SET NEW.exp=NEW.exp+1'):
+                r = self.probe('level-exp', TEST_NO, TEST_NO, 60, 150172894)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertIn('等级/经验未确认', r.stderr)
+            self.assertEqual(self.level_values(), before)
 
     def test_offline_gate_rechecks_raw_account_status(self):
         table = "taiwan_login.login_account_3"

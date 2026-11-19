@@ -1109,19 +1109,44 @@ int db_set_lev(Db *d, const Charac *c, int lev, i64 exp, Err err) {
         snprintf(err, ERRBUF, "等级或累计经验超出原版服务端字段范围，未写入");
         return 0;
     }
+    int online=0;
+    if (!db_account_online(d, c->mid, &online, err)) return 0;
+    if (online) {
+        OnlineCommand request;
+        if (!db_online_level_submit(d,c,(u32)lev,(u32)exp,&request,err) || !db_online_finish(d,&request,err)) return 0;
+        Str cleanup={0};
+        str_catf(&cleanup,"DELETE FROM d_taiwan.member_punish_info WHERE m_id=%u",c->mid);
+        int ok=run(d,&cleanup);str_free(&cleanup);
+        if(!ok) snprintf(err,ERRBUF,"等级已保存，清除处罚失败：%s",d->err);
+        return ok;
+    }
+    if (!db_require_offline(d, c->mid, err)) return 0;
     if (!db_tx_begin(d, err)) return 0;
-    if (!db_exec(d, "改等级", "taiwan_cain.charac_info", "charac_no", c->no, err,
-                 "UPDATE taiwan_cain.charac_info SET lev=%d,exp=%llu WHERE charac_no=%u",
-                 lev, (unsigned long long)exp, c->no))
-        goto fail;
-    if (!db_exec(d, "改经验", "taiwan_cain.charac_stat", "charac_no", c->no, err,
-                             "UPDATE taiwan_cain.charac_stat SET exp=%llu WHERE charac_no=%u",
-                             (unsigned long long)exp, c->no))
-        goto fail;
-    // 惩罚记录可能本来就没有（DELETE 影响 0 行是正常的），所以不走 db_exec
-    Str s = {0};
-    str_catf(&s, "DELETE FROM d_taiwan.member_punish_info WHERE m_id=%u", c->mid);
+    Str s = {0}; MyResult r = {0};
+    str_catf(&s, "UPDATE taiwan_cain.charac_info c JOIN taiwan_cain.charac_stat s "
+                "ON s.charac_no=c.charac_no SET c.lev=%d,c.exp=%llu,s.exp=%llu "
+                "WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 AND NOT EXISTS "
+                "(SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status>=1)",
+                lev, (unsigned long long)exp, (unsigned long long)exp, c->no, c->mid);
     int ok = run(d, &s);
+    str_clear(&s);
+    if (!ok) {
+        snprintf(err, ERRBUF, "改等级/经验：%s", d->err);
+    } else {
+        // Verify the guarded target, including an idempotent update with zero affected rows.
+        str_catf(&s, "SELECT 1 FROM taiwan_cain.charac_info c JOIN taiwan_cain.charac_stat s "
+                    "ON s.charac_no=c.charac_no WHERE c.charac_no=%u AND c.m_id=%u AND c.delete_flag=0 "
+                    "AND c.lev=%d AND c.exp=%llu AND s.exp=%llu AND NOT EXISTS "
+                    "(SELECT 1 FROM taiwan_login.login_account_3 l WHERE l.m_id=c.m_id AND l.login_status>=1) FOR UPDATE",
+                    c->no, c->mid, lev, (unsigned long long)exp, (unsigned long long)exp);
+        ok = select1(d, &s, &r) && r.nrow == 1;
+        if (!ok) snprintf(err, ERRBUF, "等级/经验未确认：归属、删除、在线状态或角色记录已变化");
+    }
+    my_free(&r); str_free(&s);
+    if (!ok) goto fail;
+    // 惩罚记录可能本来就没有（DELETE 影响 0 行是正常的），所以不走 db_exec
+    str_catf(&s, "DELETE FROM d_taiwan.member_punish_info WHERE m_id=%u", c->mid);
+    ok = run(d, &s);
     str_free(&s);
     if (!ok) { snprintf(err, ERRBUF, "清除处罚失败：%s", d->err); goto fail; }
     return db_tx_commit(d, err);
