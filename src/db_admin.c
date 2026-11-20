@@ -421,8 +421,76 @@ static int dump_begin(Db *d, const Vec *tables, const char *path, char *temp, in
     return 1;
 }
 
+// Column metadata for one table, prefetched per schema so a full dump does not
+// pay an information_schema round trip for every table.
+typedef struct {
+    Str name;
+    Vec names, types;
+} ColMetaEntry;
+
+static const ColMetaEntry *find_col_meta(const Vec *cache, const char *table) {
+    for (int i = 0; i < cache->n; i++) {
+        const ColMetaEntry *e = VEC_AT(cache, ColMetaEntry, i);
+        if (e->name.n == (int)strlen(table) && !memcmp(e->name.p, table, (size_t)e->name.n)) return e;
+    }
+    return NULL;
+}
+
+static void copy_col_pairs(const ColMetaEntry *e, Vec *names, Vec *types) {
+    for (int i = 0; i < e->names.n; i++) {
+        Str *a = VEC_ADD(names, Str); memset(a, 0, sizeof(*a));
+        str_set(a, str_c(VEC_AT(&e->names, Str, i)));
+        Str *b = VEC_ADD(types, Str); memset(b, 0, sizeof(*b));
+        str_set(b, str_c(VEC_AT(&e->types, Str, i)));
+    }
+}
+
+// One query per schema fills the cache; tables are addressed by name inside it.
+static int load_col_meta(Db *d, const char *schema, Vec *cache, Err err) {
+    Str q = {0};
+    char *sc = mysql_escape(&d->conn, schema);
+    str_catf(&q, "SELECT TABLE_NAME,COLUMN_NAME,DATA_TYPE FROM information_schema.COLUMNS "
+                 "WHERE TABLE_SCHEMA='%s' "
+                 "AND EXTRA NOT LIKE '%%VIRTUAL GENERATED%%' "
+                 "AND EXTRA NOT LIKE '%%STORED GENERATED%%' ORDER BY TABLE_NAME,ORDINAL_POSITION", sc);
+    free(sc);
+    MyResult r = {0};
+    if (!select1(d, &q, &r)) { str_free(&q); snprintf(err, ERRBUF, "%s", d->err); return 0; }
+    for (int i = 0; i < r.nrow; i++) {
+        const char *tb = my_text(&r, i, 0);
+        if (!tb) continue;
+        ColMetaEntry *e = NULL;
+        if (cache->n) {
+            ColMetaEntry *last = VEC_AT(cache, ColMetaEntry, cache->n - 1);
+            if (last->name.n == (int)strlen(tb) && !memcmp(last->name.p, tb, (size_t)last->name.n)) e = last;
+        }
+        if (!e) {
+            e = VEC_ADD(cache, ColMetaEntry); memset(e, 0, sizeof(*e));
+            str_set(&e->name, tb);
+            vec_init(&e->names, sizeof(Str)); vec_init(&e->types, sizeof(Str));
+        }
+        Str *a = VEC_ADD(&e->names, Str); memset(a, 0, sizeof(*a));
+        str_set(a, my_text(&r, i, 1) ? my_text(&r, i, 1) : "");
+        Str *b = VEC_ADD(&e->types, Str); memset(b, 0, sizeof(*b));
+        str_set(b, my_text(&r, i, 2) ? my_text(&r, i, 2) : "");
+    }
+    my_free(&r);
+    str_free(&q);
+    return 1;
+}
+
+static void free_col_meta(Vec *cache) {
+    for (int i = 0; i < cache->n; i++) {
+        ColMetaEntry *e = VEC_AT(cache, ColMetaEntry, i);
+        for (int k = 0; k < e->names.n; k++) str_free(VEC_AT(&e->names, Str, k));
+        for (int k = 0; k < e->types.n; k++) str_free(VEC_AT(&e->types, Str, k));
+        vec_free(&e->names); vec_free(&e->types); str_free(&e->name);
+    }
+    vec_free(cache);
+}
 static int dump_table(Db *d, const char *path, const char *schema, const char *table,
-                      const char *key, u32 value, int ddl, u64 *rows, Err err) {
+                      const char *key, u32 value, int ddl, u64 *rows, Err err,
+                      const Vec *col_cache) {
     Str q = {0}, out = {0}, insert = {0};
     Vec names, types;
     vec_init(&names, sizeof(Str)); vec_init(&types, sizeof(Str));
@@ -439,15 +507,22 @@ static int dump_table(Db *d, const char *path, const char *schema, const char *t
         if (!dump_append(path, &out, err)) goto done;
         my_free(&r); str_clear(&q);
     }
-    char *sc = mysql_escape(&d->conn, schema), *tb = mysql_escape(&d->conn, table);
-    str_catf(&q, "SELECT COLUMN_NAME,DATA_TYPE FROM information_schema.COLUMNS "
-                 "WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' "
-                 "AND EXTRA NOT LIKE '%%VIRTUAL GENERATED%%' "
-                 "AND EXTRA NOT LIKE '%%STORED GENERATED%%' ORDER BY ORDINAL_POSITION", sc, tb);
-    free(sc); free(tb);
-    if (!select1(d, &q, &r) || !r.nrow) goto done;
-    read_col_pairs(&r, &names, &types);
-    my_free(&r); str_clear(&q);
+    // Column metadata is cached per schema by the caller: the full dump would
+    // otherwise spend one information_schema round trip per table.
+    const ColMetaEntry *cached = col_cache ? find_col_meta(col_cache, table) : NULL;
+    if (cached) {
+        copy_col_pairs(cached, &names, &types);
+    } else {
+        char *sc = mysql_escape(&d->conn, schema), *tb = mysql_escape(&d->conn, table);
+        str_catf(&q, "SELECT COLUMN_NAME,DATA_TYPE FROM information_schema.COLUMNS "
+                     "WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' "
+                     "AND EXTRA NOT LIKE '%%VIRTUAL GENERATED%%' "
+                     "AND EXTRA NOT LIKE '%%STORED GENERATED%%' ORDER BY ORDINAL_POSITION", sc, tb);
+        free(sc); free(tb);
+        if (!select1(d, &q, &r) || !r.nrow) goto done;
+        read_col_pairs(&r, &names, &types);
+        my_free(&r); str_clear(&q);
+    }
 
     str_cat(&insert, "INSERT INTO "); dump_name(&insert, schema, table); str_cat(&insert, " (");
     str_cat(&q, "SELECT ");
@@ -513,14 +588,25 @@ int db_dump_sql(Db *d, const char *path, int *tables, u64 *rows, Err err) {
     str_free(&header);
     int ok = started, nt = 0;
     u64 nr = 0;
+    // Column metadata is fetched once per schema instead of once per table: a full
+    // dump walks hundreds of tables and each round trip is pure overhead.
+    Vec col_cache; vec_init(&col_cache, sizeof(ColMetaEntry));
+    char cached_schema[80] = {0};
     for (int i = 0; ok && i < tabs.n; i++) {
         if (db_cancelled()) { snprintf(err, ERRBUF, "已取消"); ok = 0; break; }
         if (db_progress_cb) db_progress_cb(i * 100 / tabs.n);
         char sc[80], tb[128];
-        ok = split_tbl(str_c(VEC_AT(&tabs, Str, i)), sc, sizeof(sc), tb, sizeof(tb)) &&
-             dump_table(d, temp, sc, tb, NULL, 0, 1, &nr, err);
+        ok = split_tbl(str_c(VEC_AT(&tabs, Str, i)), sc, sizeof(sc), tb, sizeof(tb));
+        if (!ok) break;
+        if (_stricmp(sc, cached_schema)) {
+            free_col_meta(&col_cache); vec_init(&col_cache, sizeof(ColMetaEntry));
+            snprintf(cached_schema, sizeof(cached_schema), "%s", sc);
+            if (!load_col_meta(d, sc, &col_cache, err)) { ok = 0; break; }
+        }
+        ok = dump_table(d, temp, sc, tb, NULL, 0, 1, &nr, err, &col_cache);
         if (ok) nt++;
     }
+    free_col_meta(&col_cache);
     if (ok) { str_cat(&header, "\nSET FOREIGN_KEY_CHECKS=1;\n"); ok = dump_append(temp, &header, err); }
     str_free(&header);
     for (int i = 0; i < tabs.n; i++) str_free(VEC_AT(&tabs, Str, i));
@@ -1001,7 +1087,7 @@ int db_backup_char(Db *d, const Charac *c, const char *path, int *tables, u64 *r
         if (db_progress_cb) db_progress_cb(i * 100 / tabs.n);
         const CharTab *ct = VEC_AT(&tabs, CharTab, i);
         ok = dump_table(d, temp, ct->db, ct->tb, ct->by_mid ? "m_id" : "charac_no",
-                        ct->by_mid ? c->mid : c->no, 0, &nr, err);
+                        ct->by_mid ? c->mid : c->no, 0, &nr, err, NULL);
         if (ok) nt++;
     }
     if (ok) {
