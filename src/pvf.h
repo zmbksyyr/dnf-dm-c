@@ -75,6 +75,9 @@ void  pvf_close(Pvf *p);
 void  pvf_decrypt(u8 *p, size_t n, u32 crc);              // 读：异或 + 右旋 6 位
 void  pvf_encrypt(u8 *p, size_t n, u32 crc);              // 逆变换：左旋 6 位 + 异或（自检用）
 const Leaf *pvf_find(const Pvf *p, const char *path);
+// 列出/导出内部文件：给排障与数据提取用，不参与 GM 业务。
+int   pvf_list(const Pvf *p, Buf *out);
+int   pvf_extract(const Pvf *p, const char *inner, const char *outer, Err err);
 int   pvf_read(const Pvf *p, const Leaf *lf, Buf *out);
 // The table starts at level 2 and stores accumulated experience.
 int   pvf_level_min_exp(const Pvf *p, int level, u32 *exp, Err err);

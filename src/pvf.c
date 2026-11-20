@@ -228,6 +228,27 @@ const Leaf *pvf_find(const Pvf *p, const char *path) {
     return NULL;
 }
 
+int pvf_list(const Pvf *p, Buf *out) {
+    for (int i = 0; i < p->nleaf; i++) {
+        const char *path = p->leafs[i].path;
+        if (!path) continue;
+        buf_put(out, path, strlen(path));
+        buf_putc(out, (u8)'\n');
+    }
+    return 1;
+}
+
+int pvf_extract(const Pvf *p, const char *inner, const char *outer, Err err) {
+    err[0] = 0;
+    const Leaf *lf = pvf_find(p, inner);
+    if (!lf) { snprintf(err, ERRBUF, "PVF 里没有 %s", inner); return 0; }
+    Buf d = {0};
+    if (!pvf_read(p, lf, &d)) { buf_free(&d); snprintf(err, ERRBUF, "读取 %s 失败", inner); return 0; }
+    int ok = file_write(outer, d.p, d.n);
+    if (!ok) snprintf(err, ERRBUF, "写入 %s 失败", outer);
+    buf_free(&d);
+    return ok;
+}
 int pvf_read(const Pvf *p, const Leaf *lf, Buf *out) {
     buf_clear(out);
     if (!p || !lf || !p->base) return 0;

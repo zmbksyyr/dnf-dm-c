@@ -340,6 +340,72 @@ static int db_restore_main(void) {
     return ok ? 0 : 1;
 }
 
+// --pvf-list[=输出文件]：把 PVF 内部文件清单导出成文本（排障 / 数据提取用）
+static int pvf_list_main(void) {
+    char out[MAX_PATH];
+    const WCHAR *cl = GetCommandLineW();
+    const WCHAR *at = wcsstr(cl, L"--pvf-list=");
+    if (at) {
+        char tmp[MAX_PATH];
+        utf8(at + 11, tmp, sizeof(tmp));
+        str_trim(tmp);
+        snprintf(out, sizeof(out), "%s", tmp);
+    } else {
+        art_dir("export", out, sizeof(out));
+        path_join(out, sizeof(out), out, "pvf-list.txt");
+    }
+    Pvf p;
+    Err err;
+    PvfProg prog = {0};
+    memset(&p, 0, sizeof(p));
+    if (!pvf_open(&p, g.cfg.pvf, prog, err)) {
+        app_err("打开 PVF 失败：%s", err);
+        app_shutdown();
+        return 1;
+    }
+    Buf d = {0};
+    int ok = pvf_list(&p, &d) && file_write(out, d.p, d.n);
+    if (ok) app_log("PVF 清单 · %d 个文件 → %s", p.nleaf, out);
+    else app_err("导出 PVF 清单失败：%s", err);
+    buf_free(&d);
+    pvf_close(&p);
+    app_shutdown();
+    return ok ? 0 : 1;
+}
+
+// --pvf-extract=内部路径:输出文件：取出 PVF 里的单个文件（排障 / 数据提取用）
+static int pvf_extract_main(void) {
+    const WCHAR *cl = GetCommandLineW();
+    const WCHAR *at = wcsstr(cl, L"--pvf-extract=");
+    if (!at) return 1;
+    char spec[MAX_PATH * 2], inner[MAX_PATH], outer[MAX_PATH];
+    utf8(at + 14, spec, sizeof(spec));
+    str_trim(spec);
+    char *sep = strchr(spec, ':');
+    if (!sep) {
+        app_err("用法：--pvf-extract=<PVF 内路径>:<输出文件>");
+        app_shutdown();
+        return 1;
+    }
+    *sep = '\0';
+    snprintf(inner, sizeof(inner), "%s", spec);
+    snprintf(outer, sizeof(outer), "%s", sep + 1);
+    Pvf p;
+    Err err;
+    PvfProg prog = {0};
+    memset(&p, 0, sizeof(p));
+    if (!pvf_open(&p, g.cfg.pvf, prog, err)) {
+        app_err("打开 PVF 失败：%s", err);
+        app_shutdown();
+        return 1;
+    }
+    int ok = pvf_extract(&p, inner, outer, err);
+    if (ok) app_log("已导出 %s → %s", inner, outer);
+    else app_err("导出失败：%s", err);
+    pvf_close(&p);
+    app_shutdown();
+    return ok ? 0 : 1;
+}
 // --db-dump[=路径]：按配置连库，导出整库 SQL 后退出（供脚本/排障用）
 static int db_dump_main(void) {
     char path[MAX_PATH];
@@ -1097,6 +1163,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
 
     if (wcsstr(GetCommandLineW(), L"--db-test")) return db_test_main();
     if (wcsstr(GetCommandLineW(), L"--grab-probe")) return grab_probe_main();
+    if (wcsstr(GetCommandLineW(), L"--pvf-list")) return pvf_list_main();
+    if (wcsstr(GetCommandLineW(), L"--pvf-extract=")) return pvf_extract_main();
     if (wcsstr(GetCommandLineW(), L"--db-dump")) return db_dump_main();
     if (wcsstr(GetCommandLineW(), L"--db-restore")) return db_restore_main();
 
