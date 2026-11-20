@@ -78,6 +78,8 @@ const Leaf *pvf_find(const Pvf *p, const char *path);
 // 列出/导出内部文件：给排障与数据提取用，不参与 GM 业务。
 int   pvf_list(const Pvf *p, Buf *out);
 int   pvf_extract(const Pvf *p, const char *inner, const char *outer, Err err);
+// n_string 表：脚本 IR 里的 id → 名称（排障用）
+const char *pvf_nstr(const Pvf *p, u32 id);
 int   pvf_read(const Pvf *p, const Leaf *lf, Buf *out);
 // The table starts at level 2 and stores accumulated experience.
 int   pvf_level_min_exp(const Pvf *p, int level, u32 *exp, Err err);

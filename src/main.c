@@ -340,6 +340,32 @@ static int db_restore_main(void) {
     return ok ? 0 : 1;
 }
 
+// --pvf-nstr=id[,id...]：把脚本 IR 里的 n_string id 解析成名称（排障 / 逆向用）
+static int pvf_nstr_main(void) {
+    const WCHAR *cl = GetCommandLineW();
+    const WCHAR *at = wcsstr(cl, L"--pvf-nstr=");
+    if (!at) return 1;
+    char spec[512];
+    utf8(at + 11, spec, sizeof(spec));
+    str_trim(spec);
+    Pvf p;
+    Err err;
+    PvfProg prog = {0};
+    memset(&p, 0, sizeof(p));
+    if (!pvf_open(&p, g.cfg.pvf, prog, err)) {
+        app_err("打开 PVF 失败：%s", err);
+        app_shutdown();
+        return 1;
+    }
+    char *save = NULL;
+    for (char *tok = strtok_s(spec, ",", &save); tok; tok = strtok_s(NULL, ",", &save)) {
+        unsigned long id = strtoul(tok, NULL, 0);
+        app_log("%lu -> %s", id, pvf_nstr(&p, (u32)id));
+    }
+    pvf_close(&p);
+    app_shutdown();
+    return 0;
+}
 // --pvf-list[=输出文件]：把 PVF 内部文件清单导出成文本（排障 / 数据提取用）
 static int pvf_list_main(void) {
     char out[MAX_PATH];
@@ -1163,6 +1189,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
 
     if (wcsstr(GetCommandLineW(), L"--db-test")) return db_test_main();
     if (wcsstr(GetCommandLineW(), L"--grab-probe")) return grab_probe_main();
+    if (wcsstr(GetCommandLineW(), L"--pvf-nstr=")) return pvf_nstr_main();
     if (wcsstr(GetCommandLineW(), L"--pvf-list")) return pvf_list_main();
     if (wcsstr(GetCommandLineW(), L"--pvf-extract=")) return pvf_extract_main();
     if (wcsstr(GetCommandLineW(), L"--db-dump")) return db_dump_main();

@@ -228,6 +228,10 @@ const Leaf *pvf_find(const Pvf *p, const char *path) {
     return NULL;
 }
 
+const char *pvf_nstr(const Pvf *p, u32 id) {
+    return idtab_get(&p->nstr, id);
+}
+
 int pvf_list(const Pvf *p, Buf *out) {
     for (int i = 0; i < p->nleaf; i++) {
         const char *path = p->leafs[i].path;
