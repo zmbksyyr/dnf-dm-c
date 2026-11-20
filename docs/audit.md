@@ -1,5 +1,7 @@
 # 三项目审查与优化记录
 
+按问题归纳的结论、适用条件和复核入口见[项目知识](knowledge.md)。本文保留各阶段原始范围；较早段落的计划和限制须结合后续修复阅读。
+
 ## 任务在线设为可交付（2026-11-19）
 
 “设为可交付”增加 v11 在线能力，限定当前城镇角色。游戏线程核对槽位及任务编号，
@@ -334,11 +336,11 @@ C 项目的 Win32 界面、串行数据库作业、独立物品模型和严格�
 不需要为“优雅”整体换框架，也不能用代码更少或 exe 更小证明功能更正确。
 本轮优先修复可能造成半写入、错误备份、不可见角色和协议异常的问题，并合并重复实现。
 
-对照源：
+对照源为当时的本机参考工程，以下保留历史路径；它们未随仓库分发：
 
-- [原版 SQL 与物品实现](../../DNF_pvf_python/dnfpkgtool/sqlManager2.py)。
-- [老唐版 SQL 与物品实现](../../老唐GMtool/2026.3.14GMTOOL源码/dnfpkgtool/sqlManager2.py)。
-- [老唐版角色备份实现](../../老唐GMtool/2026.3.14GMTOOL源码/dnfpkgtool/charBackupFrame.py)。
+- 原版 SQL 与物品实现：`../../DNF_pvf_python/dnfpkgtool/sqlManager2.py`。
+- 老唐版 SQL 与物品实现：`../../老唐GMtool/2026.3.14GMTOOL源码/dnfpkgtool/sqlManager2.py`。
+- 老唐版角色备份实现：`../../老唐GMtool/2026.3.14GMTOOL源码/dnfpkgtool/charBackupFrame.py`。
 
 检查了 C 的数据层、MySQL 协议、物品编码、备份还原、后台作业，以及编码、
 zlib、PVF/NPK 解析的关键路径；现有回归覆盖界面、队列、连接生命周期和主要写入。

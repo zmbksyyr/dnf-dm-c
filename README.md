@@ -97,3 +97,4 @@ python tools\regress.py    # 回归套件，见 tools\README.md
 详细说明见 [`tools/README.md`](tools/README.md)。
 
 三项目对照、已修复问题、验证范围与后续优化计划见 [`docs/audit.md`](docs/audit.md)。
+按问题归纳的内存态、事务、编码、数据布局和已排除方案见[项目知识](docs/knowledge.md)，排查既有问题时先读此文。
